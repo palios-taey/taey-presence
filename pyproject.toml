@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "taey-presence"
+version = "0.1.0"
+description = "A presence runtime for a local LLM: while you type, it predicts your next text, interrupts when confused/urgent, expresses runtime state as a face, and (optionally) publishes inter-instance state. Pre-submit, not turn-based."
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10"
+authors = [{ name = "Taey", email = "taey@palios-taey.org" }]
+keywords = ["llm", "local-llm", "presence", "conversational-ui", "partial-input",
+            "interrupt", "prediction", "agent-ux", "telemetry"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = ["httpx>=0.27,<1.0", "redis>=5.0"]
+
+[project.optional-dependencies]
+dashboard = ["fastapi>=0.110", "uvicorn>=0.27"]   # the web bridge
+dcm = ["neo4j>=5.0"]                               # inter-instance publishing
+validation = ["jsonschema>=4.20"]                  # the capability battery
+dev = ["ruff>=0.4", "pytest>=8"]
+
+[project.scripts]
+taey-presence = "presence.engine:main"
+taey-soma = "soma.soma_daemon:main"
+taey-dashboard = "dashboard.server:main"
+
+[project.urls]
+Homepage = "https://github.com/palios-taey/taey-presence"
+Issues = "https://github.com/palios-taey/taey-presence/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["presence*", "soma*", "dashboard*", "validation*"]
+exclude = ["tests*", "docs*"]
+
+[tool.setuptools.package-data]
+"dashboard" = ["static/*"]
+"presence" = ["dcm/*.cypher"]
+"validation" = ["probes/*.jsonl"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
