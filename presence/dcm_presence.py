@@ -85,6 +85,11 @@ def _extract_reaction_payload(content: str) -> dict:
     face_match = re.search(r'"face"\s*:\s*"([^"\n]+)"', text)
     feeling_match = re.search(r'"feeling"\s*:\s*"([^"\n]*)"', text)
     intensity_match = re.search(r'"intensity"\s*:\s*(-?\d+(?:\.\d+)?)', text)
+    thought_match = re.search(r'"thought"\s*:\s*"([^"\n]*)"', text)
+    prediction_match = re.search(r'"prediction"\s*:\s*"([^"\n]*)"', text)
+    clarification_match = re.search(r'"clarification"\s*:\s*"([^"\n]*)"', text)
+    state_match = re.search(r'"state"\s*:\s*"([^"\n]*)"', text)
+    confidence_match = re.search(r'"confidence"\s*:\s*(-?\d+(?:\.\d+)?)', text)
 
     extracted = {}
     if face_match:
@@ -94,6 +99,19 @@ def _extract_reaction_payload(content: str) -> dict:
     if intensity_match:
         try:
             extracted["intensity"] = float(intensity_match.group(1))
+        except ValueError:
+            pass
+    if thought_match:
+        extracted["thought"] = thought_match.group(1)
+    if prediction_match:
+        extracted["prediction"] = prediction_match.group(1)
+    if clarification_match:
+        extracted["clarification"] = clarification_match.group(1)
+    if state_match:
+        extracted["state"] = state_match.group(1)
+    if confidence_match:
+        try:
+            extracted["confidence"] = float(confidence_match.group(1))
         except ValueError:
             pass
     return extracted
@@ -375,10 +393,9 @@ class ThinkerWorker:
                 "messages": messages, "temperature": 0.2, "max_tokens": 150
             }, timeout=30.0)
             content = resp.json()["choices"][0]["message"]["content"]
-            start = content.find("{")
-            end = content.rfind("}") + 1
-            if start >= 0 and end > start:
-                return json.loads(content[start:end])
+            parsed = _extract_reaction_payload(content)
+            if parsed:
+                return parsed
         except Exception as e:
             self.log.debug("Think failed: %s", e)
         return {}
