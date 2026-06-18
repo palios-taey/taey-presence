@@ -137,7 +137,7 @@ cp .env.example .env                        # defaults already target localhost
 python3 soma/mira_soma.py &                 # somatic telemetry  → taey:soma:*
 python3 presence/prediction_worker.py &     # ghost text + classify
 python3 presence/dcm_presence.py &          # face / memory / thinker workers
-uvicorn dashboard.app:app --host 0.0.0.0 --port 5001   # dashboard → http://localhost:5001
+uvicorn dashboard.app:app --host 127.0.0.1 --port 5001   # dashboard → http://localhost:5001
 ```
 
 Each process is independent and restart-safe: if one is down the others keep
@@ -166,6 +166,15 @@ dashboard/static/               index.html (v2 UI), console.html, hmm.html.
   dashboard use blocking Redis/Neo4j clients from async code. That is acceptable
   for the current single-host setup, but it is still an architectural limit if
   you want tighter latency guarantees or heavier concurrency.
+- **Single user / single session.** All presence state lives in shared global
+  Redis keys (`taey:predict:*`, `taey:dcm:*`, `taey:soma:*`) — there is no
+  per-session namespacing. Two browsers/users against the same backend will
+  share and overwrite each other's face/ghost/interrupt state. This is a
+  single-operator local tool by design.
+- **Error responses surface exception text.** The diagnostic endpoints and a few
+  500 paths include `str(e)` in their JSON. That is useful operator-facing
+  diagnostics on a trusted-local host; if you ever expose the dashboard beyond
+  localhost, genericize those messages (and bind to `127.0.0.1`, the default).
 
 ## License
 

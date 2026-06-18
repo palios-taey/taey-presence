@@ -23,3 +23,8 @@ env/
 # Runtime / logs
 *.log
 *.pid
+
+# Local agent config (not part of the public artifact)
+.claude/
+AGENTS.md
+CLAUDE.md
