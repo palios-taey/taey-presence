@@ -48,12 +48,15 @@ FastAPI dashboard renders all of it.
 - **Cross-host / multi-instance coordination.** Everything coordinates through
   one Redis (and optionally one Neo4j) on a single trusted host. There is no
   cross-machine presence sync.
-- **DCM peer-state read-back.** `presence/dcm_presence.py` *writes* per-worker
-  state to Neo4j as `:TaeyInstance` nodes (`neo4j_write_state`) and a
-  `neo4j_read_peer_states` reader exists — but **nothing consumes it yet**. Peer
-  state is published, not read back into any worker's decisions. Wiring that is
-  the next planned step, not a current feature. Neo4j is fully optional today;
-  without it the presence worker runs Redis-only.
+- **DCM peer-state read-back — in the code, not yet wired (planned).** The
+  foundation ships here on purpose: `presence/dcm_presence.py` *writes* per-worker
+  state to Neo4j as `:TaeyInstance` nodes (`neo4j_write_state`), and a
+  `neo4j_read_peer_states` reader exists. What is **not** built is the
+  *consumption* — nothing reads peer state back into a worker's decisions yet, so
+  there is no live multi-worker coordination through it today. Wiring that
+  read-back (intra-host first) is the planned next step. Neo4j is fully optional
+  in the meantime; without it the presence worker runs Redis-only. (The bigger
+  cross-instance/cross-host story is further out and is **not** claimed.)
 
 ## Architecture
 
