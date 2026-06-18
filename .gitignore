@@ -1,15 +1,25 @@
+# Local environment / secrets — never commit
+.env
+.env.*
+!.env.example
+
+# Python
 __pycache__/
 *.py[cod]
+*.egg-info/
+.eggs/
 build/
 dist/
-*.egg-info/
 .venv/
 venv/
-.env
-*.log
-.ruff_cache/
-.pytest_cache/
+env/
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
 .DS_Store
-results/
-out/
-hf_datasets/
+
+# Runtime / logs
+*.log
+*.pid

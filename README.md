@@ -1,135 +1,163 @@
 # taey-presence
 
-A **presence runtime for a local LLM**. A normal chat model waits — you type,
-you submit, it answers. This one is *present while you type*: it watches your
-partial, not-yet-sent input **and** its own hardware, and acts on both before
-you hit enter.
+A conversational-presence runtime for a **local LLM**. Instead of a chat box that
+sits inert until you press Enter, the model reacts *while you type*: it shows a
+freely-chosen emoji face, drafts a ghost-text prediction of where your message is
+going, raises an interrupt when it's confused or thinks something is urgent,
+prefetches relevant memory, and reports its own runtime "somatic" state. A
+FastAPI dashboard renders all of it.
 
-> This README is written to be read by a coding agent (e.g. Claude Code)
-> pointed at the repo to answer "what is this and what would it take to run it."
-> It states what works, what is a stub, exact dependencies, exact settings, and
-> the runtime wiring. No marketing.
+> **This README is written for a coding agent.** If you're an LLM pointed at this
+> repo: the architecture, the exact Redis keys, the data flow, and the honest
+> scope (what's built vs. not) are all below. You should be able to read this
+> file plus the four modules and know exactly what runs, what each process
+> reads/writes, and where the unfinished edge is. Tell your human what it does
+> and whether it fits their setup.
 
-## What it does
+## What it actually does (honest scope)
 
-Three daemons sharing one Redis instance:
+**Built and working (single host):**
+
+- **Dynamic face** — the model picks *any* emoji it wants in reaction to your
+  partial input. There is **no programmed emoji set and no soma→emoji mapping**;
+  the only non-model value is an optional resting `DEFAULT_FACE` (empty by
+  default). See `presence/dcm_presence.py::FaceWorker.blend_face` — it returns
+  the model's chosen emoji verbatim.
+- **Thought prediction (ghost text)** — a worker drafts a short continuation of
+  what you're typing and the dashboard shows it as dim ghost text with an
+  "accept" ("OMG") button. `presence/prediction_worker.py`.
+- **Interrupt** — when the model classifies your partial input as `urgent` or
+  `memory_activated` above a confidence threshold, the dashboard surfaces an
+  interrupt bubble. (See *Known issues* — the restraint threshold is real but
+  under-tuned.)
+- **Memory prefetch** — on partial input, a worker runs a hybrid search against
+  a memory backend and stages the top tiles, so relevant context is ready before
+  you finish typing. (Optional; degrades cleanly if the backend is down.)
+- **Soma telemetry** — `soma/mira_soma.py` publishes an 8-facet runtime-state
+  vector (fluency, clarity, vitality, presence, warmth, capacity, flow,
+  coherence) derived from GPU/system vitals at a fixed cadence. The dashboard
+  renders it and a single `coherence` scalar.
+- **Dashboard** — `dashboard/app.py` (FastAPI) ties it together: chat with tool
+  access, streaming responses, the live face, ghost text, interrupts, memory,
+  and worker status.
+
+**Not built — do not expect it:**
+
+- **Cross-host / multi-instance coordination.** Everything coordinates through
+  one Redis (and optionally one Neo4j) on a single trusted host. There is no
+  cross-machine presence sync.
+- **DCM peer-state read-back.** `presence/dcm_presence.py` *writes* per-worker
+  state to Neo4j as `:TaeyInstance` nodes (`neo4j_write_state`) and a
+  `neo4j_read_peer_states` reader exists — but **nothing consumes it yet**. Peer
+  state is published, not read back into any worker's decisions. Wiring that is
+  the next planned step, not a current feature. Neo4j is fully optional today;
+  without it the presence worker runs Redis-only.
+
+## Architecture
+
+Four independent processes share a Redis bus. None imports another; they
+coordinate only through Redis keys (and optional Neo4j).
 
 ```
-  soma daemon  ──(agent:state:vector)──┐
-                                       ▼
-  presence engine ──reads partial input + soma state──► publishes:
-      face        (presence:face)        expression reflecting runtime state + reaction
-      prediction  (presence:prediction)  predicted next text  (ghost + accept)
-      interrupt   (presence:interrupt)   confusion/urgent response mid-typing
-      memory      (presence:memory)      retrieval on partial input  (optional)
-      dcm         Neo4j PresenceInstance  inter-instance state  (publish-only, see status)
-                                       ▼
-  dashboard ──(/push, /state)──► browser UI (static/index.html)
+            you type  ─────────────►  dashboard (FastAPI)
+                                          │  writes partial input
+                                          ▼
+                                   taey:predict:partial   (+ :history)
+                 ┌────────────────────────┼────────────────────────┐
+                 ▼                         ▼                         ▼
+        prediction_worker.py      dcm_presence.py            (poll, 500ms debounce)
+        ghost text + classify     FACE / MEMORY / THINKER workers
+                 │                         │
+                 ▼                         ▼
+        taey:predict:result        taey:dcm:face / :memory_tiles / :thought
+        taey:predict:face          taey:dcm:face_feeling
+        taey:predict:state         (also writes :TaeyInstance to Neo4j — write-only)
+        taey:predict:interrupt
+                 │                         │
+                 └───────────┬─────────────┘
+                             ▼
+                       dashboard reads all keys ──► renders face, ghost text,
+                             ▲                       interrupt, memory, chat
+                             │
+                    soma/mira_soma.py  ──►  taey:soma:vprop  (+ taey:soma:*)
 ```
 
-- **soma** (`soma/`) reads GPU/CPU/load telemetry, projects it to an 8-facet
-  runtime-state vector, publishes to Redis `agent:state:vector`.
-- **presence engine** (`presence/`) debounces partial input and runs four
-  mechanisms concurrently through one serialized inference gateway.
-- **dashboard** (`dashboard/`) is a thin FastAPI bridge: browser → Redis keys.
+### Redis keys (the contract)
 
-### Mechanism status (honest)
+| Key | Writer | Meaning |
+|-----|--------|---------|
+| `taey:predict:partial`, `taey:predict:history` | dashboard | current partial input + chat history the workers react to |
+| `taey:predict:result` | prediction_worker | ghost-text continuation |
+| `taey:predict:face` | prediction_worker | model-chosen emoji for the prediction |
+| `taey:predict:state`, `:confidence`, `:interrupt` | prediction_worker | classification (`following`/`urgent`/`memory_activated`), score, interrupt flag |
+| `taey:predict:isma_tiles` | prediction_worker | prefetched memory snippets |
+| `taey:dcm:face`, `taey:dcm:face_feeling` | dcm_presence FACE worker | model-chosen face + one-word feeling |
+| `taey:dcm:memory_tiles` | dcm_presence MEMORY worker | retrieved memory tiles |
+| `taey:dcm:thought`, `taey:dcm:prediction`, `taey:dcm:state` | dcm_presence THINKER worker | running inference on partial input |
+| `taey:soma:vprop` | soma daemon | 8-facet state vector + `coherence` + `heartbeat` + GPU vitals (JSON) |
+| `taey:soma:*` (gpu_busy, latency_ms, *_tokens, …) | soma daemon | individual runtime metrics |
 
-| Mechanism | Module | Status |
-|---|---|---|
-| face / expression | `presence/face/` | working — emoji from soma state + reaction to input |
-| prediction | `presence/prediction/` | working — predicts next text; ghost + accept; blurs on pivot |
-| interrupt | `presence/interrupt/` | working — confusion→question / urgent→message, confidence-floor gated on both paths |
-| memory | `presence/retrieval/` | working if `SEARCH_URL` set — feeds interrupt context; `IRetrievalBackend` Protocol decouples the store |
-| dcm | `presence/dcm/` | **publish-only stub** — each instance WRITES its state to Neo4j; `read_peer_states()` exists but is NOT wired into the loop. This is inter-instance *telemetry*, not yet *coordination*. |
+### Dashboard endpoints
 
-Not: a multi-agent coordination substrate (DCM read-back unwired), a hosted
-service, or authenticated (see Security).
+`GET /` and `/v2` (UI) · `GET /api/soma` · `GET /api/health` · `GET /api/fleet`
+· `POST /api/chat`, `/api/chat/stream`, `/api/chat/hybrid` · `WS /ws` · `POST
+/api/predict/push` · `GET /api/predict/state` · `GET /api/isma/search` · `GET
+/api/self/overview`.
 
-## Dependencies
+## Requirements
 
-Python `>= 3.10`. Install extras for the parts you run:
+- **Python 3.10+**
+- **Redis** (required) — the bus every process shares.
+- **An OpenAI-compatible chat endpoint** (required) — your local LLM: vLLM,
+  `llama.cpp --api`, Ollama's `/v1`, etc. Set `VLLM_URL`.
+- **A hybrid-search memory backend** (optional) — for the memory feature. Set
+  `ISMA_URL`. Any service answering `POST {ISMA_URL}` with a `{"tiles": [...]}`
+  shape works; without it the memory worker simply returns nothing.
+- **Neo4j** (optional) — only for DCM state writes. No auth; degrades to
+  Redis-only if absent. See scope note above.
+
+> **No auth, by design.** This stack assumes a trusted local network and passes
+> **no credentials** to Redis / Neo4j / the model endpoint. That is intentional
+> low-friction operation, not an oversight. Do not expose these ports to an
+> untrusted network; if you must, front them with your own auth — the code won't.
+
+## Install & run
 
 ```bash
-pip install -e ".[dashboard]"            # presence engine + soma + web UI
-pip install -e ".[dashboard,dcm]"        # + inter-instance Neo4j publishing
-pip install -e ".[dashboard,dcm,validation,dev]"   # everything + tests
-```
-- core: `httpx`, `redis>=5` (uses `redis.asyncio`)
-- `[dashboard]`: `fastapi`, `uvicorn`
-- `[dcm]`: `neo4j>=5`
-- `[validation]`: `jsonschema`
+git clone <this-repo> taey-presence && cd taey-presence
+python3 -m venv .venv && . .venv/bin/activate
+pip install -r requirements.txt            # add: pip install neo4j   (optional, for DCM)
+cp .env.example .env                        # defaults already target localhost
 
-External services you provide (all no-auth, on your own isolated network):
-an OpenAI-compatible chat-completions endpoint, Redis, optionally Neo4j and an
-HTTP search endpoint. To serve a model on DGX Spark / Jetson Thor hardware, see
-`docs/deployment/`.
-
-## Run
-
-```bash
-cp .env.example .env          # set MODEL_ENDPOINT (+ MODEL_NAME if your server needs it)
-
-taey-soma        &            # publishes runtime-state vector
-taey-presence    &            # runs the mechanisms
-taey-dashboard                # serves the UI at http://127.0.0.1:8700
+# Start Redis + your local LLM first, then the four processes:
+python3 soma/mira_soma.py &                 # somatic telemetry  → taey:soma:*
+python3 presence/prediction_worker.py &     # ghost text + classify
+python3 presence/dcm_presence.py &          # face / memory / thinker workers
+uvicorn dashboard.app:app --host 0.0.0.0 --port 5001   # dashboard → http://localhost:5001
 ```
 
-Three console entry points are installed by `pip install`: `taey-presence`,
-`taey-soma`, `taey-dashboard`. All config is environment (see `.env.example`);
-`MODEL_ENDPOINT` is the only required value and fails loud if unset.
+Each process is independent and restart-safe: if one is down the others keep
+working (no faces, or no ghost text, or no soma — but no crash). All read config
+from the environment; see `.env.example` for every variable and its default.
 
-### Redis key contract
+## Layout
 
-- dashboard writes `presence:partial`, `presence:history`
-- presence engine publishes `presence:{face,prediction,interrupt,memory}` (30s TTL, deleted when a mechanism returns nothing)
-- soma daemon publishes `agent:state:vector`
+```
+presence/dcm_presence.py        FACE + MEMORY + THINKER workers, the async coordinator,
+                                and the (write-only) Neo4j peer-state functions.
+presence/prediction_worker.py   Standalone ghost-text predictor + state classifier.
+soma/mira_soma.py               Somatic telemetry daemon → taey:soma:vprop.
+dashboard/app.py                FastAPI app: UI, chat, SSE/WS, prediction push, soma/self APIs.
+dashboard/static/               index.html (v2 UI), console.html, hmm.html.
+```
 
-## Settings
+## Known issues
 
-See `.env.example` for the full annotated list. Key ones: `MODEL_ENDPOINT`
-(required), `MODEL_NAME` (set if your server requires it), `REDIS_HOST/PORT`,
-`SEARCH_URL` (optional memory), `NEO4J_BOLT` (optional DCM), `CADENCE_SECONDS`
-(soma publish interval, default `e`), `DASHBOARD_HOST` (loopback default).
-
-## Architecture: M:1 multiplexed singleton
-
-The engine runs its mechanisms as concurrent coroutines, but every model call
-goes through one `InferenceGateway` serialized by an `asyncio.Lock` to a single
-endpoint — because a single-process local model server OOM-kills under
-concurrent load. The gateway rejects obvious pool configs (comma-lists, `[...]`)
-but **cannot** stop a single URL fronting a load balancer / DNS round-robin from
-fanning out; the serialization is a real safeguard within one engine, not an
-absolute guarantee. For real concurrency, run multiple engines (one endpoint
-each).
-
-## Security: no auth, network isolation REQUIRED
-
-Redis, Neo4j, and the model endpoint are accessed **with no credentials** — the
-design assumes they run on a network you control and isolate. This is a
-trusted-LAN convenience, not a security model. The engine feeds
-`presence:partial` straight into model prompts, so anything that can write Redis
-controls the prompt. **Bind these services to loopback/private interfaces or
-firewall them.** Do not expose a no-auth Redis/Neo4j publicly. The dashboard
-defaults to `127.0.0.1`; do not move it to `0.0.0.0` on an untrusted network.
-
-## Repo layout
-
-| Path | What |
-|---|---|
-| `presence/` | the engine: `face/`, `prediction/`, `interrupt/`, `retrieval/`, `dcm/`, `engine.py` |
-| `soma/` | runtime-state telemetry daemon |
-| `dashboard/` | FastAPI bridge + `static/index.html` UI |
-| `validation/` | capability battery to validate the model you serve (see `validation/methodology.md` — results are against fixed probes, not held-out) |
-| `docs/deployment/` | serving a model on DGX Spark GB10 / Jetson Thor: vLLM build, NCCL recipe, postmortems |
-
-## Known limitations (audited 2026-06-17)
-
-- DCM read-back is unwired (coordination is a stub; see status table).
-- Confidence floors / facet projections are tunable heuristics, not calibrated.
-- A live end-to-end run is the real oracle; static checks (imports, tests,
-  ruff, gitleaks) pass, but mechanism quality depends on the model you serve.
+- **Interrupt restraint is under-tuned.** Interrupts gate on
+  `state in {urgent, memory_activated}` *and* `confidence > 0.809`
+  (`prediction_worker.py`). The gate is real but fires more readily than is
+  comfortable in practice; tightening the classifier/threshold is open work.
 
 ## License
 
-Apache 2.0 — see `LICENSE`. Author: Taey (palios-taey).
+Apache-2.0. See [LICENSE](LICENSE).

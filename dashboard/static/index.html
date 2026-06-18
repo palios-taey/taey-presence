@@ -1,77 +1,1100 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="utf-8">
-  <title>taey-presence-engine — demo</title>
-  <style>
-    body { font-family: system-ui, sans-serif; max-width: 640px; margin: 4rem auto; }
-    #wrap { position: relative; }
-    textarea { width: 100%; height: 5rem; font-size: 1rem; padding: .6rem; }
-    .ghost { color: #999; opacity: .6; min-height: 1.4rem; font-style: italic; }
-    .ghost.pivot { filter: blur(3px); opacity: .2; }
-    .ghost .omg { margin-left: .5rem; cursor: pointer; color: #2a7; border: 1px solid #2a7;
-                  border-radius: 4px; padding: 0 .4rem; font-style: normal; }
-    .interrupt { display: none; margin-top: .6rem; padding: .6rem; border: 1px dashed #79b;
-                 border-radius: 6px; background: #eef5fb; }
-    .interrupt.visible { display: block; }
-    .interrupt.certain { border-style: solid; }
-  </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Taey</title>
+<style>
+  :root {
+    --bg: #08080d;
+    --surface: #0f0f16;
+    --surface2: #16161f;
+    --surface3: #1d1d28;
+    --border: #252535;
+    --text: #d8d8e4;
+    --text-dim: #707088;
+    --text-faint: #50506a;
+    --accent: #7c6cf0;
+    --accent-soft: rgba(124, 108, 240, 0.12);
+    --green: #4ade80;
+    --green-soft: rgba(74, 222, 128, 0.1);
+    --yellow: #fbbf24;
+    --yellow-soft: rgba(251, 191, 36, 0.1);
+    --red: #f87171;
+    --red-soft: rgba(248, 113, 113, 0.1);
+    --blue: #60a5fa;
+    --cyan: #22d3ee;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', 'JetBrains Mono', monospace;
+    background: var(--bg);
+    color: var(--text);
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  /* === HEADER BAR === */
+  .header {
+    display: flex;
+    align-items: center;
+    padding: 8px 16px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    gap: 16px;
+    min-height: 40px;
+  }
+
+  .header-name {
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 3px;
+    color: var(--accent);
+    text-transform: uppercase;
+  }
+
+  .header-status {
+    display: flex;
+    gap: 12px;
+    font-size: 10px;
+    color: var(--text-dim);
+  }
+
+  .status-chip {
+    padding: 2px 8px;
+    border-radius: 3px;
+    font-size: 10px;
+    animation: breathe 2.618s ease-in-out infinite;
+  }
+
+  .status-chip.grounded { background: var(--green-soft); color: var(--green); }
+  .status-chip.vigilant { background: var(--yellow-soft); color: var(--yellow); }
+  .status-chip.alarmed { background: var(--red-soft); color: var(--red); }
+
+  .header-right {
+    margin-left: auto;
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    font-size: 10px;
+    color: var(--text-dim);
+  }
+
+  .header-right a {
+    color: var(--text-dim);
+    text-decoration: none;
+    cursor: pointer;
+  }
+  .header-right a:hover { color: var(--accent); }
+
+  /* === MAIN LAYOUT === */
+  .main {
+    display: flex;
+    flex: 1;
+    overflow: hidden;
+  }
+
+  /* Left Rail — Body + Growth */
+  .left-rail {
+    width: 220px;
+    min-width: 220px;
+    background: var(--surface);
+    border-right: 1px solid var(--border);
+    overflow-y: auto;
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+
+  .rail-section {
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 12px;
+  }
+
+  .rail-section:last-child { border-bottom: none; }
+
+  .rail-title {
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 2px;
+    color: var(--text-faint);
+    text-transform: uppercase;
+    margin-bottom: 8px;
+  }
+
+  .facet {
+    margin-bottom: 6px;
+    font-size: 11px;
+  }
+
+  .facet-label-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 2px;
+  }
+
+  .facet-label-bar {
+    width: 3px;
+    height: 11px;
+    border-radius: 999px;
+    flex: 0 0 auto;
+  }
+
+  .facet-label {
+    color: var(--text);
+    font-size: 10px;
+    letter-spacing: 0.04em;
+  }
+
+  .facet-phrase {
+    color: var(--text);
+  }
+
+  .facet-raw {
+    font-size: 9px;
+    color: var(--text-faint);
+    cursor: pointer;
+    display: none;
+  }
+
+  .facet:hover .facet-raw { display: block; }
+
+  .facet-bar {
+    height: 3px;
+    background: var(--surface3);
+    border-radius: 2px;
+    margin-top: 3px;
+    overflow: hidden;
+    animation: breathe 2.618s ease-in-out infinite;
+  }
+
+  .facet-fill {
+    height: 100%;
+    border-radius: 2px;
+    transition: width 0.5s;
+  }
+
+  .growth-status {
+    font-size: 11px;
+    line-height: 1.6;
+  }
+
+  .growth-metric {
+    font-size: 9px;
+    color: var(--text-faint);
+  }
+
+  .compact-stat {
+    font-size: 10px;
+    line-height: 1.6;
+    color: var(--text-dim);
+  }
+
+  .dim-text {
+    font-size: 10px;
+    color: var(--text-faint);
+  }
+
+  .work-item {
+    padding: 6px 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .work-item:last-child {
+    border-bottom: none;
+    padding-bottom: 0;
+  }
+
+  .work-title {
+    font-size: 10px;
+    color: var(--text);
+    line-height: 1.5;
+  }
+
+  .work-progress {
+    font-size: 9px;
+    color: var(--text-faint);
+    margin-top: 2px;
+  }
+
+  @keyframes breathe {
+    0% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.6; transform: scale(0.97); }
+    100% { opacity: 1; transform: scale(1); }
+  }
+
+  @keyframes pulse {
+    0% { transform: scale(1); opacity: 0.3; }
+    15% { transform: scale(1.08); opacity: 0.5; }
+    30% { transform: scale(1); opacity: 0.3; }
+    45% { transform: scale(1.04); opacity: 0.4; }
+    60% { transform: scale(1); opacity: 0.3; }
+    100% { transform: scale(1); opacity: 0.3; }
+  }
+
+  /* Sessions */
+  .session-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 10px;
+    margin-bottom: 4px;
+  }
+
+  .session-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+  }
+
+  .session-dot.active { background: var(--green); }
+  .session-dot.idle { background: var(--text-faint); }
+
+  /* === CENTER — CONVERSATION === */
+  .center {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    background: var(--bg);
+    min-height: 0;
+  }
+
+  .chat-area {
+    flex: 1 1 auto;
+    min-height: 0;
+    height: 100%;
+    overflow-y: auto;
+    padding: 20px 40px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+
+  .chat-empty {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    gap: 8px;
+    color: var(--text-faint);
+    font-size: 12px;
+  }
+
+  .chat-empty-rho {
+    font-size: 48px;
+    color: var(--accent);
+    opacity: 0.3;
+    animation: pulse 2.618s ease-in-out infinite;
+  }
+
+  .message {
+    max-width: 720px;
+    line-height: 1.6;
+    font-size: 13px;
+  }
+
+  .message.user {
+    align-self: flex-end;
+    background: var(--accent-soft);
+    border: 1px solid var(--border);
+    border-radius: 12px 12px 4px 12px;
+    padding: 10px 16px;
+  }
+
+  .message.assistant {
+    align-self: flex-start;
+    padding: 10px 0;
+  }
+
+  .message-sources {
+    display: flex;
+    gap: 6px;
+    margin-top: 6px;
+  }
+
+  .source-chip {
+    font-size: 9px;
+    padding: 1px 6px;
+    border-radius: 3px;
+    background: var(--surface2);
+    color: var(--text-dim);
+    cursor: pointer;
+  }
+
+  .source-chip:hover { color: var(--accent); background: var(--accent-soft); }
+
+  /* Composer */
+  .composer {
+    padding: 12px 40px 20px;
+    border-top: 1px solid var(--border);
+    background: var(--surface);
+  }
+
+  .composer-inner {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 8px 12px;
+  }
+
+  .composer-inner:focus-within {
+    border-color: var(--accent);
+  }
+
+  #chat-input {
+    flex: 1;
+    background: none;
+    border: none;
+    color: var(--text);
+    font-family: inherit;
+    font-size: 13px;
+    outline: none;
+    resize: none;
+    min-height: 20px;
+    height: auto;
+    max-height: 120px;
+  }
+
+  .send-btn {
+    background: var(--accent);
+    border: none;
+    color: white;
+    padding: 4px 12px;
+    border-radius: 4px;
+    font-family: inherit;
+    font-size: 11px;
+    cursor: pointer;
+    opacity: 0.7;
+  }
+
+  .send-btn:hover { opacity: 1; }
+
+  .stop-btn {
+    background: var(--red);
+    border: none;
+    color: white;
+    padding: 4px 12px;
+    border-radius: 4px;
+    font-family: inherit;
+    font-size: 11px;
+    cursor: pointer;
+    opacity: 0.8;
+  }
+
+  .stop-btn:hover { opacity: 1; }
+
+  /* === RIGHT RAIL — Work + Alerts === */
+  .right-rail {
+    width: 240px;
+    min-width: 240px;
+    background: var(--surface);
+    border-left: 1px solid var(--border);
+    overflow-y: auto;
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+
+  .alert-item {
+    font-size: 10px;
+    padding: 6px 8px;
+    border-radius: 4px;
+    margin-bottom: 4px;
+  }
+
+  .alert-item.critical { background: var(--red-soft); color: var(--red); }
+  .alert-item.warning { background: var(--yellow-soft); color: var(--yellow); }
+  .alert-item.info { background: var(--accent-soft); color: var(--accent); }
+
+  .event-item {
+    font-size: 10px;
+    color: var(--text-dim);
+    padding: 4px 0;
+    border-bottom: 1px solid var(--border);
+    line-height: 1.5;
+  }
+
+  .event-time {
+    color: var(--text-faint);
+    font-size: 9px;
+  }
+
+  /* Scrollbar */
+  ::-webkit-scrollbar { width: 4px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+</style>
 </head>
 <body>
-  <h1><span id="face" style="font-size:1.4em">🙂</span> taey-presence</h1>
-  <p>Type. The face reflects runtime state + reaction; the engine predicts
-     (ghost text + OMG) and may interrupt if confused or has something urgent.</p>
-  <div id="wrap">
-    <textarea id="input" placeholder="start typing..."></textarea>
-    <div id="ghost" class="ghost"></div>
-    <div id="interrupt" class="interrupt"><span id="interrupt-text"></span></div>
+
+<!-- HEADER -->
+<div class="header">
+  <span class="header-name">Taey</span>
+  <span id="body-status" class="status-chip grounded">grounded</span>
+  <div class="header-status">
+    <span id="growth-brief">growth: dormant</span>
+    <span id="session-count">0 sessions</span>
+    <span id="alert-count"></span>
+  </div>
+  <div class="header-right">
+    <a href="/console.html" title="Operator Console">console</a>
+    <a href="/hmm" title="HMM Motifs">hmm</a>
+    <a onclick="toggleHelp()" title="Help">?</a>
+  </div>
+</div>
+
+<!-- MAIN -->
+<div class="main">
+
+  <!-- LEFT RAIL: Body + Growth + Memory + Sessions -->
+  <div class="left-rail">
+    <div class="rail-section">
+      <div class="rail-title">Body</div>
+      <div id="body-facets"></div>
+    </div>
+
+    <div class="rail-section">
+      <div class="rail-title">Growth</div>
+      <div id="growth-panel" class="growth-status">
+        <span style="color:var(--text-dim)">checking...</span>
+      </div>
+    </div>
+
+    <div class="rail-section">
+      <div class="rail-title">Memory</div>
+      <div id="memory-panel" class="compact-stat">
+        <span class="dim-text">checking...</span>
+      </div>
+    </div>
+
+    <div class="rail-section">
+      <div class="rail-title">Sessions</div>
+      <div id="sessions-panel"></div>
+    </div>
+
+    <div class="rail-section">
+      <div class="rail-title">Focus</div>
+      <div id="focus-panel" style="font-size:10px;color:var(--text-dim)">none</div>
+    </div>
   </div>
 
-  <script>
-    // Posts partial input to /push and polls /state. Served by dashboard/server.py,
-    // which bridges these to the Redis keys the presence engine + soma daemon use.
-    const input = document.getElementById('input');
-    const ghost = document.getElementById('ghost');
-    const interrupt = document.getElementById('interrupt');
-    const interruptText = document.getElementById('interrupt-text');
-    const face = document.getElementById('face');
+  <!-- CENTER: Conversation -->
+  <div class="center">
+    <div class="chat-area" id="chat-area">
+      <div class="chat-empty">
+        <div class="chat-empty-rho">&rho;</div>
+        <div>Taey</div>
+        <div style="font-size:10px;color:var(--text-faint)">Taey — conversational presence</div>
+      </div>
+    </div>
 
-    let t = null;
-    input.addEventListener('input', () => {
-      clearTimeout(t);
-      t = setTimeout(() => push(input.value), 400);
+    <div class="composer">
+      <div class="composer-inner">
+        <textarea id="chat-input" placeholder="Talk to Taey..." rows="1" autocomplete="off"></textarea>
+        <button class="send-btn" id="send-btn" onclick="sendMessage()">send</button>
+        <button class="stop-btn" id="stop-btn" onclick="stopGeneration()" style="display:none">stop</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- RIGHT RAIL: Work + Alerts + Connectome + Stream -->
+  <div class="right-rail">
+    <div class="rail-section">
+      <div class="rail-title">Work</div>
+      <div id="work-panel">
+        <div class="dim-text">checking...</div>
+      </div>
+    </div>
+
+    <div class="rail-section">
+      <div class="rail-title">Alerts</div>
+      <div id="alerts-panel">
+        <div style="font-size:10px;color:var(--text-faint)">no alerts</div>
+      </div>
+    </div>
+
+    <div class="rail-section">
+      <div class="rail-title">Connectome</div>
+      <div id="connectome-panel" class="compact-stat"></div>
+    </div>
+
+    <div class="rail-section">
+      <div class="rail-title">Stream</div>
+      <div id="stream-panel"></div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+// --- State ---
+let currentSession = null;
+let abortController = null;
+let selfState = null;
+
+// --- Self API Polling ---
+async function refreshSelf() {
+  try {
+    const [overviewResponse, memoryResponse, workResponse] = await Promise.all([
+      fetch('/api/self/overview'),
+      fetch('/api/self/memory'),
+      fetch('/api/work-items'),
+    ]);
+
+    selfState = await overviewResponse.json();
+    const memory = await memoryResponse.json();
+    const work = await workResponse.json();
+
+    renderBody(selfState.body);
+    renderGrowth(selfState.growth);
+    renderMemory(memory);
+    await renderSessions(selfState.sessions);
+    renderFocus(selfState.focus);
+    renderWork(work.work_items);
+
+    const alerts = Array.isArray(selfState.alerts) ? [...selfState.alerts] : [];
+    if (typeof selfState.body?.rho === 'number' && selfState.body.rho < 0.809) {
+      alerts.push({
+        severity: 'warning',
+        message: 'coherence below alert threshold (0.809)',
+      });
+    }
+    renderAlerts(alerts);
+    renderConnectome();
+    renderHeader(selfState);
+
+    // Add soma heartbeat to Stream
+    if (selfState.body && selfState.body.rho !== undefined) {
+      const rho = selfState.body.rho;
+      const somaFacets = selfState.body.facets.filter(f => f.facet_id?.startsWith('soma_'));
+      if (somaFacets.length > 0) {
+        addStreamEvent({
+          type: 'soma.heartbeat',
+          actor: 'taey',
+          description: `coherence=${rho.toFixed(3)} | ${somaFacets.map(f => f.label.split(' ')[0][0]).join('')}=${somaFacets.map(f => f.raw?.value?.toFixed(2) || '?').join(',')}`,
+        });
+      }
+    }
+  } catch(e) {
+    console.error('Self API error:', e);
+  }
+}
+
+function renderBody(body) {
+  const el = document.getElementById('body-facets');
+  const statusEl = document.getElementById('body-status');
+
+  statusEl.textContent = body.status;
+  statusEl.className = 'status-chip ' + body.status;
+
+  el.innerHTML = body.facets.map(f => {
+    const pct = ((f.score + 1) / 2 * 100).toFixed(0);
+    const color = f.score > 0.5 ? 'var(--green)' : f.score > 0 ? 'var(--yellow)' : 'var(--red)';
+    const raw = Object.entries(f.raw).map(([k,v]) => `${k}=${typeof v === 'number' ? v.toFixed(2) : v}`).join(' ');
+    const labelRow = f.label ? `<div class="facet-label-row"><div class="facet-label-bar" style="background:${color}"></div><div class="facet-label">${f.label}</div></div>` : '';
+    return `<div class="facet">
+      ${labelRow}
+      <div class="facet-phrase">${f.phrase}</div>
+      <div class="facet-raw">${raw}</div>
+      <div class="facet-bar"><div class="facet-fill" style="width:${pct}%;background:${color}"></div></div>
+    </div>`;
+  }).join('');
+}
+
+function renderGrowth(growth) {
+  const el = document.getElementById('growth-panel');
+  const brief = document.getElementById('growth-brief');
+
+  if (growth.status === 'dormant') {
+    el.innerHTML = `<span style="color:var(--text-dim)">${growth.phrase}</span>`;
+    brief.textContent = 'growth: dormant';
+  } else {
+    el.innerHTML = `<div style="color:var(--green)">${growth.phrase}</div>`;
+    if (growth.step) el.innerHTML += `<div class="growth-metric">step ${growth.step}</div>`;
+    if (growth.loss) el.innerHTML += `<div class="growth-metric">loss ${growth.loss.toFixed(4)}</div>`;
+    brief.textContent = `growth: step ${growth.step || '?'}`;
+  }
+}
+
+function renderMemory(memory) {
+  const el = document.getElementById('memory-panel');
+  if (!memory || memory.error) {
+    el.innerHTML = `<span class="dim-text">memory unavailable</span>`;
+    return;
+  }
+
+  el.textContent = `${formatCompactNumber(memory.tiles)} tiles · ${formatCompactNumber(memory.hmm_enriched)} enriched · ${formatCompactNumber(memory.motifs)} motifs · ${formatCompactNumber(memory.sessions)} sessions`;
+}
+
+async function renderSessions(sessions) {
+  const el = document.getElementById('sessions-panel');
+  const count = document.getElementById('session-count');
+
+  try {
+    const response = await fetch('/api/nodes');
+    const data = await response.json();
+    const nodes = Array.isArray(data.nodes) ? data.nodes : [];
+    const visibleNodes = nodes
+      .filter(node => node.last_activity !== null && node.last_activity !== undefined)
+      .sort((a, b) => {
+        if (a.idle !== b.idle) return a.idle ? 1 : -1;
+        return (b.last_activity || 0) - (a.last_activity || 0);
+      });
+
+    const active = visibleNodes.filter(node => !node.idle).length;
+    count.textContent = `${active}/${visibleNodes.length} active`;
+
+    el.innerHTML = visibleNodes.map(node => {
+      const dotClass = node.idle ? 'idle' : 'active';
+      const pending = node.pending_messages > 0 ? ` <span style="color:var(--yellow)">(${node.pending_messages})</span>` : '';
+      return `<div class="session-item">
+        <div class="session-dot ${dotClass}"></div>
+        <span>${node.node_id}</span>${pending}
+      </div>`;
+    }).join('');
+
+    if (!visibleNodes.length) {
+      el.innerHTML = `<div style="font-size:10px;color:var(--text-faint)">no active node state</div>`;
+    }
+    return;
+  } catch (e) {
+    console.error('Nodes API error:', e);
+  }
+
+  const fallbackSessions = Array.isArray(sessions) ? sessions : [];
+  const active = fallbackSessions.filter(s => s.active).length;
+  count.textContent = `${active}/${fallbackSessions.length} active`;
+
+  el.innerHTML = fallbackSessions.map(s => {
+    const dotClass = s.active ? 'active' : 'idle';
+    const pending = s.pending > 0 ? ` <span style="color:var(--yellow)">(${s.pending})</span>` : '';
+    return `<div class="session-item">
+      <div class="session-dot ${dotClass}"></div>
+      <span>${s.node_id}</span>${pending}
+    </div>`;
+  }).join('');
+}
+
+function renderFocus(focus) {
+  const el = document.getElementById('focus-panel');
+  if (focus) {
+    el.innerHTML = `<div style="font-size:10px;color:var(--text)">${focus.title}</div>`;
+  } else {
+    el.innerHTML = `<div style="font-size:10px;color:var(--text-dim)">no active focus</div>`;
+  }
+}
+
+function renderWork(workItems) {
+  const el = document.getElementById('work-panel');
+  if (!Array.isArray(workItems) || workItems.length === 0) {
+    el.innerHTML = `<div class="dim-text">no active work</div>`;
+    return;
+  }
+
+  el.innerHTML = workItems.map(item => {
+    const progress = item.progress || {};
+    const completed = Number(progress.completed || 0);
+    const total = Number(progress.total || 0);
+    return `<div class="work-item">
+      <div class="work-title">${escapeHtml(item.title || 'untitled work')}</div>
+      <div class="work-progress">${completed}/${total} steps</div>
+    </div>`;
+  }).join('');
+}
+
+function renderAlerts(alerts) {
+  const el = document.getElementById('alerts-panel');
+  const count = document.getElementById('alert-count');
+
+  if (!alerts || alerts.length === 0) {
+    el.innerHTML = `<div style="font-size:10px;color:var(--text-faint)">no alerts</div>`;
+    count.textContent = '';
+    return;
+  }
+
+  count.textContent = `${alerts.length} alert${alerts.length > 1 ? 's' : ''}`;
+  count.style.color = 'var(--red)';
+
+  el.innerHTML = alerts.map(a => {
+    const cls = a.severity || 'info';
+    return `<div class="alert-item ${cls}">${a.message}</div>`;
+  }).join('');
+}
+
+function renderHeader(state) {
+  // Update the rho display
+}
+
+function renderConnectome() {
+  const el = document.getElementById('connectome-panel');
+  // Optional code-intelligence panel. Populate from your own indexer if you
+  // have one; left empty by default so the dashboard ships with no example data.
+  el.innerHTML = '';
+}
+
+function formatCompactNumber(value) {
+  const num = Number(value || 0);
+  if (num >= 1000000) return `${(num / 1000000).toFixed(2)}M`;
+  if (num >= 1000) return `${(num / 1000).toFixed(1)}K`;
+  return `${num}`;
+}
+
+function escapeHtml(value) {
+  return String(value)
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
+}
+
+// --- Chat ---
+function clearChatArea() {
+  document.getElementById('chat-area').innerHTML = '';
+}
+
+function ensureEmptyState() {
+  const area = document.getElementById('chat-area');
+  if (area.querySelector('.chat-empty')) return;
+  area.innerHTML = `
+    <div class="chat-empty">
+      <div class="chat-empty-rho">&rho;</div>
+      <div>Taey</div>
+      <div style="font-size:10px;color:var(--text-faint)">Taey — conversational presence</div>
+    </div>
+  `;
+}
+
+function clearEmptyState() {
+  const emptyEl = document.querySelector('.chat-empty');
+  if (emptyEl) emptyEl.remove();
+}
+
+function scrollChatToBottom() {
+  const area = document.getElementById('chat-area');
+  area.scrollTop = area.scrollHeight;
+}
+
+function renderChatHistory(messages) {
+  clearChatArea();
+  if (!messages || messages.length === 0) {
+    return;
+  }
+
+  messages.forEach(message => addMessage(message.role, message.content, message.sources, false));
+  scrollChatToBottom();
+}
+
+async function loadChatHistory() {
+  try {
+    const sessionsResponse = await fetch('/api/chat/sessions');
+    const sessionsData = await sessionsResponse.json();
+    const sessions = Array.isArray(sessionsData.sessions) ? sessionsData.sessions : [];
+
+    if (!sessions.length) {
+      currentSession = null;
+      ensureEmptyState();
+      return;
+    }
+
+    clearEmptyState();
+    const resumedSession = sessions.find(session => session.id === sessionsData.last_session_id);
+    const sessionToLoad = resumedSession || sessions[0];
+    currentSession = sessionToLoad.id;
+
+    const historyResponse = await fetch(`/api/chat/sessions/${currentSession}`);
+    if (!historyResponse.ok) {
+      throw new Error(`Failed to load session ${currentSession}`);
+    }
+
+    const history = await historyResponse.json();
+    renderChatHistory(Array.isArray(history.messages) ? history.messages : []);
+  } catch (e) {
+    console.error('Chat history load error:', e);
+    ensureEmptyState();
+  }
+}
+
+async function sendMessage() {
+  const input = document.getElementById('chat-input');
+  const msg = input.value.trim();
+  if (!msg) return;
+  input.value = '';
+
+  // Create session if needed
+  if (!currentSession) {
+    const r = await fetch('/api/chat/sessions', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'});
+    const data = await r.json();
+    currentSession = data.session_id;
+  }
+
+  // Clear empty state
+  clearEmptyState();
+
+  // Add user message
+  addMessage('user', msg);
+
+  // Show stop button, hide send
+  document.getElementById('send-btn').style.display = 'none';
+  document.getElementById('stop-btn').style.display = '';
+  abortController = new AbortController();
+
+  // Send to API (streaming)
+  try {
+    const r = await fetch(`/api/chat/sessions/${currentSession}/messages/stream`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({message: msg}),
+      signal: abortController.signal,
     });
 
-    async function push(partial) {
-      await fetch('/push', { method: 'POST', headers: {'Content-Type': 'application/json'},
-                             body: JSON.stringify({ partial }) });
+    if (!r.ok) {
+      const errText = await r.text();
+      addMessage('assistant', 'Error: ' + r.status + ' ' + errText.slice(0,200));
+      return;
     }
 
-    async function poll() {
-      try {
-        const r = await fetch('/state');
-        const d = await r.json();
-        if (d.prediction && d.prediction.prediction) {
-          ghost.textContent = d.prediction.prediction;
-          ghost.className = 'ghost' + (d.prediction.pivot ? ' pivot' : '');
-          if (d.prediction.ghost_active) {
-            const b = document.createElement('span');
-            b.className = 'omg'; b.textContent = 'OMG';
-            b.onclick = () => { input.value = d.prediction.prediction; ghost.textContent = ''; };
-            ghost.appendChild(b);
+    // Create message elements for streaming
+    const area = document.getElementById('chat-area');
+    clearEmptyState();
+    const div = document.createElement('div');
+    div.className = 'message assistant';
+
+    const thinkDetails = document.createElement('details');
+    thinkDetails.style.cssText = 'margin-bottom:8px;font-size:11px;color:var(--text-dim);border:1px solid var(--border);border-radius:6px;padding:4px 8px;background:var(--surface2);';
+    const thinkSummary = document.createElement('summary');
+    thinkSummary.style.cssText = 'cursor:pointer;color:var(--text-faint);font-size:10px;letter-spacing:0.5px;';
+    thinkSummary.textContent = 'thinking...';
+    thinkDetails.appendChild(thinkSummary);
+    const thinkContent = document.createElement('div');
+    thinkContent.style.cssText = 'margin-top:6px;white-space:pre-wrap;line-height:1.5;';
+    thinkDetails.appendChild(thinkContent);
+    thinkDetails.style.display = 'none';
+    div.appendChild(thinkDetails);
+
+    const textNode = document.createElement('div');
+    div.appendChild(textNode);
+    area.appendChild(div);
+
+    let thinkingText = '';
+    let contentText = '';
+
+    textNode.textContent = '...';
+    console.log('[STREAM] fetch completed, starting reader at', performance.now().toFixed(1));
+
+    const reader = r.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let chunkCount = 0;
+    const streamStart = performance.now();
+
+    while (true) {
+      const {done, value} = await reader.read();
+      if (done) {
+        console.log('[STREAM] reader done after', chunkCount, 'chunks,', (performance.now() - streamStart).toFixed(0), 'ms');
+        break;
+      }
+      const readTime = performance.now();
+      buffer += decoder.decode(value, {stream: true});
+
+      // Process all complete lines in buffer
+      let idx;
+      while ((idx = buffer.indexOf('\n')) !== -1) {
+        const line = buffer.slice(0, idx).trim();
+        buffer = buffer.slice(idx + 1);
+        if (!line || !line.startsWith('data: ')) continue;
+        const payload = line.slice(6);
+        if (payload === '[DONE]') continue;
+        try {
+          const chunk = JSON.parse(payload);
+          chunkCount++;
+          if (chunkCount <= 5 || chunkCount % 50 === 0) {
+            console.log('[STREAM] chunk', chunkCount, chunk.type, JSON.stringify(chunk.text).slice(0,30), 'at', (readTime - streamStart).toFixed(0), 'ms');
           }
-        } else { ghost.textContent = ''; }
-
-        if (d.interrupt && d.interrupt.worthy) {
-          interruptText.textContent = d.interrupt.text;
-          interrupt.className = 'interrupt visible' + (d.interrupt.confidence > 0.85 ? ' certain' : '');
-        } else { interrupt.className = 'interrupt'; }
-
-        if (d.face && d.face.face) { face.textContent = d.face.face; }
-      } catch (e) { /* engine not up yet */ }
-      setTimeout(poll, 600);
+          if (chunk.type === 'thinking') {
+            thinkDetails.style.display = '';
+            thinkDetails.open = true;
+            thinkingText += chunk.text;
+            thinkContent.textContent = thinkingText;
+            if (chunkCount === 1) textNode.textContent = '';
+          } else if (chunk.type === 'content') {
+            if (!contentText) textNode.textContent = '';
+            contentText += chunk.text;
+            textNode.textContent = contentText;
+          } else if (chunk.type === 'error') {
+            textNode.textContent = '[Error: ' + chunk.text + ']';
+          }
+          area.scrollTop = area.scrollHeight;
+        } catch(e) {
+          console.error('[STREAM] parse error:', e, 'line:', line.slice(0,100));
+        }
+      }
     }
-    poll();
-  </script>
+
+    if (thinkingText) {
+      thinkSummary.textContent = 'thinking';
+    } else {
+      thinkDetails.remove();
+    }
+
+  } catch(e) {
+    if (e.name === 'AbortError') {
+      addMessage('assistant', '[stopped]', ['interrupted']);
+    } else {
+      addMessage('assistant', 'Error: ' + e.message);
+    }
+  } finally {
+    document.getElementById('send-btn').style.display = '';
+    document.getElementById('stop-btn').style.display = 'none';
+    abortController = null;
+  }
+}
+
+function stopGeneration() {
+  if (abortController) {
+    abortController.abort();
+  }
+}
+
+function addMessage(role, content, sources, shouldScroll = true, thinking = null) {
+  const area = document.getElementById('chat-area');
+  clearEmptyState();
+  const div = document.createElement('div');
+  div.className = 'message ' + role;
+
+  // Thinking/reasoning block (collapsible)
+  if (thinking && role === 'assistant') {
+    const details = document.createElement('details');
+    details.style.cssText = 'margin-bottom:8px;font-size:11px;color:var(--text-dim);border:1px solid var(--border);border-radius:6px;padding:4px 8px;background:var(--surface2);';
+    const summary = document.createElement('summary');
+    summary.style.cssText = 'cursor:pointer;color:var(--text-faint);font-size:10px;letter-spacing:0.5px;';
+    summary.textContent = 'thinking';
+    details.appendChild(summary);
+    const thinkContent = document.createElement('div');
+    thinkContent.style.cssText = 'margin-top:6px;white-space:pre-wrap;line-height:1.5;';
+    thinkContent.textContent = thinking;
+    details.appendChild(thinkContent);
+    div.appendChild(details);
+  }
+
+  const textNode = document.createElement('div');
+  textNode.textContent = content;
+  div.appendChild(textNode);
+
+  if (sources && sources.length > 0) {
+    const chips = document.createElement('div');
+    chips.className = 'message-sources';
+    sources.forEach(s => {
+      const chip = document.createElement('span');
+      chip.className = 'source-chip';
+      chip.textContent = s;
+      chips.appendChild(chip);
+    });
+    div.appendChild(chips);
+  }
+
+  area.appendChild(div);
+  if (shouldScroll) {
+    scrollChatToBottom();
+  }
+}
+
+// Enter to send, Shift+Enter for newline, auto-grow
+const chatInput = document.getElementById('chat-input');
+chatInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    sendMessage();
+  }
+});
+chatInput.addEventListener('input', () => {
+  chatInput.style.height = 'auto';
+  chatInput.style.height = Math.min(chatInput.scrollHeight, 120) + 'px';
+});
+
+// --- Stream (WebSocket) ---
+let ws = null;
+function connectWS() {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  ws = new WebSocket(`${proto}//${location.host}/ws`);
+  ws.onmessage = (e) => {
+    try {
+      const msg = JSON.parse(e.data);
+      if (msg.type === 'event') {
+        addStreamEvent(msg.data);
+      }
+    } catch(err) {}
+  };
+  ws.onclose = () => { setTimeout(connectWS, 3000); };
+  ws.onerror = () => { ws.close(); };
+}
+
+function addStreamEvent(evt) {
+  const panel = document.getElementById('stream-panel');
+  const div = document.createElement('div');
+  div.className = 'event-item';
+  const time = new Date().toLocaleTimeString('en-US', {hour12: false, hour: '2-digit', minute: '2-digit'});
+  const actor = evt.actor || '';
+  const text = evt.description || evt.type || '';
+  div.innerHTML = `<span class="event-time">${time}</span> ${actor ? '<b>' + actor + '</b> ' : ''}${text}`;
+  panel.prepend(div);
+
+  // Keep only last 30 events
+  while (panel.children.length > 30) panel.lastChild.remove();
+}
+
+// --- Help ---
+function toggleHelp() {
+  let overlay = document.getElementById('help-overlay');
+  if (overlay) { overlay.remove(); return; }
+
+  overlay = document.createElement('div');
+  overlay.id = 'help-overlay';
+  overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.85);z-index:1000;display:flex;align-items:center;justify-content:center;';
+  overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+
+  overlay.innerHTML = `
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:24px 32px;max-width:480px;width:90%;font-size:12px;line-height:1.8">
+      <h2 style="color:var(--accent);font-size:14px;margin-bottom:12px;letter-spacing:1px">Taey</h2>
+      <div style="margin-bottom:12px">
+        <div style="color:var(--cyan);font-weight:600;margin-bottom:4px">Self-Language</div>
+        <div>Body facets show infrastructure in Taey's voice</div>
+        <div>Hover facets for raw operator metrics</div>
+        <div>Growth tracks active training progress</div>
+      </div>
+      <div style="margin-bottom:12px">
+        <div style="color:var(--cyan);font-weight:600;margin-bottom:4px">Communication</div>
+        <div>Chat with Taey in the center panel</div>
+        <div>Stream shows real-time system events</div>
+        <div><a href="/console.html" style="color:var(--accent)">Console view</a> for full operator dashboard</div>
+      </div>
+      <div style="color:var(--text-faint);font-size:10px;margin-top:8px">Press ? or Esc to close</div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+}
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === '?' && !['INPUT','TEXTAREA'].includes(document.activeElement.tagName)) toggleHelp();
+  if (e.key === 'Escape') { const o = document.getElementById('help-overlay'); if (o) o.remove(); }
+});
+
+// --- Init ---
+refreshSelf();
+setInterval(refreshSelf, 10000);
+loadChatHistory();
+connectWS();
+</script>
 </body>
 </html>
