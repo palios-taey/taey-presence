@@ -211,7 +211,7 @@ class FaceWorker:
         neo4j_write_state("face_worker", {
             "face": face, "feeling": feeling,
             "reaction_intensity": reaction.get("intensity", 0),
-            "soma_coherence": soma.get("coherence", 0),
+            "soma_rho": soma.get("rho", 0),
         })
 
         self.log.info("face=%s feeling=%s intensity=%.2f",

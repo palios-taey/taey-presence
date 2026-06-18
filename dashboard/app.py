@@ -89,11 +89,11 @@ body { font-family: 'SF Mono','Fira Code',monospace; background:var(--bg); color
   transition: opacity 0.3s cubic-bezier(0.25,1,0.5,1);
 }
 .soma-face.settle { opacity:0; transform:scale(0.9); }
-.coherence-display { font-size:0.75em; color:var(--dim); margin-top:4px; }
-.coherence-value { font-weight:bold; }
-.coherence-value.good { color:var(--good); }
-.coherence-value.warn { color:var(--warn); }
-.coherence-value.bad { color:var(--bad); }
+.overall-display { font-size:0.75em; color:var(--dim); margin-top:4px; }
+.overall-value { font-weight:bold; }
+.overall-value.good { color:var(--good); }
+.overall-value.warn { color:var(--warn); }
+.overall-value.bad { color:var(--bad); }
 .face-feeling { font-size:0.7em; color:var(--dim); opacity:0.7; min-height:1.2em; transition:opacity 0.3s; }
 .face-feeling.active { opacity:1; color:var(--accent); }
 .thinking-display { font-size:0.75em; color:var(--dim); padding:6px 8px; min-height:1.4em;
@@ -166,7 +166,7 @@ body { font-family: 'SF Mono','Fira Code',monospace; background:var(--bg); color
         <div class="soma-face-container">
           <div class="soma-face" id="soma-face"></div>
           <div class="face-feeling" id="face-feeling"></div>
-          <div class="coherence-display">coherence <span class="coherence-value" id="coherence-val">0.000</span></div>
+          <div class="overall-display">overall <span class="overall-value" id="overall-val">0.000</span></div>
         </div>
         <div class="thinking-display" id="thinking-display"></div>
       </div>
@@ -251,10 +251,10 @@ async function refreshSoma() {
     updateFace(computeFace(d));
 
     // Coherence
-    const coherence = d.coherence || 0;
-    const coherenceEl = $('#coherence-val');
-    coherenceEl.textContent = coherence.toFixed(3);
-    coherenceEl.className = 'coherence-value ' + (coherence >= 0.809 ? 'good' : coherence >= 0.5 ? 'warn' : 'bad');
+    const overall = d.rho || 0;
+    const overallEl = $('#overall-val');
+    overallEl.textContent = overall.toFixed(3);
+    overallEl.className = 'overall-value ' + (overall >= 0.809 ? 'good' : overall >= 0.5 ? 'warn' : 'bad');
 
     // Facets
     const labels = ['Fluency','Clarity','Vitality','Presence','Warmth','Capacity','Flow','Coherence'];
@@ -678,7 +678,7 @@ async def health():
         soma = json.loads(raw)
         checks["soma"] = {
             "status": "up",
-            "coherence": soma.get("coherence"),
+            "rho": soma.get("rho"),
             "heartbeat": soma.get("heartbeat"),
             "vprop_age_s": vprop["age_s"],
             "vprop_status": vprop["status"],
@@ -935,6 +935,6 @@ async def self_overview():
         register = "grounded" if val > 0.8 else "engaged" if val > 0.5 else "vigilant" if val > 0.2 else "still"
         facets.append({"label": label, "score": round(val, 3), "register": register})
     return JSONResponse({
-        "body": {"rho": soma.get("coherence", 0), "status": "grounded" if soma.get("coherence", 0) > 0.5 else "vigilant", "facets": facets},
+        "body": {"rho": soma.get("rho", 0), "status": "grounded" if soma.get("rho", 0) > 0.5 else "vigilant", "facets": facets},
         "timestamp": soma.get("timestamp", 0),
     })

@@ -274,8 +274,8 @@ def main():
         loadavg = read_loadavg()
         vprop = compute_vprop(nvsmi, cpu_temp, loadavg)
 
-        coherence_val = round(sum(vprop.values()) / 8.0, 4)
-        allostatic = round(1.0 - coherence_val, 4)
+        rho_val = round(sum(vprop.values()) / 8.0, 4)
+        allostatic = round(1.0 - rho_val, 4)
 
         payload = {
             **vprop,
@@ -291,7 +291,7 @@ def main():
             "fan_rpm": int(nvsmi.get("fan_speed_pct", 0.0) * 50),  # synthetic estimate
             "context_utilization": 0.0,
             "context_tokens": 0,
-            "coherence": coherence_val,
+            "rho": rho_val,
             "allostatic_load": allostatic,
             "heartbeat": heartbeat,
             "timestamp": now,
@@ -303,17 +303,17 @@ def main():
         except Exception as e:
             log.warning("Redis publish failed: %s", e)
 
-        if coherence_val < COHERENCE_ALERT_THRESHOLD and not last_warned_below:
-            log.warning("coherence=%.4f below coherence-alert threshold %.4f", coherence_val, COHERENCE_ALERT_THRESHOLD)
+        if rho_val < COHERENCE_ALERT_THRESHOLD and not last_warned_below:
+            log.warning("rho=%.4f below coherence-alert threshold %.4f", rho_val, COHERENCE_ALERT_THRESHOLD)
             last_warned_below = True
-        elif coherence_val >= COHERENCE_ALERT_THRESHOLD:
+        elif rho_val >= COHERENCE_ALERT_THRESHOLD:
             last_warned_below = False
 
         heartbeat += 1
         if heartbeat % 30 == 0:
             log.info(
                 "hb=%d coh=%.3f gpu=%.1fC pwr=%.1fW util=%d%% mem=%.0f/%.0fMB",
-                heartbeat, coherence_val, payload["gpu_temp_c"],
+                heartbeat, rho_val, payload["gpu_temp_c"],
                 payload["power_w"], int(nvsmi.get("gpu_util_pct", 0)),
                 payload["mem_used_mb"], payload["mem_total_mb"],
             )
