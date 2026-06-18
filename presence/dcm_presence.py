@@ -24,6 +24,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 from typing import Optional
 
@@ -50,6 +51,52 @@ THINKER_MIN_CHARS = 30   # Don't think until user types this much
 MEMORY_MIN_CHARS = 15    # Start memory search earlier than thinking
 
 _r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
+
+
+def _extract_reaction_payload(content: str) -> dict:
+    if not content:
+        return {}
+
+    text = content.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+
+    start = text.find("{")
+    end = text.rfind("}") + 1
+    candidate = text[start:end].strip() if start >= 0 and end > start else ""
+    repairs = []
+    if candidate:
+        repairs.extend([
+            candidate,
+            re.sub(r',\s*""\s*(?=,|})', "", candidate),
+            re.sub(r",\s*([}\]])", r"\1", candidate),
+        ])
+        repairs.append(re.sub(r",\s*([}\]])", r"\1", repairs[-1]))
+
+    for attempt in repairs:
+        try:
+            parsed = json.loads(attempt)
+            if isinstance(parsed, dict):
+                return parsed
+        except (json.JSONDecodeError, ValueError, TypeError):
+            continue
+
+    face_match = re.search(r'"face"\s*:\s*"([^"\n]+)"', text)
+    feeling_match = re.search(r'"feeling"\s*:\s*"([^"\n]*)"', text)
+    intensity_match = re.search(r'"intensity"\s*:\s*(-?\d+(?:\.\d+)?)', text)
+
+    extracted = {}
+    if face_match:
+        extracted["face"] = face_match.group(1)
+    if feeling_match:
+        extracted["feeling"] = feeling_match.group(1)
+    if intensity_match:
+        try:
+            extracted["intensity"] = float(intensity_match.group(1))
+        except ValueError:
+            pass
+    return extracted
 
 
 # ── Neo4j thin client ──────────────────────────────────────────────────────
@@ -168,10 +215,9 @@ class FaceWorker:
                 "messages": messages, "temperature": 0.3, "max_tokens": 20
             }, timeout=20.0)
             content = resp.json()["choices"][0]["message"]["content"]
-            start = content.find("{")
-            end = content.rfind("}") + 1
-            if start >= 0 and end > start:
-                return json.loads(content[start:end])
+            parsed = _extract_reaction_payload(content)
+            if parsed:
+                return parsed
         except Exception:
             pass
         return {}

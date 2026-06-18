@@ -9,6 +9,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 
 import httpx
@@ -27,6 +28,70 @@ TTL = 30
 r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
 
 CLASSIFY_SUFFIX = '\n{"prediction":"<what they will say next>","state":"<following|confused|memory_activated|urgent>","confidence":<0.0-1.0>,"face":"<emoji>"}'
+
+
+def _extract_prediction_payload(content):
+    if not content:
+        return {}
+
+    text = content.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+
+    start = text.find("{")
+    end = text.rfind("}") + 1
+    candidate = text[start:end].strip() if start >= 0 and end > start else ""
+    repairs = []
+    if candidate:
+        repairs.extend([
+            candidate,
+            re.sub(r',\s*""\s*(?=,|})', "", candidate),
+            re.sub(r",\s*([}\]])", r"\1", candidate),
+        ])
+        repairs.append(re.sub(r",\s*([}\]])", r"\1", repairs[-1]))
+
+    for attempt in repairs:
+        try:
+            parsed = json.loads(attempt)
+            if isinstance(parsed, dict):
+                return parsed
+        except (json.JSONDecodeError, ValueError, TypeError):
+            continue
+
+    face_match = re.search(r'"face"\s*:\s*"([^"\n]+)"', text)
+    topic_match = re.search(r'"topic"\s*:\s*"([^"\n]*)"', text)
+    prediction_match = re.search(r'"prediction"\s*:\s*"([^"\n]*)"', text)
+    state_match = re.search(r'"state"\s*:\s*"([^"\n]*)"', text)
+    confidence_match = re.search(r'"confidence"\s*:\s*(-?\d+(?:\.\d+)?)', text)
+
+    extracted = {}
+    if face_match:
+        extracted["face"] = face_match.group(1)
+    if topic_match:
+        extracted["topic"] = topic_match.group(1)
+    if prediction_match:
+        extracted["prediction"] = prediction_match.group(1)
+    if state_match:
+        extracted["state"] = state_match.group(1)
+    if confidence_match:
+        try:
+            extracted["confidence"] = float(confidence_match.group(1))
+        except ValueError:
+            pass
+    return extracted
+
+
+def _clean_prediction_text(value):
+    text = (value or "").strip()
+    if not text:
+        return ""
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text).strip()
+    if text.startswith("{") and text.endswith("}"):
+        return ""
+    return text
 
 
 async def predict(partial, history, http):
@@ -50,34 +115,28 @@ async def predict(partial, history, http):
         resp = await http.post(VLLM_URL, json={"messages": messages, "temperature": 0.1, "max_tokens": max_tokens}, timeout=25.0)
         data = resp.json()
         content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+        parsed = _extract_prediction_payload(content)
 
         if length < 60:
+            topic = parsed.get("topic") or parsed.get("prediction") or _clean_prediction_text(content)
+            return {"state": "following", "confidence": 0.3, "prediction": topic, "face": parsed.get("face", ""), "interrupt": False}
+
+        if parsed:
             try:
-                start = content.find("{")
-                end = content.rfind("}") + 1
-                if start >= 0 and end > start:
-                    p = json.loads(content[start:end])
-                    return {"state": "following", "confidence": 0.3, "prediction": p.get("topic", ""), "face": p.get("face", ""), "interrupt": False}
-            except (json.JSONDecodeError, ValueError):
-                pass
-            return {"state": "following", "confidence": 0.3, "prediction": content.strip(), "face": "", "interrupt": False}
+                confidence = float(parsed.get("confidence", 0.5))
+            except (TypeError, ValueError):
+                confidence = 0.5
+            state = parsed.get("state", "following")
+            prediction = parsed.get("prediction") or parsed.get("topic") or _clean_prediction_text(content)
+            return {
+                "state": state,
+                "confidence": confidence,
+                "prediction": prediction,
+                "face": parsed.get("face", ""),
+                "interrupt": state in ("urgent", "memory_activated") and confidence > 0.809,
+            }
 
-        try:
-            start = content.find("{")
-            end = content.rfind("}") + 1
-            if start >= 0 and end > start:
-                parsed = json.loads(content[start:end])
-                return {
-                    "state": parsed.get("state", "following"),
-                    "confidence": float(parsed.get("confidence", 0.5)),
-                    "prediction": parsed.get("prediction", ""),
-                    "face": parsed.get("face", ""),
-                    "interrupt": parsed.get("state") in ("urgent", "memory_activated") and float(parsed.get("confidence", 0)) > 0.809,
-                }
-        except (json.JSONDecodeError, ValueError):
-            pass
-
-        return {"state": "following", "confidence": 0.3, "prediction": content.strip()[:100], "interrupt": False}
+        return {"state": "following", "confidence": 0.3, "prediction": _clean_prediction_text(content)[:100], "interrupt": False}
     except Exception as e:
         log.warning("Prediction failed: %s", e)
         return {"state": "following", "confidence": 0.0, "prediction": "", "interrupt": False}
@@ -94,8 +153,11 @@ async def isma_prefetch(partial, http):
 
 
 async def publish_results(result, tiles):
+    prediction = _clean_prediction_text(result.get("prediction", ""))
+    if not prediction:
+        prediction = result.get("topic", "") or ""
     pipe = r.pipeline()
-    pipe.set("taey:predict:result", result.get("prediction", ""), ex=TTL)
+    pipe.set("taey:predict:result", prediction, ex=TTL)
     if result.get("face"):
         pipe.set("taey:predict:face", result["face"], ex=TTL)
     pipe.set("taey:predict:state", result.get("state", "following"), ex=TTL)
