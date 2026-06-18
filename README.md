@@ -153,10 +153,17 @@ dashboard/static/               index.html (v2 UI), console.html, hmm.html.
 
 ## Known issues
 
-- **Interrupt restraint is under-tuned.** Interrupts gate on
-  `state in {urgent, memory_activated}` *and* `confidence > 0.809`
-  (`prediction_worker.py`). The gate is real but fires more readily than is
-  comfortable in practice; tightening the classifier/threshold is open work.
+- **Interrupt restraint is uneven across the two writers.** Two code paths can
+  raise an interrupt. `prediction_worker.py` is gated — it fires only on
+  `state in {urgent, memory_activated}` *and* `confidence > 0.809`. The
+  `dcm_presence.py` THINKER has two sub-paths: the *excitement* path is gated
+  (`state == "excited"` *and* `confidence > 0.8`), but the *clarification* path
+  fires on **any** non-empty `clarification` string the model emits — with **no
+  confidence/state gate**. So how often interrupts surface depends heavily on how
+  readily your model emits a clarification. In local testing against one model it
+  did not over-fire (0/4 on neutral input), but a chattier model could surface
+  clarification interrupts more than you want. If so, gate the clarification path
+  to match its siblings (require `state == "confused"` and a confidence floor).
 
 ## License
 
