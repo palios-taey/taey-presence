@@ -22,21 +22,23 @@ FastAPI dashboard renders all of it.
   partial input. There is **no programmed emoji set and no soma→emoji mapping**;
   the only non-model value is an optional resting `DEFAULT_FACE` (empty by
   default). See `presence/dcm_presence.py::FaceWorker.blend_face` — it returns
-  the model's chosen emoji verbatim.
+  the model's chosen emoji verbatim, and `dashboard/app.py` does not invent
+  state-based emoji fallbacks.
 - **Thought prediction (ghost text)** — a worker drafts a short continuation of
   what you're typing and the dashboard shows it as dim ghost text with an
   "accept" ("OMG") button. `presence/prediction_worker.py`.
 - **Interrupt** — when the model classifies your partial input as `urgent` or
-  `memory_activated` above a confidence threshold, the dashboard surfaces an
-  interrupt bubble. (See *Known issues* — the restraint threshold is real but
-  under-tuned.)
+  `memory_activated` above a confidence threshold, or when the thinker emits a
+  `clarification` while explicitly `confused` above a confidence threshold, the
+  dashboard surfaces an interrupt bubble.
 - **Memory prefetch** — on partial input, a worker runs a hybrid search against
   a memory backend and stages the top tiles, so relevant context is ready before
   you finish typing. (Optional; degrades cleanly if the backend is down.)
 - **Soma telemetry** — `soma/mira_soma.py` publishes an 8-facet runtime-state
-  vector (fluency, clarity, vitality, presence, warmth, capacity, flow,
-  coherence) derived from GPU/system vitals at a fixed cadence. The dashboard
-  renders it and a single `coherence` scalar.
+  vector. Seven facets are derived from runtime/system vitals; one is currently
+  a hardcoded placeholder (`clarity = 0.99`). The dashboard renders the full
+  vector and a headline `rho` scalar, which is the mean across the eight facets
+  rather than the `coherence` facet alone.
 - **Dashboard** — `dashboard/app.py` (FastAPI) ties it together: chat with tool
   access, streaming responses, the live face, ghost text, interrupts, memory,
   and worker status.
@@ -94,7 +96,7 @@ coordinate only through Redis keys (and optional Neo4j).
 | `taey:dcm:face`, `taey:dcm:face_feeling` | dcm_presence FACE worker | model-chosen face + one-word feeling |
 | `taey:dcm:memory_tiles` | dcm_presence MEMORY worker | retrieved memory tiles |
 | `taey:dcm:thought`, `taey:dcm:prediction`, `taey:dcm:state` | dcm_presence THINKER worker | running inference on partial input |
-| `taey:soma:vprop` | soma daemon | 8-facet state vector + `coherence` + `heartbeat` + GPU vitals (JSON) |
+| `taey:soma:vprop` | soma daemon | 8-facet state vector + `rho` headline scalar + `heartbeat` + GPU vitals (JSON); `clarity` is currently a placeholder facet |
 | `taey:soma:*` (gpu_busy, latency_ms, *_tokens, …) | soma daemon | individual runtime metrics |
 
 ### Dashboard endpoints
@@ -111,8 +113,10 @@ coordinate only through Redis keys (and optional Neo4j).
 - **An OpenAI-compatible chat endpoint** (required) — your local LLM: vLLM,
   `llama.cpp --api`, Ollama's `/v1`, etc. Set `VLLM_URL`.
 - **A hybrid-search memory backend** (optional) — for the memory feature. Set
-  `ISMA_URL`. Any service answering `POST {ISMA_URL}` with a `{"tiles": [...]}`
-  shape works; without it the memory worker simply returns nothing.
+  `ISMA_URL` to the **base service URL** (for example `http://localhost:8095`).
+  The workers append the concrete endpoints they need (`/search`,
+  `/v2/search/adaptive`, `/health`). Without the backend, the memory worker
+  simply returns nothing.
 - **Neo4j** (optional) — only for DCM state writes. No auth; degrades to
   Redis-only if absent. See scope note above.
 
@@ -151,19 +155,17 @@ dashboard/app.py                FastAPI app: UI, chat, SSE/WS, prediction push, 
 dashboard/static/               index.html (v2 UI), console.html, hmm.html.
 ```
 
-## Known issues
+## Known limitations
 
-- **Interrupt restraint is uneven across the two writers.** Two code paths can
-  raise an interrupt. `prediction_worker.py` is gated — it fires only on
-  `state in {urgent, memory_activated}` *and* `confidence > 0.809`. The
-  `dcm_presence.py` THINKER has two sub-paths: the *excitement* path is gated
-  (`state == "excited"` *and* `confidence > 0.8`), but the *clarification* path
-  fires on **any** non-empty `clarification` string the model emits — with **no
-  confidence/state gate**. So how often interrupts surface depends heavily on how
-  readily your model emits a clarification. In local testing against one model it
-  did not over-fire (0/4 on neutral input), but a chattier model could surface
-  clarification interrupts more than you want. If so, gate the clarification path
-  to match its siblings (require `state == "confused"` and a confidence floor).
+- **Memory/thinker race on the same partial input.** `dcm_presence.py` runs the
+  MEMORY and THINKER workers with `asyncio.gather(...)`, so the thinker can read
+  `taey:dcm:memory_tiles` before the memory worker has refreshed them for the
+  newest partial. The system still works, but the thinker may use slightly stale
+  memory context on some cycles.
+- **Synchronous Redis/Neo4j access inside async loops.** The presence workers and
+  dashboard use blocking Redis/Neo4j clients from async code. That is acceptable
+  for the current single-host setup, but it is still an architectural limit if
+  you want tighter latency guarantees or heavier concurrency.
 
 ## License
 

@@ -2,9 +2,8 @@
 
 Three concurrent workers share state through Redis (real-time) + Neo4j (persistent):
 
-1. FACE worker  — Blends somatic V_prop state with reaction to partial input.
-                  Produces an emoji that reflects BOTH internal state AND
-                  understanding of what the user is saying.
+1. FACE worker  — Reads partial input and asks the model for a single emoji
+                  reaction plus a one-word feeling label.
 
 2. MEMORY worker — Deep ISMA search on partial input. Retrieves relevant tiles,
                    conversation context, constitutional grounding. Writes findings
@@ -36,7 +35,8 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [DCM-%(name)s] %(mes
 REDIS_HOST = os.environ.get("REDIS_HOST", "127.0.0.1")
 REDIS_PORT = int(os.environ.get("REDIS_PORT", "6379"))
 VLLM_URL = os.environ.get("VLLM_URL", "http://localhost:8000/v1/chat/completions")
-ISMA_URL = os.environ.get("ISMA_URL", "http://localhost:8095")
+ISMA_URL = os.environ.get("ISMA_URL", "http://localhost:8095").rstrip("/")
+ISMA_SEARCH_URL = f"{ISMA_URL}/search"
 # No-input default face. Empty = show nothing until Taey reacts (fully dynamic,
 # no programmed face). Set to any emoji if you want a resting face.
 DEFAULT_FACE = os.environ.get("DEFAULT_FACE", "")
@@ -187,40 +187,22 @@ def get_partial() -> tuple:
     return partial.strip(), history
 
 
-def get_soma_state() -> dict:
-    """Read current somatic state from Redis."""
-    try:
-        raw = _r.get("taey:soma:current")
-        return json.loads(raw) if raw else {}
-    except Exception:
-        return {}
-
-
 # ── FACE Worker ────────────────────────────────────────────────────────────
 
 class FaceWorker:
-    """Blends somatic V_prop + typing reaction into a single emoji expression.
-
-    The face reflects BOTH:
-    - Internal state (from soma daemon V_prop tensor)
-    - Reaction to what the user is saying (from vLLM classification)
-
-    This is like how a human's face shows both their mood AND their reaction
-    to what they're hearing in real time.
-    """
+    """Publishes the model's emoji reaction to the current partial input."""
 
     def __init__(self):
         self.log = logging.getLogger("FACE")
-        self.last_face = DEFAULT_FACE
-        self.last_partial = ""
+        self.last_partial = None
 
     async def classify_reaction(self, partial: str, history: list, http: httpx.AsyncClient) -> dict:
         """Ask Taey what face they'd make hearing this partial input."""
         messages = [
             {"role": "system", "content": (
                 "You are feeling what a listener feels during a conversation. "
-                "The person is still typing. Based on what they've typed so far "
-                "and how you feel inside, respond with ONLY a JSON object: "
+                "The person is still typing. Based on what they've typed so far, "
+                "respond with ONLY a JSON object: "
                 '{"face":"<single emoji>","feeling":"<one word>","intensity":<0.0-1.0>}'
             )}
         ]
@@ -240,13 +222,11 @@ class FaceWorker:
             pass
         return {}
 
-    def blend_face(self, reaction: dict, soma: dict) -> str:
+    def blend_face(self, reaction: dict) -> str:
         """Taey's own freely-chosen emoji is the face. No programmed set, no
         fixed palette — whatever single emoji the model returned as its reaction
         IS the face. The only fallback is the configurable DEFAULT_FACE, used
         solely when the model returned nothing (e.g. no/short input).
-        `soma` is available to inform the model's choice upstream, not to
-        override it here.
         """
         reaction_face = reaction.get("face", "")
         if reaction_face:
@@ -254,17 +234,19 @@ class FaceWorker:
         return DEFAULT_FACE               # only when there's no model reaction
 
     async def run_once(self, partial: str, history: list, http: httpx.AsyncClient):
+        if partial == self.last_partial:
+            return
+        self.last_partial = partial
+
         if not partial or len(partial) < 8:
-            # No input or too short — publish base face from soma only
-            soma = get_soma_state()
-            face = self.blend_face({}, soma)
+            face = self.blend_face({})
             _r.set("taey:dcm:face", face, ex=TTL)
             _r.set("taey:dcm:face_feeling", "present", ex=TTL)
+            _r.set("taey:predict:face", face, ex=TTL)
             return
 
         reaction = await self.classify_reaction(partial, history, http)
-        soma = get_soma_state()
-        face = self.blend_face(reaction, soma)
+        face = self.blend_face(reaction)
         feeling = reaction.get("feeling", "attentive")
 
         _r.set("taey:dcm:face", face, ex=TTL)
@@ -275,7 +257,6 @@ class FaceWorker:
         neo4j_write_state("face_worker", {
             "face": face, "feeling": feeling,
             "reaction_intensity": reaction.get("intensity", 0),
-            "soma_rho": soma.get("rho", 0),
         })
 
         self.log.info("face=%s feeling=%s intensity=%.2f",
@@ -299,7 +280,7 @@ class MemoryWorker:
     async def search_isma(self, query: str, http: httpx.AsyncClient, top_k: int = 5) -> list:
         """Deep ISMA search — more tiles than the old prediction worker's 3."""
         try:
-            resp = await http.post(f"{ISMA_URL}/search", json={
+            resp = await http.post(ISMA_SEARCH_URL, json={
                 "query": query, "top_k": top_k
             }, timeout=8.0)
             data = resp.json()
@@ -432,9 +413,16 @@ class ThinkerWorker:
             pipe.set("taey:dcm:confidence", str(result["confidence"]), ex=TTL)
             pipe.set("taey:predict:confidence", str(result["confidence"]), ex=TTL)
 
-        # Interrupt if confused or has a clarification
+        # Clarification interrupts only surface when the model is explicitly
+        # confused and confident enough to justify breaking the flow.
         clarification = result.get("clarification", "")
-        if clarification:
+        confidence = float(result.get("confidence", 0) or 0)
+        clarification_interrupt = (
+            clarification
+            and result.get("state") == "confused"
+            and confidence > 0.8
+        )
+        if clarification_interrupt:
             pipe.set("taey:dcm:interrupt", json.dumps({
                 "worthy": True,
                 "text": clarification,
@@ -444,11 +432,25 @@ class ThinkerWorker:
                 "worthy": True,
                 "text": clarification,
             }), ex=TTL)
-        elif result.get("state") == "excited" and float(result.get("confidence", 0)) > 0.8:
+        elif result.get("state") == "excited" and confidence > 0.8:
             pipe.set("taey:dcm:interrupt", json.dumps({
                 "worthy": True,
                 "text": result.get("thought", "I think I know where you're going..."),
                 "type": "excitement",
+            }), ex=TTL)
+            pipe.set("taey:predict:interrupt", json.dumps({
+                "worthy": True,
+                "text": result.get("thought", "I think I know where you're going..."),
+            }), ex=TTL)
+        else:
+            pipe.set("taey:dcm:interrupt", json.dumps({
+                "worthy": False,
+                "text": "",
+                "type": "",
+            }), ex=TTL)
+            pipe.set("taey:predict:interrupt", json.dumps({
+                "worthy": False,
+                "text": "",
             }), ex=TTL)
 
         pipe.execute()
@@ -458,7 +460,7 @@ class ThinkerWorker:
             "prediction": result.get("prediction", ""),
             "state": result.get("state", "following"),
             "confidence": result.get("confidence", 0),
-            "has_clarification": bool(clarification),
+            "has_clarification": bool(clarification_interrupt),
         })
 
         self.log.info("state=%s conf=%.2f thought='%s' pred='%s'",

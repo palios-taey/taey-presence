@@ -21,7 +21,8 @@ log = logging.getLogger("predict")
 REDIS_HOST = os.environ.get("REDIS_HOST", "127.0.0.1")
 REDIS_PORT = int(os.environ.get("REDIS_PORT", "6379"))
 VLLM_URL = os.environ.get("VLLM_URL", "http://localhost:8000/v1/chat/completions")
-ISMA_URL = os.environ.get("ISMA_URL", "http://localhost:8095/v2/search/adaptive")
+ISMA_URL = os.environ.get("ISMA_URL", "http://localhost:8095").rstrip("/")
+ISMA_SEARCH_URL = f"{ISMA_URL}/v2/search/adaptive"
 POLL_INTERVAL = 0.3
 TTL = 30
 
@@ -106,7 +107,6 @@ async def predict(partial, history, http):
     if length < 60:
         messages.append({"role": "user", "content": f'Someone is typing: "{partial}"\n{{"topic":"<brief topic>","face":"<emoji>"}}'})
         max_tokens = 40
-        max_tokens = 15
     else:
         messages.append({"role": "user", "content": f'The user is currently typing (not yet sent): "{partial}"{CLASSIFY_SUFFIX}'})
         max_tokens = 120
@@ -144,9 +144,9 @@ async def predict(partial, history, http):
 
 async def isma_prefetch(partial, http):
     try:
-        resp = await http.post(ISMA_URL, json={"query": partial, "top_k": 3}, timeout=5.0)
+        resp = await http.post(ISMA_SEARCH_URL, json={"query": partial, "top_k": 3}, timeout=5.0)
         data = resp.json()
-        tiles = data.get("tiles", [])
+        tiles = data if isinstance(data, list) else data.get("results", data.get("tiles", []))
         return [{"hash": t.get("content_hash", ""), "snippet": (t.get("content", "") or t.get("rosetta_summary", ""))[:200]} for t in tiles[:3]]
     except Exception:
         return []
@@ -158,8 +158,7 @@ async def publish_results(result, tiles):
         prediction = result.get("topic", "") or ""
     pipe = r.pipeline()
     pipe.set("taey:predict:result", prediction, ex=TTL)
-    if result.get("face"):
-        pipe.set("taey:predict:face", result["face"], ex=TTL)
+    pipe.set("taey:predict:face", result.get("face", ""), ex=TTL)
     pipe.set("taey:predict:state", result.get("state", "following"), ex=TTL)
     pipe.set("taey:predict:confidence", str(result.get("confidence", 0)), ex=TTL)
     pipe.set("taey:predict:interrupt", json.dumps({"worthy": result.get("interrupt", False), "text": "I'm here. Take your time." if result.get("interrupt") else ""}), ex=TTL)

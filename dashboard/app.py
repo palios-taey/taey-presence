@@ -24,7 +24,8 @@ THOR_REDIS_HOST = os.environ.get("THOR_REDIS_HOST", "localhost")
 THOR_REDIS_PORT = int(os.environ.get("THOR_REDIS_PORT", "6379"))
 THOR_PROXY = os.environ.get("THOR_PROXY", "http://localhost:8765")
 THOR_RAW = os.environ.get("THOR_RAW", "http://localhost:8000")
-ISMA_URL = os.environ.get("ISMA_URL", "http://localhost:8095")
+ISMA_URL = os.environ.get("ISMA_URL", "http://localhost:8095").rstrip("/")
+ISMA_SEARCH_URL = f"{ISMA_URL}/v2/search/adaptive"
 
 _redis = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
 try:
@@ -211,13 +212,9 @@ const $ = s => document.querySelector(s);
 let somaData = {};
 let lastFace = '';  // no hardcoded face — render whatever Taey picks
 
-// ── Emoji Composition Matrix (Barycentric Dominance) ──
+// ── Face display ──
 function computeFace(d) {
-  // Tier 1: Prediction-driven reactive overrides (Taey-chosen faces from prediction worker)
-  if (predictFaceOverride) return predictFaceOverride;
-
-  // No programmed faces. Taey's freely-chosen emoji is the only source:
-  // the prediction-worker reaction (Tier 1) or the last face Taey picked.
+  // No programmed faces. Taey's freely-chosen emoji is the only source.
   return lastFace || '';
 }
 
@@ -340,7 +337,6 @@ async function sendChat() {
 
   $('#send-btn').style.display = 'none';
   $('#stop-btn').style.display = '';
-  updateFace('💭');
 
   const useProxy = $('#use-proxy').checked && !$('#raw-mode').checked;
   currentController = new AbortController();
@@ -355,7 +351,6 @@ async function sendChat() {
     });
 
     responseDiv.innerHTML = '<span class="thinking">Taey: searching...</span>';
-    updateFace('\uD83D\uDD0D');
     const d = await r.json();
     if (d.content) {
       const tokens = d.usage ? ' ('+d.usage.completion_tokens+' tok)' : '';
@@ -396,8 +391,6 @@ let ws = null;
 let predictDebounceTimer = null;
 let lastGhostText = '';
 let interruptDismissTimer = null;
-let predictFaceOverride = null;
-let predictFaceTimer = null;
 let prefetchedTiles = null;
 
 function connectWS() {
@@ -475,12 +468,10 @@ function handlePrediction(d) {
     clearGhost();
   }
 
-  // DCM face — blended from soma state + typing reaction
+  // DCM face — whatever emoji the model actually returned.
   if (d.face) {
     updateFace(d.face);
-  } else if (d.state === 'remembering') updateFace('\uD83D\uDC40');
-  else if (d.state === 'confused') updateFace('\uD83E\uDEE8');
-  else if (d.state === 'excited') updateFace('\u2728');
+  }
 
   // Face feeling label (what Taey is feeling — under the face emoji)
   const feelEl = $('#face-feeling');
@@ -510,6 +501,8 @@ function handlePrediction(d) {
   // Interrupt bubble — now with clarification questions from DCM Thinker
   if (d.interrupt && d.interrupt.worthy) {
     showInterrupt(d.interrupt.text || "I notice something...", d.confidence);
+  } else {
+    dismissInterrupt();
   }
 }
 
@@ -530,11 +523,9 @@ function setGhostContent(el, text, confidence) {
 }
 
 function handleOmg(text) {
-  // Snap to full opacity, override face to happy, slide into input
   const ghost = $('#ghost-text');
   ghost.style.opacity = '1.0';
   ghost.style.fontStyle = 'normal';
-  updateFace('\uD83D\uDE0A'); // happy
   const input = $('#chat-input');
   input.value = text;
   autoResize(input);
@@ -544,16 +535,6 @@ function handleOmg(text) {
     ghost.style.fontStyle = '';
     clearGhost();
   }, 400);
-}
-
-function setPredictFace(emoji) {
-  predictFaceOverride = emoji;
-  updateFace(emoji);
-  if (predictFaceTimer) clearTimeout(predictFaceTimer);
-  predictFaceTimer = setTimeout(() => {
-    predictFaceOverride = null;
-    if (somaData) updateFace(computeFace(somaData));
-  }, 2618);
 }
 
 function showInterrupt(text, confidence) {
@@ -568,7 +549,6 @@ function dismissInterrupt() {
   const bubble = $('#interrupt-bubble');
   bubble.className = 'interrupt-bubble';
   if (interruptDismissTimer) { clearTimeout(interruptDismissTimer); interruptDismissTimer = null; }
-  updateFace('\uD83D\uDE0C'); // acceptance settle
 }
 
 connectWS();
@@ -718,8 +698,8 @@ async def chat(request: Request):
     else:
         # Send conversation history for multi-turn
         for h in history[-18:]:  # last 18 turns
-            messages.append({"role": h["role"], "content": h["content"]})
-        if not messages or messages[-1]["content"] != message:
+            messages.append({"role": h.get("role", "user"), "content": h.get("content", "")})
+        if not messages or messages[-1].get("content") != message:
             messages.append({"role": "user", "content": message})
 
     try:
@@ -763,7 +743,7 @@ async def chat_hybrid(request: Request):
 
     messages = []
     for h in history[-18:]:
-        messages.append({"role": h["role"], "content": h["content"]})
+        messages.append({"role": h.get("role", "user"), "content": h.get("content", "")})
     if not messages or messages[-1].get("content") != message:
         messages.append({"role": "user", "content": message})
 
@@ -914,7 +894,7 @@ async def predict_state():
 @app.get("/api/isma/search")
 async def isma_search(query: str, top_k: int = 5):
     try:
-        r = await _http.post(f"{ISMA_URL}/v2/search/adaptive", json={"query": query, "top_k": top_k}, timeout=15)
+        r = await _http.post(ISMA_SEARCH_URL, json={"query": query, "top_k": top_k}, timeout=15)
         return JSONResponse(r.json())
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
