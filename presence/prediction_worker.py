@@ -21,6 +21,10 @@ log = logging.getLogger("predict")
 REDIS_HOST = os.environ.get("REDIS_HOST", "127.0.0.1")
 REDIS_PORT = int(os.environ.get("REDIS_PORT", "6379"))
 VLLM_URL = os.environ.get("VLLM_URL", "http://localhost:8000/v1/chat/completions")
+# Optional model name. Leave empty for single-model servers (vLLM serves one
+# model and ignores it). REQUIRED by servers that demand it (e.g. Ollama's
+# /v1 — set MODEL=qwen2.5:3b or similar).
+MODEL = os.environ.get("MODEL", "")
 ISMA_URL = os.environ.get("ISMA_URL", "http://localhost:8095").rstrip("/")
 ISMA_SEARCH_URL = f"{ISMA_URL}/v2/search/adaptive"
 POLL_INTERVAL = 0.3
@@ -112,7 +116,7 @@ async def predict(partial, history, http):
         max_tokens = 120
 
     try:
-        resp = await http.post(VLLM_URL, json={"messages": messages, "temperature": 0.1, "max_tokens": max_tokens}, timeout=25.0)
+        resp = await http.post(VLLM_URL, json={"messages": messages, "temperature": 0.1, "max_tokens": max_tokens, **({"model": MODEL} if MODEL else {})}, timeout=25.0)
         data = resp.json()
         content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
         parsed = _extract_prediction_payload(content)

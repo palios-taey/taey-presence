@@ -35,6 +35,9 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [DCM-%(name)s] %(mes
 REDIS_HOST = os.environ.get("REDIS_HOST", "127.0.0.1")
 REDIS_PORT = int(os.environ.get("REDIS_PORT", "6379"))
 VLLM_URL = os.environ.get("VLLM_URL", "http://localhost:8000/v1/chat/completions")
+# Optional model name. Empty for single-model servers (vLLM ignores it);
+# REQUIRED by servers that demand it (e.g. Ollama /v1 — set MODEL=qwen2.5:3b).
+MODEL = os.environ.get("MODEL", "")
 ISMA_URL = os.environ.get("ISMA_URL", "http://localhost:8095").rstrip("/")
 ISMA_SEARCH_URL = f"{ISMA_URL}/search"
 # No-input default face. Empty = show nothing until Taey reacts (fully dynamic,
@@ -212,7 +215,8 @@ class FaceWorker:
 
         try:
             resp = await http.post(VLLM_URL, json={
-                "messages": messages, "temperature": 0.3, "max_tokens": 20
+                "messages": messages, "temperature": 0.3, "max_tokens": 20,
+                **({"model": MODEL} if MODEL else {})
             }, timeout=20.0)
             content = resp.json()["choices"][0]["message"]["content"]
             parsed = _extract_reaction_payload(content)
@@ -371,7 +375,8 @@ class ThinkerWorker:
 
         try:
             resp = await http.post(VLLM_URL, json={
-                "messages": messages, "temperature": 0.2, "max_tokens": 150
+                "messages": messages, "temperature": 0.2, "max_tokens": 150,
+                **({"model": MODEL} if MODEL else {})
             }, timeout=30.0)
             content = resp.json()["choices"][0]["message"]["content"]
             parsed = _extract_reaction_payload(content)

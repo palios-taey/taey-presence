@@ -114,7 +114,10 @@ coordinate only through Redis keys (and optional Neo4j).
 - **Python 3.10+**
 - **Redis** (required) — the bus every process shares.
 - **An OpenAI-compatible chat endpoint** (required) — your local LLM: vLLM,
-  `llama.cpp --api`, Ollama's `/v1`, etc. Set `VLLM_URL`.
+  `llama.cpp --api`, Ollama's `/v1`, etc. Set `VLLM_URL`. If your server requires
+  a model name in the request (Ollama does; vLLM single-model does not), set
+  `MODEL` too (e.g. `MODEL=qwen2.5:3b`). It works with any model — it does not
+  require a specific or fine-tuned one.
 - **A hybrid-search memory backend** (optional) — for the memory feature. Set
   `ISMA_URL` to the **base service URL** (for example `http://localhost:8095`).
   The workers append the concrete endpoints they need (`/search`,
