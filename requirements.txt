@@ -3,6 +3,7 @@ fastapi>=0.110
 uvicorn[standard]>=0.27
 httpx>=0.26
 redis>=5.0
+python-dotenv>=1.0
 
 # Optional: DCM inter-worker state in Neo4j. Without it, the presence worker
 # runs Redis-only (peer-state writes are skipped, everything else works).
