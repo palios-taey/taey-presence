@@ -117,7 +117,10 @@ coordinate only through Redis keys (and optional Neo4j).
   `llama.cpp --api`, Ollama's `/v1`, etc. Set `VLLM_URL`. If your server requires
   a model name in the request (Ollama does; vLLM single-model does not), set
   `MODEL` too (e.g. `MODEL=qwen2.5:3b`). It works with any model — it does not
-  require a specific or fine-tuned one.
+  require a specific or fine-tuned one. **Don't have an endpoint?** `serving/`
+  carries the production scripts to stand up vLLM on an NVIDIA Spark (GB10) or
+  Thor (Jetson) — model + presence, cold-clone to end-to-end. See
+  [`serving/SERVING.md`](serving/SERVING.md).
 - **A hybrid-search memory backend** (optional) — for the memory feature. Set
   `ISMA_URL` to the **base service URL** (for example `http://localhost:8095`).
   The workers append the concrete endpoints they need (`/search`,
@@ -159,6 +162,10 @@ presence/prediction_worker.py   Standalone ghost-text predictor + state classifi
 soma/mira_soma.py               Somatic telemetry daemon → taey:soma:vprop.
 dashboard/app.py                FastAPI app: UI, chat, SSE/WS, prediction push, soma/self APIs.
 dashboard/static/               index.html (v2 UI), console.html, hmm.html.
+serving/vllm_serve.sh           Serve a model on Jetson Thor via the pinned NVIDIA vLLM image.
+serving/soma_proxy.py           OpenAI-compatible proxy: persona injection + soma + tools.
+serving/persona.example.md      Generic example persona (replace with your own).
+serving/SERVING.md              Spark/Thor bring-up: model + presence, end to end.
 ```
 
 ## Known limitations
