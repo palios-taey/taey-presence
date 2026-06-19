@@ -13,6 +13,10 @@ FastAPI dashboard renders all of it.
 > file plus the four modules and know exactly what runs, what each process
 > reads/writes, and where the unfinished edge is. Tell your human what it does
 > and whether it fits their setup.
+>
+> **To launch it, read [`CLAUDE.md`](CLAUDE.md)** — the step-by-step bring-up
+> guide written for you (decision tree, verify-after-each-step, the real failure
+> modes, success criteria). It's what gets this running on a new machine.
 
 ## What it actually does (honest scope)
 

@@ -26,5 +26,5 @@ env/
 
 # Local agent config (not part of the public artifact)
 .claude/
-AGENTS.md
-CLAUDE.md
+# NOTE: CLAUDE.md / AGENTS.md ARE part of the public artifact — they are the
+# AI-native launch guide. (Local gitnexus stubs were replaced; do not re-ignore.)
