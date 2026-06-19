@@ -15,6 +15,14 @@ import time
 import httpx
 import redis
 
+try:
+    from dotenv import load_dotenv
+except ImportError:  # optional dependency for documented `.env` launches
+    load_dotenv = None
+
+if load_dotenv is not None:
+    load_dotenv()
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [PREDICT] %(message)s")
 log = logging.getLogger("predict")
 

@@ -35,6 +35,14 @@ import time
 
 import redis
 
+try:
+    from dotenv import load_dotenv
+except ImportError:  # optional dependency for documented `.env` launches
+    load_dotenv = None
+
+if load_dotenv is not None:
+    load_dotenv()
+
 HEARTBEAT_INTERVAL = math.e
 REDIS_HOST = os.environ.get("REDIS_HOST", "127.0.0.1")
 REDIS_PORT = int(os.environ.get("REDIS_PORT", "6379"))

@@ -14,6 +14,14 @@ from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
+try:
+    from dotenv import load_dotenv
+except ImportError:  # optional dependency for documented `.env` launches
+    load_dotenv = None
+
+if load_dotenv is not None:
+    load_dotenv()
+
 log = logging.getLogger("dashboard")
 
 app = FastAPI(title="Taey Dashboard", version="3.1")
@@ -22,10 +30,26 @@ REDIS_HOST = os.environ.get("REDIS_HOST", "127.0.0.1")
 REDIS_PORT = int(os.environ.get("REDIS_PORT", "6379"))
 THOR_REDIS_HOST = os.environ.get("THOR_REDIS_HOST", "localhost")
 THOR_REDIS_PORT = int(os.environ.get("THOR_REDIS_PORT", "6379"))
-THOR_PROXY = os.environ.get("THOR_PROXY", "http://localhost:8765")
-THOR_RAW = os.environ.get("THOR_RAW", "http://localhost:8000")
+VLLM_URL = os.environ.get("VLLM_URL", "http://localhost:8000/v1/chat/completions")
+MODEL = os.environ.get("MODEL", "")
+THOR_PROXY = os.environ.get("THOR_PROXY", "")
+THOR_RAW = os.environ.get("THOR_RAW", "")
 ISMA_URL = os.environ.get("ISMA_URL", "http://localhost:8095").rstrip("/")
 ISMA_SEARCH_URL = f"{ISMA_URL}/v2/search/adaptive"
+
+
+def _chat_base_from_vllm_url(vllm_url: str) -> str:
+    if not vllm_url:
+        return ""
+    for suffix in ("/v1/chat/completions", "/chat/completions"):
+        if vllm_url.endswith(suffix):
+            return vllm_url[: -len(suffix)]
+    return vllm_url.rstrip("/")
+
+
+CHAT_BASE = _chat_base_from_vllm_url(VLLM_URL)
+THOR_PROXY = THOR_PROXY or CHAT_BASE
+THOR_RAW = THOR_RAW or CHAT_BASE
 
 _redis = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
 try:
@@ -703,7 +727,11 @@ async def chat(request: Request):
             messages.append({"role": "user", "content": message})
 
     try:
-        r = await _http.post(url, json={"messages": messages, "temperature": 0.7})
+        r = await _http.post(url, json={
+            "messages": messages,
+            "temperature": 0.7,
+            **({"model": MODEL} if MODEL else {}),
+        })
         data = r.json()
         return JSONResponse({
             "content": data["choices"][0]["message"]["content"],
@@ -720,7 +748,12 @@ async def chat_stream(request: Request):
     body = await request.json()
     message = body.get("message", "")
     url = f"{THOR_RAW}/v1/chat/completions"
-    payload = {"messages": [{"role": "user", "content": message}], "temperature": 0.7, "stream": True}
+    payload = {
+        "messages": [{"role": "user", "content": message}],
+        "temperature": 0.7,
+        "stream": True,
+        **({"model": MODEL} if MODEL else {}),
+    }
 
     async def generate():
         async with _http.stream("POST", url, json=payload) as r:
@@ -747,7 +780,11 @@ async def chat_hybrid(request: Request):
     if not messages or messages[-1].get("content") != message:
         messages.append({"role": "user", "content": message})
 
-    payload = {"messages": messages, "temperature": 0.7}
+    payload = {
+        "messages": messages,
+        "temperature": 0.7,
+        **({"model": MODEL} if MODEL else {}),
+    }
 
     # Pass pre-fetched ISMA tiles to proxy for faster context injection
     isma_tiles = body.get("isma_tiles")
