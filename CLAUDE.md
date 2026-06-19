@@ -61,9 +61,10 @@ uvicorn dashboard.app:app --host 127.0.0.1 --port 5001
 ```
 
 ### VERIFY (do not declare success without these)
-1. `redis-cli ping` → `PONG`.
+1. `redis-cli ping` → `PONG`. (Non-default Redis port? add `-p <port>`, e.g. `redis-cli -p 6390 ping`.)
 2. `redis-cli get taey:soma:vprop` → a JSON blob with a recent timestamp (soma is alive).
-3. `curl -s localhost:5001/api/self/face` (or open `http://localhost:5001`) → dashboard responds.
+3. `curl -s localhost:5001/api/health` → JSON with `redis`, `vllm`, `soma` status (or open
+   `http://localhost:5001`). Other live routes: `/api/soma`, `/api/self/overview`, `/api/predict/state`.
 4. Type into the dashboard chat → the model replies, a face appears, ghost text shows on partials.
    If the reply errors, the endpoint or `MODEL` is wrong — re-check "Decide the path first".
 
@@ -110,8 +111,13 @@ Then set `VLLM_URL=http://127.0.0.1:8765/v1/chat/completions` (proxy) or `:8000`
   `taey:dcm:*` updating.
 - **Memory feature returns nothing** — `ISMA_URL` backend is down. Expected if the user has no
   hybrid-search service; everything else still works.
-- **Port already in use** — `:5001` dashboard, `:8000` vLLM, `:8765` proxy, `:6379` Redis. Pick
-  another and set the matching env var.
+- **Port already in use** — `:5001` dashboard, `:8000` vLLM, `:8765` proxy, `:6379` Redis. The
+  dashboard port is a uvicorn CLI flag (`uvicorn dashboard.app:app --port 5009`), NOT an env var;
+  Redis is `REDIS_PORT`; the model endpoint is `VLLM_URL`. Change the one that collides.
+- **It auto-connects to whatever answers on the default ports.** With no auth, the workers will
+  connect to any Redis/Neo4j/ISMA live on the default ports (even one you didn't mean to use). To
+  point elsewhere, set `REDIS_PORT` / `NEO4J_URI` / `ISMA_URL`; to stay off an incidentally-present
+  service, point its var at a dead address (or accept the harmless connect).
 
 ## The Redis contract (for debugging)
 
