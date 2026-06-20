@@ -69,6 +69,13 @@ vllm serve /path/to/your/model-dir \
 `--reasoning-parser qwen3 --tool-call-parser qwen3_xml` are correct for Qwen3.5-family models.
 For other model families, set the parsers your model expects.
 
+> **Serving a model to be AUDITED? OMIT `--reasoning-parser`.** A reasoning parser routes the
+> model's `<think>` block into a separate `reasoning_content` field, leaving the OpenAI `content`
+> empty. An eval/audit harness that reads `content` (and strips `<think>` tags itself) will then see
+> blank responses and score everything as failures. Keep `--reasoning-parser` for an interactive
+> *persona/tool* endpoint (e.g. the auditor/judge), but drop it for a plain candidate-under-test so
+> the full `<think>…answer` stays in `content`.
+
 ---
 
 ## soma_proxy.py configuration (all env, all optional except the persona)
