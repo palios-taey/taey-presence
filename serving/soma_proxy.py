@@ -42,6 +42,7 @@ MIRA_REDIS_PORT = int(os.environ.get("MIRA_REDIS_PORT", "6379"))
 MIRA_DASHBOARD_URL = os.environ.get("MIRA_DASHBOARD_URL", "http://127.0.0.1:5001")
 MIRA_ISMA_URL = os.environ.get("MIRA_ISMA_URL", "http://127.0.0.1:8095")
 PROXY_PORT = int(os.environ.get("PROXY_PORT", "8765"))
+MAX_TOOL_ROUNDS = int(os.environ.get("MAX_TOOL_ROUNDS", "8"))
 # Persona/system prompt: ships a generic example so the proxy works out of the box.
 # Point SYSTEM_PROMPT_PATH at your own persona file to give the model an identity.
 SYSTEM_PROMPT_PATH = os.environ.get(
@@ -1191,6 +1192,25 @@ async def chat_completions(request: Request):
 
             if not tool_calls or finish_reason != "tool_calls":
                 # No tool calls -- final response
+                break
+
+            if round_num >= MAX_TOOL_ROUNDS:
+                log.warning(
+                    "Tool round cap hit (%d); forcing final text response",
+                    MAX_TOOL_ROUNDS,
+                )
+                final_body = dict(body)
+                final_body["messages"] = messages
+                final_body.pop("tools", None)
+                final_body["tool_choice"] = "none"
+                resp = await _http.post(
+                    "/v1/chat/completions",
+                    json=final_body,
+                    headers={"Content-Type": "application/json"},
+                )
+                result = resp.json()
+                usage = result.get("usage", {})
+                total_tokens += usage.get("completion_tokens", 0)
                 break
 
             # Execute tool calls
