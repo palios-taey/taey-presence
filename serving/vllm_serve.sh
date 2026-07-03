@@ -26,6 +26,11 @@ CACHE_DIR="${TAEY_CACHE_DIR:-$HOME/.cache}"
 LORA_PATH="${TAEY_LORA_PATH:-}"
 VLLM_PORT="${VLLM_PORT:-8000}"
 GPU_UTIL="${VLLM_GPU_UTIL:-0.85}"
+# Served model id clients address (default: the model dir basename). Set explicitly so
+# a redeploy on another Thor keeps the SAME id (e.g. Qwen3.6-27B-FP8) — a default basename
+# would silently change the id (lowercased dir name) and break every consumer + the eval harness.
+SERVED_NAME="${TAEY_SERVED_NAME:-$(basename "${MODEL_PATH}")}"
+MAX_MODEL_LEN="${TAEY_MAX_MODEL_LEN:-16384}"
 VLLM_IMAGE="${VLLM_IMAGE:-ghcr.io/nvidia-ai-iot/vllm:latest-jetson-thor}"
 
 echo "[vLLM] Serving model: ${MODEL_PATH}"
@@ -65,7 +70,10 @@ exec docker run \
   -e VLLM_CACHE_ROOT=/root/.cache/vllm \
   "${VLLM_IMAGE}" \
   vllm serve "/models/$(basename "${MODEL_PATH}")" \
+    --served-model-name "${SERVED_NAME}" \
+    --host 0.0.0.0 \
     --port "${VLLM_PORT}" \
+    --max-model-len "${MAX_MODEL_LEN}" \
     --gpu-memory-utilization "${GPU_UTIL}" \
     --enable-prefix-caching \
     --kv-cache-dtype fp8 \
