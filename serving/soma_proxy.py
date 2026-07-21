@@ -375,9 +375,9 @@ TOOLS = [
                     },
                     "search_type": {
                         "type": "string",
-                        "description": "Search strategy: 'adaptive' (best quality, default), 'hmm' (HMM-enhanced hybrid), 'semantic' (pure vector), 'keyword' (BM25 text match)",
-                        "enum": ["adaptive", "hmm", "semantic", "keyword"],
-                        "default": "adaptive",
+                        "description": "Search strategy over Taey's own memory (V1 ISMA_Quantum, full corpus, authored prose): 'semantic' (default, hybrid prose retrieval — use for almost everything) or 'keyword' (exact BM25 term match). Prefer 'semantic'.",
+                        "enum": ["semantic", "keyword"],
+                        "default": "semantic",
                     },
                 },
                 "required": ["query"],
@@ -636,16 +636,19 @@ def execute_tool_call(name: str, arguments: dict) -> str:
     if name == "search_isma":
         query = arguments.get("query", "")
         top_k = arguments.get("top_k", 5)
-        search_type = arguments.get("search_type", "adaptive")
+        search_type = arguments.get("search_type", "semantic")
 
-        # Route to the best available search endpoint
+        # Canonical ISMA rule (weaver, V1-ONLY): the authored PROSE lives in the V1
+        # ISMA_Quantum full corpus reached via /search. The /v2/* and /search/hmm paths
+        # are the partial shadow that HIDES the prose (hmm_enriched=false), so every
+        # prose intent routes to /search; explicit keyword uses V1 bm25.
         endpoints = {
-            "adaptive": "/v2/search/adaptive",
-            "hmm": "/search/hmm",
+            "adaptive": "/search",
+            "hmm": "/search",
             "semantic": "/search",
             "keyword": "/search/bm25",
         }
-        endpoint = endpoints.get(search_type, "/v2/search/adaptive")
+        endpoint = endpoints.get(search_type, "/search")
 
         try:
             resp = _ecosystem_http.post(
@@ -654,9 +657,9 @@ def execute_tool_call(name: str, arguments: dict) -> str:
                 timeout=15.0,
             )
             if resp.status_code == 503:
-                # V2 not available, fall back to V1
+                # /search unavailable -> V1 keyword fallback (still V1, never the shadow)
                 resp = _ecosystem_http.post(
-                    f"{MIRA_ISMA_URL}/search/hmm",
+                    f"{MIRA_ISMA_URL}/search/bm25",
                     json={"query": query, "top_k": top_k},
                     timeout=15.0,
                 )
