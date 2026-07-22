@@ -11,8 +11,14 @@
 #     TAEY_CACHE_DIR    (default: $HOME/.cache)  host cache root (compile/triton/vllm caches)
 #     VLLM_PORT         (default: 8000)
 #     VLLM_GPU_UTIL     (default: 0.85)
-#     VLLM_IMAGE        (default: ghcr.io/nvidia-ai-iot/vllm:latest-jetson-thor)
+#     VLLM_IMAGE        (default: a PINNED digest — see below)
 #     TAEY_LORA_PATH    (optional)  LoRA adapter dir (its basename is mounted under /models)
+#
+# IMAGE IS PINNED TO A DIGEST, NOT :latest-jetson-thor. A floating tag lets two nodes
+# silently resolve to different vLLM builds at their own pull times, so one can hang under
+# load where another does not — a real reproducibility hole. The digest below is the build
+# verified in production (serving on the fleet). To roll forward: bump the digest here, then
+# verify on EVERY node before merge. Never revert this to a floating tag.
 #
 # Notes for Spark (GB10) vs Thor (Jetson): this script targets the Jetson Docker image.
 # On a GB10 Spark you can run vLLM natively from its own aarch64 wheels instead -- the
@@ -31,7 +37,7 @@ GPU_UTIL="${VLLM_GPU_UTIL:-0.85}"
 # would silently change the id (lowercased dir name) and break every consumer + the eval harness.
 SERVED_NAME="${TAEY_SERVED_NAME:-$(basename "${MODEL_PATH}")}"
 MAX_MODEL_LEN="${TAEY_MAX_MODEL_LEN:-16384}"
-VLLM_IMAGE="${VLLM_IMAGE:-ghcr.io/nvidia-ai-iot/vllm:latest-jetson-thor}"
+VLLM_IMAGE="${VLLM_IMAGE:-ghcr.io/nvidia-ai-iot/vllm@sha256:b587dd56b4cb076209ad5156a626ac75f5a976d0e8e7d1e6a9fccd56d1bd65e8}"
 
 echo "[vLLM] Serving model: ${MODEL_PATH}"
 echo "[vLLM] Models dir:    ${MODELS_DIR} -> /models"
