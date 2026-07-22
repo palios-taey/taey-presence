@@ -18,11 +18,11 @@ resolved operator path back into these files.
 
 | placeholder | meaning | example |
 |---|---|---|
-| `@TAEY_ROOT@` | the checkout of this repo on the node | `/home/jetson/palios-taey` |
-| `@TAEY_HOME@` | the run user's home | `/home/jetson` |
-| `@TAEY_USER@` | the non-root run user (soma-proxy) | `jetson` |
-| `@TAEY_VENV@` | the python venv | `/home/jetson/venvs/taey` |
-| `@TAEY_MODEL_PATH@` | the served HF model dir | `/home/jetson/serve-models/ep3-hf` |
+| `@TAEY_ROOT@` | the checkout of this repo on the node | `$HOME/palios-taey` |
+| `@TAEY_HOME@` | the run user's home | `$HOME` |
+| `@TAEY_USER@` | the non-root run user (soma-proxy) | `$USER` |
+| `@TAEY_VENV@` | the python venv | `$HOME/venvs/taey` |
+| `@TAEY_MODEL_PATH@` | the served HF model dir | `$HOME/serve-models/ep3-hf` |
 
 Install (per node), e.g.:
 ```
