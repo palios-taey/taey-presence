@@ -113,10 +113,14 @@ async def predict(partial, history, http):
         max_tokens = 40
     else:
         messages.append({"role": "user", "content": f'The user is currently typing (not yet sent): "{partial}"{CLASSIFY_SUFFIX}'})
-        max_tokens = 120
+        # 80 tokens fits the 25s timeout at the 27B seat's ~3-4 tok/s decode;
+        # 120 provably overran it (31s measured) and the result was discarded.
+        max_tokens = 80
 
     try:
-        resp = await http.post(VLLM_URL, json={"messages": messages, "temperature": 0.1, "max_tokens": max_tokens, **({"model": MODEL} if MODEL else {})}, timeout=25.0)
+        # Latency-bound leg: reasoning mode burns the budget inside <think>
+        # (empty content), and tool calls overrun the typing window.
+        resp = await http.post(VLLM_URL, json={"messages": messages, "temperature": 0.1, "max_tokens": max_tokens, "chat_template_kwargs": {"enable_thinking": False}, "tool_choice": "none", **({"model": MODEL} if MODEL else {})}, timeout=25.0)
         data = resp.json()
         content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
         parsed = _extract_prediction_payload(content)

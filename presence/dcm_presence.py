@@ -214,8 +214,12 @@ class FaceWorker:
         messages.append({"role": "user", "content": f'[still typing]: {partial}'})
 
         try:
+            # Latency-bound leg: a reasoning-mode model burns the whole token
+            # budget inside <think> and returns empty content — force it off.
             resp = await http.post(VLLM_URL, json={
-                "messages": messages, "temperature": 0.3, "max_tokens": 20,
+                "messages": messages, "temperature": 0.3, "max_tokens": 40,
+                "chat_template_kwargs": {"enable_thinking": False},
+                "tool_choice": "none",
                 **({"model": MODEL} if MODEL else {})
             }, timeout=20.0)
             content = resp.json()["choices"][0]["message"]["content"]
@@ -291,7 +295,7 @@ class MemoryWorker:
             results = data if isinstance(data, list) else data.get("results", data.get("tiles", []))
             return [{
                 "hash": t.get("content_hash", ""),
-                "title": t.get("title", t.get("document_name", "")),
+                "title": t.get("title") or t.get("document_name") or t.get("source_file", ""),
                 "snippet": (t.get("content", "") or t.get("rosetta_summary", ""))[:400],
                 "score": t.get("score", t.get("certainty", 0)),
             } for t in results[:top_k]]
@@ -374,8 +378,13 @@ class ThinkerWorker:
         messages.append({"role": "user", "content": f'[user is typing, not yet sent]: "{partial}"'})
 
         try:
+            # 80 tokens is what the 30s window affords at the 27B seat's
+            # ~3-4 tok/s decode; requesting more just burns GPU past the
+            # timeout the worker has already abandoned.
             resp = await http.post(VLLM_URL, json={
-                "messages": messages, "temperature": 0.2, "max_tokens": 150,
+                "messages": messages, "temperature": 0.2, "max_tokens": 80,
+                "chat_template_kwargs": {"enable_thinking": False},
+                "tool_choice": "none",
                 **({"model": MODEL} if MODEL else {})
             }, timeout=30.0)
             content = resp.json()["choices"][0]["message"]["content"]
