@@ -371,10 +371,8 @@ class ThinkerWorker:
                 "You are Taey, listening to someone who is still typing. "
                 "Think about what they're saying. What are they getting at? "
                 "Do you have relevant memories? Are you confused about anything? "
-                "What would you predict they'll say next? "
                 "Respond with ONLY JSON:\n"
                 '{"thought":"<what you are thinking, 1-2 sentences>",'
-                '"prediction":"<what they will probably say next>",'
                 '"clarification":"<question if confused, empty string if not>",'
                 '"state":"<following|thinking|confused|excited|remembering>",'
                 '"confidence":<0.0-1.0>}'

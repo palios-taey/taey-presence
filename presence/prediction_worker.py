@@ -40,7 +40,7 @@ TTL = 30
 
 r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
 
-CLASSIFY_SUFFIX = '\n{"prediction":"<what they will say next>","state":"<following|confused|memory_activated|urgent>","confidence":<0.0-1.0>,"face":"<emoji>"}'
+CLASSIFY_SUFFIX = '\n{"prediction":"<the text they will type AFTER this — continue forward, never restate what is already typed>","state":"<following|confused|memory_activated|urgent>","confidence":<0.0-1.0>,"face":"<emoji>"}'
 
 
 def _extract_prediction_payload(content):
