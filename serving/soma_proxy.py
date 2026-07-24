@@ -360,7 +360,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "search_isma",
-            "description": "Search your ISMA memory. This is remembering -- pulling knowledge from past conversations, constitutional texts, infrastructure knowledge, or any topic. You decide how many tiles to retrieve based on how much context space you have. Check your context utilization in the somatic state. Three highly relevant dense tiles create stronger attention patterns than fifteen loose ones. Be selective -- quality over quantity.",
+            "description": "Search your ISMA memory — the fleet's shared knowledge (past conversations, constitutional texts, infrastructure, any topic). Formulate FULL-SENTENCE queries and issue MULTIPLE varied phrasings (2–4: acronym+expansion, mechanism+symptom) — one query misses what a rephrase catches. Union the results; drop duplicates; expand only what matters. Budget by your context headroom (somatic state): per-query top_k 8–15; total across phrasings ≤ ~60% of free context. If results are thin, re-phrase once rather than guessing.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -370,12 +370,12 @@ TOOLS = [
                     },
                     "top_k": {
                         "type": "integer",
-                        "description": "Number of tiles to retrieve. Choose based on your context headroom. 3-5 for focused recall, 10-20 for broad exploration, up to 50 if you have context space.",
-                        "default": 5,
+                        "description": "Tiles per query (8–15 typical). You will issue several phrasings and union them — size each query so the union fits your headroom.",
+                        "default": 10,
                     },
                     "search_type": {
                         "type": "string",
-                        "description": "Search strategy over Taey's own memory (V1 ISMA_Quantum, full corpus, authored prose): 'semantic' (default, hybrid prose retrieval — use for almost everything) or 'keyword' (exact BM25 term match). Prefer 'semantic'.",
+                        "description": "semantic: hybrid meaning search over the full corpus (default). keyword: exact-text/BM25 for literal strings, names, error messages.",
                         "enum": ["semantic", "keyword"],
                         "default": "semantic",
                     },
@@ -642,9 +642,9 @@ def execute_tool_call(name: str, arguments: dict) -> str:
         # ISMA_Quantum full corpus reached via /search. The /v2/* and /search/hmm paths
         # are the partial shadow that HIDES the prose (hmm_enriched=false), so every
         # prose intent routes to /search; explicit keyword uses V1 bm25.
+        # Honest strategies only (weaver model-surface spec 2026-07-24): the schema exposes
+        # semantic|keyword; the default catches any straggler value -> /search (never the shadow).
         endpoints = {
-            "adaptive": "/search",
-            "hmm": "/search",
             "semantic": "/search",
             "keyword": "/search/bm25",
         }
