@@ -58,6 +58,18 @@ if [ -n "${QUANTIZATION}" ]; then
   QUANT_ARGS="--quantization ${QUANTIZATION}"
 fi
 
+# Quantization kernel-backend overrides, forwarded ONLY when actually set. vLLM VALIDATES these
+# against an enum, so passing an empty value is NOT the same as not passing it -- `-e VAR=""`
+# makes the engine abort with `Invalid value '' for VLLM_NVFP4_GEMM_BACKEND`. Build the -e flags
+# conditionally so an unset override is genuinely absent from the container environment.
+QUANT_ENV_ARGS=""
+if [ -n "${VLLM_TEST_FORCE_FP8_MARLIN:-}" ]; then
+  QUANT_ENV_ARGS="${QUANT_ENV_ARGS} -e VLLM_TEST_FORCE_FP8_MARLIN=${VLLM_TEST_FORCE_FP8_MARLIN}"
+fi
+if [ -n "${VLLM_NVFP4_GEMM_BACKEND:-}" ]; then
+  QUANT_ENV_ARGS="${QUANT_ENV_ARGS} -e VLLM_NVFP4_GEMM_BACKEND=${VLLM_NVFP4_GEMM_BACKEND}"
+fi
+
 LORA_ARGS=""
 if [ -n "${LORA_PATH}" ]; then
   LORA_NAME=$(basename "${LORA_PATH}")
@@ -87,8 +99,7 @@ exec docker run \
   -e TORCHINDUCTOR_FX_GRAPH_CACHE=1 \
   -e TORCHINDUCTOR_AUTOGRAD_CACHE=1 \
   -e VLLM_CACHE_ROOT=/root/.cache/vllm \
-  -e VLLM_TEST_FORCE_FP8_MARLIN="${VLLM_TEST_FORCE_FP8_MARLIN:-}" \
-  -e VLLM_NVFP4_GEMM_BACKEND="${VLLM_NVFP4_GEMM_BACKEND:-}" \
+  ${QUANT_ENV_ARGS} \
   "${VLLM_IMAGE}" \
   vllm serve "/models/$(basename "${MODEL_PATH}")" \
     --served-model-name "${SERVED_NAME}" \
