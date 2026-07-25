@@ -13,16 +13,20 @@ real request, not a benchmark harness. Where something is unmeasured it says so.
   `tok/s ≈ memory_bandwidth / weight_bytes`. Decode here is **memory-bandwidth-bound, not
   compute-bound** — the SMs idle waiting on the bus.
 
-**The roofline, now empirically confirmed on this hardware:**
+**The roofline, empirically confirmed on this hardware.** Note the byte count: 55.6 GB is the
+ON-DISK size, but the vision tower is not read during text decode and the input embedding is a
+one-row gather, so the real per-token traffic is **~41-46 GB** (see Corrections below).
 
-| weights | bytes | theoretical ceiling | measured |
-|---|---|---|---|
-| bf16 (current) | 55.6 GB | 4.91 tok/s | **4.64–4.66 tok/s (95%)** |
-| fp8 | 27.8 GB | 9.82 tok/s | not yet achievable — see below |
-| nvfp4 | 13.9 GB | 19.64 tok/s | untested |
+| weights | on-disk | real bytes/token | tuned ceiling | measured |
+|---|---|---|---|---|
+| bf16 (current) | 55.6 GB | ~43.5 GB | **~5.2 tok/s** | **4.64–4.66 tok/s (~87%)** |
+| fp8 | ~28 GB | ~22 GB | ~10 tok/s | not achievable on this build — FINDING 3 |
+| nvfp4 | ~14 GB | ~11 GB | ~20 tok/s | untested; sm_110 support doubtful |
 
-We are at ~95% of the bf16 ceiling. **No configuration change can meaningfully beat that** — the
-remaining levers are fewer weight bytes, or fewer tokens generated.
+We are at **~87% of the tuned bf16 ceiling** (an earlier revision of this document said 95%, computed
+against the inflated on-disk byte count). **No configuration change beats that by much** — the
+remaining levers are fewer weight bytes, fewer tokens generated, or more tokens per weight-read
+(speculative decoding / concurrency).
 
 ## FINDING 1 — the EMC clock was sagging (fixed, in-tree)
 
