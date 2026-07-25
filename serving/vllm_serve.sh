@@ -87,6 +87,8 @@ exec docker run \
   -e TORCHINDUCTOR_FX_GRAPH_CACHE=1 \
   -e TORCHINDUCTOR_AUTOGRAD_CACHE=1 \
   -e VLLM_CACHE_ROOT=/root/.cache/vllm \
+  -e VLLM_TEST_FORCE_FP8_MARLIN="${VLLM_TEST_FORCE_FP8_MARLIN:-}" \
+  -e VLLM_NVFP4_GEMM_BACKEND="${VLLM_NVFP4_GEMM_BACKEND:-}" \
   "${VLLM_IMAGE}" \
   vllm serve "/models/$(basename "${MODEL_PATH}")" \
     --served-model-name "${SERVED_NAME}" \
