@@ -37,6 +37,13 @@ GPU_UTIL="${VLLM_GPU_UTIL:-0.85}"
 # would silently change the id (lowercased dir name) and break every consumer + the eval harness.
 SERVED_NAME="${TAEY_SERVED_NAME:-$(basename "${MODEL_PATH}")}"
 MAX_MODEL_LEN="${TAEY_MAX_MODEL_LEN:-16384}"
+# Weight quantization. Decode on this hardware is memory-bandwidth-bound — every weight is read
+# per generated token — so tokens/sec scales with how many BYTES the weights occupy, not with
+# compute. On a bf16 27B (~55.6GB) that measured 3.56 tok/s single-stream on a Jetson AGX Thor.
+# `fp8` halves the weight bytes and is hardware-accelerated on Blackwell-class parts (Thor reports
+# compute capability 11.0, which has native FP8 tensor cores). Unset = serve the weights as stored.
+# A pre-quantized checkpoint carries its own quantization_config and needs no value here.
+QUANTIZATION="${TAEY_QUANTIZATION:-}"
 VLLM_IMAGE="${VLLM_IMAGE:-ghcr.io/nvidia-ai-iot/vllm@sha256:b587dd56b4cb076209ad5156a626ac75f5a976d0e8e7d1e6a9fccd56d1bd65e8}"
 
 echo "[vLLM] Serving model: ${MODEL_PATH}"
@@ -44,6 +51,12 @@ echo "[vLLM] Models dir:    ${MODELS_DIR} -> /models"
 echo "[vLLM] Port: ${VLLM_PORT}, GPU util: ${GPU_UTIL}, image: ${VLLM_IMAGE}"
 
 mkdir -p "${CACHE_DIR}/vllm-compile" "${CACHE_DIR}/triton" "${CACHE_DIR}/vllm"
+
+QUANT_ARGS=""
+if [ -n "${QUANTIZATION}" ]; then
+  echo "[vLLM] Weight quantization: ${QUANTIZATION}"
+  QUANT_ARGS="--quantization ${QUANTIZATION}"
+fi
 
 LORA_ARGS=""
 if [ -n "${LORA_PATH}" ]; then
@@ -89,4 +102,5 @@ exec docker run \
     --reasoning-parser qwen3 \
     --enable-auto-tool-choice \
     --tool-call-parser qwen3_xml \
+    ${QUANT_ARGS} \
     ${LORA_ARGS}
