@@ -103,13 +103,72 @@ degrade exactly the judgment the pipeline depends on. It proves itself in produc
 the same real work — same job scored, same walk judged, outputs compared — not on a benchmark. If
 judgment quality moves at all, bf16 stays.
 
+## FINDING 4 — MAXN power mode (small, and there is a reason it is small)
+
+The Thors default to the **120W** power mode; **MAXN (nvpmodel ID 0)** is available and applies
+without a reboot. Measured on Thor1 with clocks already pinned:
+
+| mode | tok/s |
+|---|---|
+| 120W | 4.30 |
+| MAXN | 4.45 |
+
+**+3.5% from a single measurement — suggestive, not established** (repeat runs did not complete;
+treat as provisional). The reason it is small is physical and worth stating: `jetson_clocks` had
+already pinned EMC to its 4266 MHz max, so **memory bandwidth — the actual bottleneck — was already
+maxed**. MAXN raises the *compute* power ceiling, and compute is not what limits a memory-bound
+decode. The two levers overlap; the clock pin captured most of it.
+
+## FINDING 5 — speculative decoding is NOT blocked (correcting an earlier conclusion)
+
+A previously recorded conclusion held that ngram speculative decode was unavailable because `numba`
+is absent from the Jetson vLLM image, and therefore "not a near-term lever." That checked whether
+numba was MISSING and never whether it was INSTALLABLE. Verified inside the pinned image:
+
+```
+python3 -c "import numba"      -> ModuleNotFoundError   (genuinely absent)
+pip download numba --no-deps   -> numba-0.66.0-cp312-cp312-...aarch64.whl
+                                  Successfully downloaded numba
+```
+
+**A wheel exists for this arch/python.** So it is a *derived-image build step*, not a dead end: build
+`FROM` the pinned digest with numba installed, pin the derived image by its own digest (preserving the
+pinned-digest discipline), then serve with an ngram `--speculative-config`. Do not pip-install at
+container start — that is unpinned and fragile.
+
+**Why this outranks quantization on this model:** speculative decoding is the only multiplicative
+lever that is **output-identical to the target model by construction** — the target verifies every
+token — so it costs *exactly zero* fidelity. Every quantization option trades some, and on a
+behavioral fine-tune that trade is the one we cannot afford. External measurement on this hardware
+class: 6.27 -> 16.19 tok/s at concurrency 1 with EAGLE-3. ngram needs no draft model at all.
+
+## Corrections to earlier analysis in this document
+
+- **Bytes/token was overstated ~20%.** 55.6 GB is the ON-DISK size. The vision tower is not read
+  during text decode and the input embedding is a one-row gather, so the real per-token figure is
+  ~41-46 GB. Against an externally calibrated ~225 GB/s achieved on this silicon, the tuned bf16
+  ceiling is **~5.2 tok/s** and the measured 4.64 is **~87% of it — more headroom than the 95%
+  claimed above**, which was computed against an inflated byte count.
+- **Concurrency was dismissed too quickly.** "Batching cannot mask single-stream latency" is true for
+  one sequential walk and false for the operation: a backlog of scored rows against a
+  handful-per-day output is **throughput-limited, not latency-limited**. External measurement on this
+  hardware: 41.5 tok/s at concurrency 8 vs 6.27 at concurrency 1 (~6.6x aggregate). `--max-num-seqs 8`
+  is already set, so the engine is ready and the CLIENT is serializing.
+- **A quantization safety note that outranks throughput:** on this architecture class, older builds
+  reportedly **silently miscomputed** where the current one refuses to launch. The FP8 crash in
+  FINDING 3 was therefore the *safe* failure mode. Silent miscompute is invisible to a tok/s
+  measurement and fatal to a behavioral fine-tune — which is why any quantized build must prove
+  itself by output-diff against bf16 on real work, never by a throughput number.
+
 ## Ranked levers, by measured or predicted value
 
 | lever | value | status |
 |---|---|---|
 | `enable_thinking: false` on routine trained paths | **10.8x wall-clock** | measured; client-side flag |
 | pin clocks at serve start | 1.30x on an idle node, +1.3% on a busy one | measured; landed in-tree |
-| offline FP8 checkpoint | ~2x predicted (9.82 tok/s ceiling) | blocked on an offline build + quality gate |
-| ngram speculative decode | 1.3–2x predicted, no behavioral risk | blocked: `numba` absent from the Jetson image |
+| ngram / EAGLE speculative decode | 1.3–2.5x predicted, **zero fidelity cost by construction** | unblocked: derived image + numba (FINDING 5) |
+| client-side concurrency for independent work | up to ~6.6x aggregate on this hardware | engine already configured; client serializes |
+| offline FP8 checkpoint | ~2x predicted | needs offline build + a production output-diff quality gate |
+| MAXN power mode | +3.5% provisional | applied on the bench (FINDING 4) |
 | nvfp4 | ~4x predicted ceiling | untested; sm_110 kernel support doubtful given FINDING 3 |
 | batching independent work | workload-dependent | does not help the sequential walk path |
