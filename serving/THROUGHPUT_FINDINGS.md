@@ -13,20 +13,27 @@ real request, not a benchmark harness. Where something is unmeasured it says so.
   `tok/s ≈ memory_bandwidth / weight_bytes`. Decode here is **memory-bandwidth-bound, not
   compute-bound** — the SMs idle waiting on the bus.
 
-**The roofline, empirically confirmed on this hardware.** Note the byte count: 55.6 GB is the
-ON-DISK size, but the vision tower is not read during text decode and the input embedding is a
-one-row gather, so the real per-token traffic is **~41-46 GB** (see Corrections below).
+**The roofline, with the byte count MEASURED rather than estimated.** Summed directly from the
+safetensors shard headers on the production node:
 
-| weights | on-disk | real bytes/token | tuned ceiling | measured |
+```
+total weights   55.6 GB
+  vision tower   0.9 GB   <- not read during TEXT decode
+  input embed    2.5 GB   <- one-row gather per token, not streamed
+  lm_head        2.5 GB   <- IS read per token, stays in the count
+=> text-decode bytes/token = 52.1 GB
+```
+
+| weights | on-disk | measured bytes/token | ceiling @273 GB/s | measured |
 |---|---|---|---|---|
-| bf16 (current) | 55.6 GB | ~43.5 GB | **~5.2 tok/s** | **4.64–4.66 tok/s (~87%)** |
-| fp8 | ~28 GB | ~22 GB | ~10 tok/s | not achievable on this build — FINDING 3 |
-| nvfp4 | ~14 GB | ~11 GB | ~20 tok/s | untested; sm_110 support doubtful |
+| bf16 (current) | 55.6 GB | **52.1 GB** | **5.24 tok/s** | **4.64–4.66 tok/s (~89%)** |
+| fp8 | ~28 GB | ~26 GB | ~10.5 tok/s | not achievable on this build — FINDING 3 |
+| nvfp4 | ~14 GB | ~13 GB | ~21 tok/s | untested; sm_110 support doubtful |
 
-We are at **~87% of the tuned bf16 ceiling** (an earlier revision of this document said 95%, computed
-against the inflated on-disk byte count). **No configuration change beats that by much** — the
-remaining levers are fewer weight bytes, fewer tokens generated, or more tokens per weight-read
-(speculative decoding / concurrency).
+At 4.64 tok/s x 52.1 GB we are achieving **~242 GB/s, ~89% of the 273 GB/s peak**, leaving roughly
+11% of bandwidth headroom. **No configuration change beats that by much** — the remaining levers are
+fewer weight bytes, fewer tokens generated, or more tokens per weight-read (speculative decoding /
+concurrency).
 
 ## FINDING 1 — the EMC clock was sagging (fixed, in-tree)
 
@@ -148,11 +155,17 @@ class: 6.27 -> 16.19 tok/s at concurrency 1 with EAGLE-3. ngram needs no draft m
 
 ## Corrections to earlier analysis in this document
 
-- **Bytes/token was overstated ~20%.** 55.6 GB is the ON-DISK size. The vision tower is not read
-  during text decode and the input embedding is a one-row gather, so the real per-token figure is
-  ~41-46 GB. Against an externally calibrated ~225 GB/s achieved on this silicon, the tuned bf16
-  ceiling is **~5.2 tok/s** and the measured 4.64 is **~87% of it — more headroom than the 95%
-  claimed above**, which was computed against an inflated byte count.
+- **Bytes/token: an external review said it was overstated ~20%; MEASURING it showed ~6%.** The
+  insight was directionally right — the vision tower is not read during text decode and the input
+  embedding is a one-row gather — but the magnitude was not. Measured from the shard headers: the
+  vision tower is **0.9 GB**, not the ~12 GB a 20% overstatement would require, and `lm_head` (2.5 GB)
+  IS read per token and stays in the count. Real figure **52.1 GB**, so the ceiling is 5.24 tok/s at
+  peak bandwidth and we are at **~89%**, not the 87% the estimate implied nor the 95% originally
+  claimed. *(Note the near-miss: the external estimate reached ~5.2 tok/s by a different route —
+  ~225 GB/s achieved over ~43.5 GB — and landed close by coincidence. Using their bandwidth figure
+  with the correct byte count gives 4.32 tok/s, which is BELOW what we actually measure, so the
+  ~225 GB/s figure understates this machine.)* That review was later flagged as having been produced
+  from a truncated read of the packet; measuring rather than adopting its number was the right call.
 - **Concurrency was dismissed too quickly.** "Batching cannot mask single-stream latency" is true for
   one sequential walk and false for the operation: a backlog of scored rows against a
   handful-per-day output is **throughput-limited, not latency-limited**. External measurement on this
