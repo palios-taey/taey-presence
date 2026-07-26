@@ -153,6 +153,40 @@ token — so it costs *exactly zero* fidelity. Every quantization option trades 
 behavioral fine-tune that trade is the one we cannot afford. External measurement on this hardware
 class: 6.27 -> 16.19 tok/s at concurrency 1 with EAGLE-3. ngram needs no draft model at all.
 
+## FINDING 6 — greedy output is NOT byte-stable across a restart (this invalidates a whole class of gate)
+
+Speculative decoding (`ngram_gpu`) was measured on the real failing shape and then reverted on a
+byte-identity gate. The control run afterwards showed the gate itself was the wrong instrument.
+
+Same prompt, temperature 0, fixed seed, 15 KB context, 800 tokens:
+
+| run | config | sha256 (16) | wall-clock |
+|---|---|---|---|
+| A | no spec-decode | `d946d3e1059dea09` | 177.4 s |
+| B | **ngram_gpu** | `910968e089b2c92f` | **130.0 s** |
+| C | no spec-decode | `a6c7529a165c2595` | 182.9 s |
+
+**C differs from A** — identical config, identical request, no speculative decoding in either. So
+**greedy output is not reproducible across serve restarts on this stack** (batching, kernel
+selection and CUDA-graph capture all move across processes). A byte-identity check across a bounce
+therefore *cannot pass*, for any change. It fails on an unchanged configuration.
+
+**Consequences:**
+- The spec-decode identity failure showed **nothing** about drafting. That evidence is void.
+- **Any "byte-identical after restart" condition on a serving change is invalid here** and would
+  silently fail every future lossless check written that way — including on a quantized build,
+  where a false "it changed the output" would discard a good artifact.
+- The acceleration is real and outside the noise: the two unaccelerated runs differed by 3%
+  (177.4 s vs 182.9 s), while the accelerated run was 1.36-1.41x faster.
+
+**What a valid losslessness check looks like here**, since bytes are unavailable: the same standard
+already required for quantization — prove it on REAL WORK. Run identical production units with and
+without the change and compare *judged output quality*, which is the property that actually matters
+and which survives non-determinism. The mechanism argument (drafts verified by the target through
+the same rejection sampler) stands on its own; it simply cannot be confirmed bitwise on this stack.
+
+Spec-decode remains OFF. The `TAEY_SPECULATIVE_CONFIG` hook is inert when unset.
+
 ## Corrections to earlier analysis in this document
 
 - **Bytes/token: an external review said it was overstated ~20%; MEASURING it showed ~6%.** The
