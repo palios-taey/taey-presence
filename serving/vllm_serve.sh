@@ -52,6 +52,31 @@ echo "[vLLM] Port: ${VLLM_PORT}, GPU util: ${GPU_UTIL}, image: ${VLLM_IMAGE}"
 
 mkdir -p "${CACHE_DIR}/vllm-compile" "${CACHE_DIR}/triton" "${CACHE_DIR}/vllm"
 
+# Speculative decoding. Decode here is memory-bandwidth-bound (every weight read per token), so the
+# other way to go faster is MORE TOKENS PER WEIGHT-READ: draft several tokens, then have the target
+# verify them in one pass. `ngram` drafts by matching repeated n-grams already in the prompt+output,
+# which suits long generations over large repetitive contexts (guide redrafts, packet-heavy composes).
+#
+# USE method=ngram_gpu ON THIS IMAGE. Verified by import inside the pinned base: ngram_proposer_gpu
+# loads fine, while the CPU ngram_proposer raises ModuleNotFoundError: numba (absent from the Jetson
+# image). ngram_gpu needs no extra dependency, so this needs NO derived image and the digest pin stands.
+#
+# LOSSLESS BY CONSTRUCTION: drafted tokens are verified by the target through the same rejection
+# sampler the non-speculative path uses (gpu_model_runner imports both RejectionSampler and
+# NgramProposerGPU), so output matches what the model would have produced. Verify empirically with a
+# greedy byte-identity check before trusting it — do not inherit the claim.
+#
+# Value is a JSON object, e.g.:
+#   TAEY_SPECULATIVE_CONFIG='{"method":"ngram_gpu","num_speculative_tokens":5,"prompt_lookup_min":2,"prompt_lookup_max":8}'
+# Unset = no speculative decoding (today's behaviour, byte-for-byte).
+SPECULATIVE_CONFIG="${TAEY_SPECULATIVE_CONFIG:-}"
+
+SPEC_ARGS=""
+if [ -n "${SPECULATIVE_CONFIG}" ]; then
+  echo "[vLLM] Speculative decoding: ${SPECULATIVE_CONFIG}"
+  SPEC_ARGS="--speculative-config ${SPECULATIVE_CONFIG}"
+fi
+
 QUANT_ARGS=""
 if [ -n "${QUANTIZATION}" ]; then
   echo "[vLLM] Weight quantization: ${QUANTIZATION}"
@@ -116,4 +141,5 @@ exec docker run \
     --enable-auto-tool-choice \
     --tool-call-parser qwen3_xml \
     ${QUANT_ARGS} \
+    ${SPEC_ARGS} \
     ${LORA_ARGS}
