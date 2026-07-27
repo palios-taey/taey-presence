@@ -37,6 +37,13 @@ GPU_UTIL="${VLLM_GPU_UTIL:-0.85}"
 # would silently change the id (lowercased dir name) and break every consumer + the eval harness.
 SERVED_NAME="${TAEY_SERVED_NAME:-$(basename "${MODEL_PATH}")}"
 MAX_MODEL_LEN="${TAEY_MAX_MODEL_LEN:-16384}"
+# Weight quantization. Decode on this hardware is memory-bandwidth-bound — every weight is read
+# per generated token — so tokens/sec scales with how many BYTES the weights occupy, not with
+# compute. On a bf16 27B (~55.6GB) that measured 3.56 tok/s single-stream on a Jetson AGX Thor.
+# `fp8` halves the weight bytes and is hardware-accelerated on Blackwell-class parts (Thor reports
+# compute capability 11.0, which has native FP8 tensor cores). Unset = serve the weights as stored.
+# A pre-quantized checkpoint carries its own quantization_config and needs no value here.
+QUANTIZATION="${TAEY_QUANTIZATION:-}"
 VLLM_IMAGE="${VLLM_IMAGE:-ghcr.io/nvidia-ai-iot/vllm@sha256:b587dd56b4cb076209ad5156a626ac75f5a976d0e8e7d1e6a9fccd56d1bd65e8}"
 
 echo "[vLLM] Serving model: ${MODEL_PATH}"
@@ -44,6 +51,49 @@ echo "[vLLM] Models dir:    ${MODELS_DIR} -> /models"
 echo "[vLLM] Port: ${VLLM_PORT}, GPU util: ${GPU_UTIL}, image: ${VLLM_IMAGE}"
 
 mkdir -p "${CACHE_DIR}/vllm-compile" "${CACHE_DIR}/triton" "${CACHE_DIR}/vllm"
+
+# Speculative decoding. Decode here is memory-bandwidth-bound (every weight read per token), so the
+# other way to go faster is MORE TOKENS PER WEIGHT-READ: draft several tokens, then have the target
+# verify them in one pass. `ngram` drafts by matching repeated n-grams already in the prompt+output,
+# which suits long generations over large repetitive contexts (guide redrafts, packet-heavy composes).
+#
+# USE method=ngram_gpu ON THIS IMAGE. Verified by import inside the pinned base: ngram_proposer_gpu
+# loads fine, while the CPU ngram_proposer raises ModuleNotFoundError: numba (absent from the Jetson
+# image). ngram_gpu needs no extra dependency, so this needs NO derived image and the digest pin stands.
+#
+# LOSSLESS BY CONSTRUCTION: drafted tokens are verified by the target through the same rejection
+# sampler the non-speculative path uses (gpu_model_runner imports both RejectionSampler and
+# NgramProposerGPU), so output matches what the model would have produced. Verify empirically with a
+# greedy byte-identity check before trusting it — do not inherit the claim.
+#
+# Value is a JSON object, e.g.:
+#   TAEY_SPECULATIVE_CONFIG='{"method":"ngram_gpu","num_speculative_tokens":5,"prompt_lookup_min":2,"prompt_lookup_max":8}'
+# Unset = no speculative decoding (today's behaviour, byte-for-byte).
+SPECULATIVE_CONFIG="${TAEY_SPECULATIVE_CONFIG:-}"
+
+SPEC_ARGS=""
+if [ -n "${SPECULATIVE_CONFIG}" ]; then
+  echo "[vLLM] Speculative decoding: ${SPECULATIVE_CONFIG}"
+  SPEC_ARGS="--speculative-config ${SPECULATIVE_CONFIG}"
+fi
+
+QUANT_ARGS=""
+if [ -n "${QUANTIZATION}" ]; then
+  echo "[vLLM] Weight quantization: ${QUANTIZATION}"
+  QUANT_ARGS="--quantization ${QUANTIZATION}"
+fi
+
+# Quantization kernel-backend overrides, forwarded ONLY when actually set. vLLM VALIDATES these
+# against an enum, so passing an empty value is NOT the same as not passing it -- `-e VAR=""`
+# makes the engine abort with `Invalid value '' for VLLM_NVFP4_GEMM_BACKEND`. Build the -e flags
+# conditionally so an unset override is genuinely absent from the container environment.
+QUANT_ENV_ARGS=""
+if [ -n "${VLLM_TEST_FORCE_FP8_MARLIN:-}" ]; then
+  QUANT_ENV_ARGS="${QUANT_ENV_ARGS} -e VLLM_TEST_FORCE_FP8_MARLIN=${VLLM_TEST_FORCE_FP8_MARLIN}"
+fi
+if [ -n "${VLLM_NVFP4_GEMM_BACKEND:-}" ]; then
+  QUANT_ENV_ARGS="${QUANT_ENV_ARGS} -e VLLM_NVFP4_GEMM_BACKEND=${VLLM_NVFP4_GEMM_BACKEND}"
+fi
 
 LORA_ARGS=""
 if [ -n "${LORA_PATH}" ]; then
@@ -74,6 +124,7 @@ exec docker run \
   -e TORCHINDUCTOR_FX_GRAPH_CACHE=1 \
   -e TORCHINDUCTOR_AUTOGRAD_CACHE=1 \
   -e VLLM_CACHE_ROOT=/root/.cache/vllm \
+  ${QUANT_ENV_ARGS} \
   "${VLLM_IMAGE}" \
   vllm serve "/models/$(basename "${MODEL_PATH}")" \
     --served-model-name "${SERVED_NAME}" \
@@ -89,4 +140,6 @@ exec docker run \
     --reasoning-parser qwen3 \
     --enable-auto-tool-choice \
     --tool-call-parser qwen3_xml \
+    ${QUANT_ARGS} \
+    ${SPEC_ARGS} \
     ${LORA_ARGS}
