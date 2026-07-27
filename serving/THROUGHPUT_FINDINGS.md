@@ -223,3 +223,53 @@ Spec-decode remains OFF. The `TAEY_SPECULATIVE_CONFIG` hook is inert when unset.
 | MAXN power mode | +3.5% provisional | applied on the bench (FINDING 4) |
 | nvfp4 | ~4x predicted ceiling | untested; sm_110 kernel support doubtful given FINDING 3 |
 | batching independent work | workload-dependent | does not help the sequential walk path |
+
+---
+
+## FINDING 7 — ngram_gpu speculative decoding is a 4.94x win on redraft workloads AND IT BREAKS TOOL CALLING. Do not enable it on a tool-using serve.
+
+**Measured 2026-07-27 on Thor1 (10.0.0.8), `cpt_refresh_v3_servable`, vLLM 0.19, pinned digest.
+A/B on the SAME node and SAME model — the only difference is the drop-in.**
+
+Config: `{"method":"ngram_gpu","num_speculative_tokens":5,"prompt_lookup_min":2,"prompt_lookup_max":8}`
+(`ngram_proposer_gpu` imports fine in the pinned image; only the CPU `ngram_proposer` needs numba,
+so this requires no derived image and the digest pin stands.)
+
+### The throughput result is real and large
+| workload | spec OFF | spec ON | gain |
+|---|---|---|---|
+| short generate (52 tok) | 4.40 tok/s | 4.19 tok/s | **0.95x** — slight overhead, no win |
+| long redraft (~415 tok, reproduce-with-edits over a repeated body) | 4.42 tok/s (94.3s) | **21.81 tok/s (18.8s)** | **4.94x** |
+
+Exactly the predicted shape: n-gram drafting wins when the output largely reproduces tokens already
+in the context, and does nothing for short free generation.
+
+### AND IT BREAKS TOOL ELECTION — which is what the careers lane actually does
+Same 4-case tool battery, same node, same model, only the drop-in differs:
+
+| run | config | result |
+|---|---|---|
+| 1 | spec OFF | **4/4 correct**, clean arguments |
+| 2 | spec ON  | 1/3 elections, and one MALFORMED emission: `{"primitive=activate": "", "target": "Country combobox"}` — a broken key, not `"primitive":"activate"` |
+| 3 | spec ON  | **0/3 elections** — the model emitted no tool calls at all |
+| 4 | spec OFF (reverted) | **4/4 correct**, clean arguments |
+
+Causally clean: off→on→on→off, degradation only in the ON window, restored on revert.
+
+### THE LESSON — do not inherit "lossless by construction"
+The vLLM docs and this repo's own comment both state that drafted tokens are verified by the target
+through the same rejection sampler, so output matches what the model would have produced. **That
+claim did not survive contact with this stack's structured-output path.** Whatever the mechanism —
+interaction with the xml tool-call parser, the reasoning parser, or the grammar path — the
+observable is that tool election degrades to zero and emissions can be structurally malformed.
+
+This repo's own comment said to verify empirically before trusting it. That instruction is what
+caught it. **Keep it, and keep obeying it.**
+
+### Standing guidance
+- **Do NOT enable on any serve that elects tools.** That is the entire careers lane.
+- A ~5x win on reproduce-with-edits workloads is worth revisiting ONLY for a serve that does pure
+  prose generation with no tool calls and no structured output, and only with a tool battery run in
+  the same session as the throughput number.
+- Never report the throughput number without the fidelity result attached. Alone it argues for a
+  change that breaks production.
