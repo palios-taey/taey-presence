@@ -43,13 +43,13 @@
 # Exit: 0 = in sync / deployed. 1 = drift found (--check) or deploy failed.
 set -euo pipefail
 
-CHECK=0; RESTART=0; MODEL_PATH=""; SERVED_NAME=""; KEEP_NAME=0
+CHECK=0; RESTART=0; MODEL_PATH=""; SERVED_NAME=""; KEEP_NAME=0; NAME_EXPLICIT=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --check)       CHECK=1; shift ;;
     --restart)     RESTART=1; shift ;;
     --model-path)  MODEL_PATH="${2:?--model-path needs a value}"; shift 2 ;;
-    --served-name) SERVED_NAME="${2:?--served-name needs a value}"; shift 2 ;;
+    --served-name) SERVED_NAME="${2:?--served-name needs a value}"; NAME_EXPLICIT=1; shift 2 ;;
     --keep-served-name) KEEP_NAME=1; shift ;;
     -h|--help)     sed -n '2,40p' "$0"; exit 0 ;;
     *)             break ;;
@@ -152,7 +152,11 @@ fi
 if [ -n "$MODEL_PATH" ]; then
   cur_path=$(ssh "$TARGET" "systemctl show taey-ep3 -p Environment --value 2>/dev/null | tr ' ' '\n' | sed -n 's/^TAEY_MODEL_PATH=//p' | head -1" || true)
   cur_name=$(ssh "$TARGET" "systemctl show taey-ep3 -p Environment --value 2>/dev/null | tr ' ' '\n' | sed -n 's/^TAEY_SERVED_NAME=//p' | head -1" || true)
-  if [ -n "$cur_path" ] && [ "$cur_path" != "$MODEL_PATH" ] && [ -z "$SERVED_NAME" ] && [ "$KEEP_NAME" -eq 0 ]; then
+  # Test NAME_EXPLICIT, not emptiness. The preservation step above fills SERVED_NAME from the
+  # node, so an emptiness test here would ALWAYS be false and this gate would never fire again —
+  # the preservation fix silently disabled the guard it sits next to. Caught by a pre-window
+  # precondition check, not by the edit that caused it.
+  if [ -n "$cur_path" ] && [ "$cur_path" != "$MODEL_PATH" ] && [ "$NAME_EXPLICIT" -eq 0 ] && [ "$KEEP_NAME" -eq 0 ]; then
     cat >&2 <<EOF
 FATAL: this deploy changes the served ARTIFACT but not the served NAME.
          artifact: ${cur_path}
