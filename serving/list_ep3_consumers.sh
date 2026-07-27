@@ -78,7 +78,15 @@ EOF
 
 HL "== LIMITS OF THIS SCAN — read before trusting it =="
 cat <<'EOF'
-  This narrows the guessing; it does NOT prove completeness. Known blind spots:
+  **A SCAN CANNOT SEE A CONSUMER THAT IS DOWN.** This is the structural blind spot, not an edge
+  case: a halted or failed unit may not appear, and a stopped process holds no socket, so a clean
+  scan during an outage under-reports the true consumer set. Proven 2026-07-27 — apply-loop.service
+  is hard-pinned to one node with no failover and was INVISIBLE to a scan taken while it was
+  halted; repointing without it would have produced a 404 on lane restart that reads exactly like
+  the halt being recovered from. If any consumer is currently down, enumerate from CONFIG (unit
+  files, env files) and from memory of what normally runs — never from what answers right now.
+
+  This narrows the guessing; it does NOT prove completeness. Other known blind spots:
     - processes launched ad-hoc (a seat running a worker by hand) appear only if connected RIGHT NOW
     - consumers whose endpoint is a literal in source rather than config
     - env files outside the scanned paths
