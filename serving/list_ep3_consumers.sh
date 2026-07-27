@@ -76,6 +76,45 @@ cat <<'EOF'
   forgotten precisely because it is invisible to a technical scan.
 EOF
 
+HL "== WHAT THIS RUN COULD AND COULD NOT RULE OUT =="
+# The three blind spots below are all one thing: the observation surface cannot see the consumer,
+# and reports that as the consumer not existing. A false negative of that kind is INDISTINGUISHABLE
+# FROM A TRUE NEGATIVE — it reads as evidence, so it gets asserted to peers and then hardens when
+# someone cites it back. Prose caveats do not stop that; a per-run verdict does. So this section
+# states, for THIS run, which shapes were actually excluded and which remain open.
+
+# WRONG SCOPE — this one IS ruled out, because both scopes are scanned above.
+echo "  [RULED OUT ] wrong-scope: system AND user scope both enumerated this run."
+
+# DOWN — enumerable from config: a unit can exist, reference the endpoint, and not be running.
+downlist=""
+for scope in "--user" ""; do
+  # shellcheck disable=SC2086
+  while read -r u; do
+    [ -n "$u" ] || continue
+    st=$(systemctl $scope is-active "$u" 2>/dev/null)
+    [ "$st" = "active" ] && continue
+    env=$(systemctl $scope show "$u" -p Environment --value 2>/dev/null)
+    case "$env" in *EP3*|*:8000*) downlist="${downlist} ${u}[${st:-unknown}]" ;; esac
+  done < <(systemctl $scope list-unit-files --type=service --no-legend 2>/dev/null | awk '{print $1}')
+done
+if [ -n "$downlist" ]; then
+  echo "  [OPEN      ] down-consumer: these units reference an ep3 endpoint and are NOT running -"
+  printf '                %s\n' $downlist
+  echo "                They hold no socket, so nothing above can see them. Treat as consumers."
+else
+  echo "  [RULED OUT ] down-consumer: no non-running unit references an ep3 endpoint."
+fi
+
+# INTERMITTENT — never excludable from a point sample. Sample a few times and say so honestly.
+n=0
+for _ in 1 2 3; do
+  c=$(ss -tn 2>/dev/null | grep -c ':8000' || true); n=$((n + c)); sleep 2
+done
+echo "  [OPEN      ] intermittent-consumer: sockets sampled 3x over ~6s, ${n} observation(s)."
+echo "                A burst driver that connects outside that window is invisible by construction."
+echo "                This shape CANNOT be ruled out by observation — only by reading configs + asking."
+
 HL "== LIMITS OF THIS SCAN — read before trusting it =="
 cat <<'EOF'
   THREE SHAPES THIS SCAN STRUCTURALLY CANNOT REPORT. Not edge cases — each has bitten:
