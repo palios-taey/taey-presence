@@ -123,6 +123,18 @@ if [ -z "$MODEL_PATH" ]; then
   MODEL_PATH=$(ssh "$TARGET" "systemctl show taey-ep3 -p Environment --value 2>/dev/null | tr ' ' '\n' | sed -n 's/^TAEY_MODEL_PATH=//p' | head -1" || true)
   [ -n "$MODEL_PATH" ] && echo "[deploy] preserving served model: ${MODEL_PATH}"
 fi
+
+# PRESERVE THE SERVED ID TOO. The unit template hardcodes Environment=TAEY_SERVED_NAME=ep3, so
+# without this a plain deploy — one intended only to push a launcher change — SILENTLY REVERTS the
+# served id back to the template value. Observed 2026-07-27: Thor1 had been deliberately renamed to
+# a candidate id so stale ep3 callers would 404; a later deploy carrying an unrelated change put it
+# back to 'ep3' while the weights stayed the candidate's, recreating the exact alias trap the
+# --served-name gate below exists to prevent. The gate guarded the artifact/name relationship and
+# the deploy path went around it. Preserve the node's value; require a flag to change it.
+if [ -z "$SERVED_NAME" ]; then
+  SERVED_NAME=$(ssh "$TARGET" "systemctl show taey-ep3 -p Environment --value 2>/dev/null | tr ' ' '\n' | sed -n 's/^TAEY_SERVED_NAME=//p' | head -1" || true)
+  [ -n "$SERVED_NAME" ] && echo "[deploy] preserving served id: ${SERVED_NAME}"
+fi
 [ -n "$MODEL_PATH" ] || { echo "FATAL: no TAEY_MODEL_PATH on the node and none given. Pass --model-path." >&2; exit 1; }
 
 # ---------- the alias gate: changing WEIGHTS forces a decision about the served NAME ----------
