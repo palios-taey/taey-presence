@@ -78,13 +78,31 @@ EOF
 
 HL "== LIMITS OF THIS SCAN — read before trusting it =="
 cat <<'EOF'
-  **A SCAN CANNOT SEE A CONSUMER THAT IS DOWN.** This is the structural blind spot, not an edge
-  case: a halted or failed unit may not appear, and a stopped process holds no socket, so a clean
-  scan during an outage under-reports the true consumer set. Proven 2026-07-27 — apply-loop.service
-  is hard-pinned to one node with no failover and was INVISIBLE to a scan taken while it was
-  halted; repointing without it would have produced a 404 on lane restart that reads exactly like
-  the halt being recovered from. If any consumer is currently down, enumerate from CONFIG (unit
-  files, env files) and from memory of what normally runs — never from what answers right now.
+  THREE SHAPES THIS SCAN STRUCTURALLY CANNOT REPORT. Not edge cases — each has bitten:
+
+  1. **A CONSUMER THAT IS DOWN.** A halted or failed unit may not appear, and a stopped process
+     holds no socket, so a clean scan during an outage under-reports the true consumer set.
+     Proven 2026-07-27 — apply-loop.service is hard-pinned to one node with no failover and was
+     INVISIBLE to a scan taken while it was halted; repointing without it would have produced a
+     404 on lane restart that reads exactly like the halt being recovered from.
+
+  2. **A CONSUMER THAT IS INTERMITTENT.** Same invisibility, opposite cause: it is healthy but
+     simply not connected at the instant you looked, and it connects during your window. The
+     LinkedIn step5 driver is this shape — it drives an endpoint directly, in bursts. A stopped
+     consumer and an intermittent one are both absent from a point-in-time view, and both bite
+     at exactly the wrong moment.
+
+  3. **A CONSUMER IN THE OTHER SYSTEMD SCOPE.** `systemctl` defaults to system scope, so a
+     user-scope unit answers `inactive` — or reports no FragmentPath — while it is in fact
+     RUNNING and holding the endpoint. Proven 2026-07-27: apply-loop and apply-scorer both
+     returned `inactive` to a system-scope query while both were active user units with drop-ins
+     resolving the endpoint. This script scans BOTH scopes; an ad-hoc check by hand usually does
+     not. Always pass `--user` too, and read the EFFECTIVE merged value
+     (`systemctl --user show <u> -p Environment --value`) rather than reasoning about drop-in
+     precedence.
+
+  If any consumer is currently down, enumerate from CONFIG (unit files, env files) and from
+  memory of what normally runs — never from what answers right now.
 
   This narrows the guessing; it does NOT prove completeness. Other known blind spots:
     - processes launched ad-hoc (a seat running a worker by hand) appear only if connected RIGHT NOW
