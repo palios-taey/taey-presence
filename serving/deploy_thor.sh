@@ -43,14 +43,16 @@
 # Exit: 0 = in sync / deployed. 1 = drift found (--check) or deploy failed.
 set -euo pipefail
 
-CHECK=0; RESTART=0; MODEL_PATH=""
+CHECK=0; RESTART=0; MODEL_PATH=""; SERVED_NAME=""; KEEP_NAME=0
 while [ $# -gt 0 ]; do
   case "$1" in
-    --check)      CHECK=1; shift ;;
-    --restart)    RESTART=1; shift ;;
-    --model-path) MODEL_PATH="${2:?--model-path needs a value}"; shift 2 ;;
-    -h|--help)    sed -n '2,40p' "$0"; exit 0 ;;
-    *)            break ;;
+    --check)       CHECK=1; shift ;;
+    --restart)     RESTART=1; shift ;;
+    --model-path)  MODEL_PATH="${2:?--model-path needs a value}"; shift 2 ;;
+    --served-name) SERVED_NAME="${2:?--served-name needs a value}"; shift 2 ;;
+    --keep-served-name) KEEP_NAME=1; shift ;;
+    -h|--help)     sed -n '2,40p' "$0"; exit 0 ;;
+    *)             break ;;
   esac
 done
 
@@ -123,6 +125,39 @@ if [ -z "$MODEL_PATH" ]; then
 fi
 [ -n "$MODEL_PATH" ] || { echo "FATAL: no TAEY_MODEL_PATH on the node and none given. Pass --model-path." >&2; exit 1; }
 
+# ---------- the alias gate: changing WEIGHTS forces a decision about the served NAME ----------
+# Clients address a served id, not a path, and vLLM will happily serve new weights under an old
+# id. That combination is the worst failure shape available here: a caller holding a stale URL +
+# model=ep3 gets HTTP 200 and DIFFERENT WEIGHTS, silently. It does not 404, so nothing tells the
+# caller or the operator. Observed 2026-07-27 — Thor1 advertised id 'ep3' with
+# root /models/cpt_refresh_v3_servable while Thor2 advertised id 'ep3' with root /models/ep3-hf.
+# Same name, two different models, no signal. Found by the linkedin seat, not by me.
+#
+# So: if this deploy changes which artifact is served, the served id must be decided in the same
+# breath. Either give it a new name (stale callers then fail LOUD with a 404, which is the whole
+# point) or say --keep-served-name to assert that every caller of that id SHOULD move to the new
+# weights. Both are legitimate; silently inheriting the old name is not.
+if [ -n "$MODEL_PATH" ]; then
+  cur_path=$(ssh "$TARGET" "systemctl show taey-ep3 -p Environment --value 2>/dev/null | tr ' ' '\n' | sed -n 's/^TAEY_MODEL_PATH=//p' | head -1" || true)
+  cur_name=$(ssh "$TARGET" "systemctl show taey-ep3 -p Environment --value 2>/dev/null | tr ' ' '\n' | sed -n 's/^TAEY_SERVED_NAME=//p' | head -1" || true)
+  if [ -n "$cur_path" ] && [ "$cur_path" != "$MODEL_PATH" ] && [ -z "$SERVED_NAME" ] && [ "$KEEP_NAME" -eq 0 ]; then
+    cat >&2 <<EOF
+FATAL: this deploy changes the served ARTIFACT but not the served NAME.
+         artifact: ${cur_path}
+               ->  ${MODEL_PATH}
+         served id stays: '${cur_name:-ep3}'
+  A client addressing '${cur_name:-ep3}' would then receive DIFFERENT WEIGHTS with HTTP 200 and no
+  indication anything changed. Decide the name explicitly:
+    --served-name <new-id>   stale callers get a clean 404 — use this while a node serves a
+                             CANDIDATE that differs from its peers
+    --keep-served-name       you assert every caller of '${cur_name:-ep3}' should move to the new
+                             weights — use this for a fleet-wide promotion
+EOF
+    exit 1
+  fi
+fi
+[ -n "$SERVED_NAME" ] && echo "[deploy] served id: ${SERVED_NAME}"
+
 ssh "$TARGET" "mkdir -p '${ROOT}/serving' '${ROOT}/bin'"
 for f in "${FILES[@]}"; do
   scp -q "${REPO}/${f}" "${TARGET}:${ROOT}/${f}"
@@ -132,6 +167,11 @@ done
 
 tmp=$(mktemp)
 sed -e "s|@TAEY_ROOT@|${ROOT}|g" -e "s|@TAEY_MODEL_PATH@|${MODEL_PATH}|g" "$UNIT_SRC" > "$tmp"
+# Apply an explicit served-id override into the unit's env block.
+if [ -n "$SERVED_NAME" ]; then
+  sed -i -e "s|^Environment=TAEY_SERVED_NAME=.*|Environment=TAEY_SERVED_NAME=${SERVED_NAME}|" "$tmp"
+  grep -q "TAEY_SERVED_NAME=${SERVED_NAME}" "$tmp" || { echo "FATAL: served-name substitution did not land" >&2; rm -f "$tmp"; exit 1; }
+fi
 grep -q '@TAEY_' "$tmp" && { echo "FATAL: unsubstituted placeholder remains in the unit" >&2; rm -f "$tmp"; exit 1; }
 scp -q "$tmp" "${TARGET}:/tmp/taey-ep3.service"; rm -f "$tmp"
 ssh "$TARGET" "sudo install -m644 /tmp/taey-ep3.service /etc/systemd/system/taey-ep3.service && rm -f /tmp/taey-ep3.service && sudo systemctl daemon-reload"
