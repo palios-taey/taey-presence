@@ -53,6 +53,69 @@ export VLLM_URL=http://127.0.0.1:8765/v1/chat/completions   # (or :8000 for raw 
 # ...then start the presence workers / dashboard as in the top-level README.
 ```
 
+## Running a fleet: deploy, swap models, and the checks that gate each step
+
+The quick start above stands up ONE node by hand. Once a node carries real traffic, every step
+below exists because doing it by hand went wrong in a specific way, and each is a command rather
+than a habit — a habit is what lapses at 2am.
+
+```bash
+# WHAT IS ACTUALLY RUNNING vs WHAT THIS REPO HOLDS. Mutates nothing; exit 1 on drift.
+./serving/deploy_thor.sh --check <user@host>
+
+# INSTALL from this repo to the node. Does NOT restart: the running process keeps serving from
+# the copy it exec'd, so the change lands now and applies at the next start, which you schedule.
+./serving/deploy_thor.sh <user@host>
+
+# SWAP THE MODEL. Changing the artifact forces a decision about the served id — the deploy
+# REFUSES without one, because a caller addressing the old id would otherwise get HTTP 200 and
+# different weights, silently.
+./serving/deploy_thor.sh --model-path /models/<new> --served-name <new-id> --restart <user@host>
+#   --served-name <id>   a node serving a CANDIDATE its peers lack -> stale callers get a clean 404
+#   --keep-served-name   a fleet-wide PROMOTION -> every caller of that id should move together
+```
+
+**Served id vs weights.** The served name is a stable alias chosen at launch, which is exactly why
+it is useless as evidence of what is loaded — it stays constant when the weights change. Read the
+`root` field of `/v1/models`, or `journalctl -u taey-ep3 | grep 'Serving model:'`. Two nodes
+answering to one id over two different weight sets is the failure to avoid; one id across nodes
+serving the SAME weights is correct and is what a promotion produces.
+
+**Before any restart of a node carrying traffic:**
+```bash
+./serving/list_ep3_consumers.sh [host]     # reads CONFIGS, not recollection
+```
+It classifies consumers PINNED-NO-FAILOVER (stop them for the window — they cannot redirect),
+REDIRECTABLE, and WEIGHTS-WATCHER (sends no inference but gates on which checkpoint is served).
+It also reports, per run, which blind spots it could NOT rule out — a consumer that is DOWN, one
+that is INTERMITTENT, and the other systemd scope. A clean scan is not proof of absence, and the
+tool says so rather than letting you infer it.
+
+**Before serving any new artifact:**
+```bash
+python3 serving/verify_servable_artifact.py --candidate <dir> --reference <currently served dir>
+```
+Tensor count and key set both directions, architecture identity, config divergence, and — the one
+that catches a silent no-op — that sampled weights actually DIFFER from the reference. Exit 1 means
+do not transfer and do not serve. Run it at the PRODUCING end: the index and config alone are
+kilobytes, so a bad artifact fails there instead of after a 50 GB copy.
+
+**Merging a LoRA adapter** (needed when the adapter targets modules vLLM will not serve
+dynamically — on a hybrid-attention model an adapter touching `linear_attn` is refused at load):
+```bash
+docker run --rm --runtime nvidia --ipc=host \
+  -v /path/serve-models:/models -v $PWD/serving/bake_lora.py:/bake.py \
+  -e BASE_MODEL=/models/<base> -e LORA_PATH=/models/<adapter> -e OUTPUT_PATH=/models/<out> \
+  <pinned-digest> python3 /bake.py
+```
+Stop the serve first — vLLM holds ~92% of unified memory and the merge OOMs under it. The script
+pre-flights the key mapping before writing tens of GB and refuses on unresolved targets or zero
+applications, so a merge that matched nothing fails instead of reporting success.
+
+**Throughput.** Measured findings, including which levers are real and which cost fidelity, live in
+`serving/THROUGHPUT_FINDINGS.md`. Read it before changing serving flags for speed — one documented
+lever is a ~5x win on some workloads and destroys tool calling.
+
 ## Spark (GB10) — native vLLM
 
 Install vLLM from your board's aarch64 build, then run the same `vllm serve` invocation
