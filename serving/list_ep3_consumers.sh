@@ -76,14 +76,39 @@ HL "== SOURCE LITERALS — endpoints hardcoded or defaulted in code, invisible t
 #     apply-machine/taey_compose_driver.py:739         os.environ.get(..., "http://10.0.0.8:8000/v1")
 # The compose path is SPLIT as a result: the composer leg follows EP3_BASE while the overseer leg
 # defaults to the other node independently.
+# Show CONTEXT, not just the matching line. A literal is only a pin if nothing overrides it — an
+# env-first chain ending in a literal is already correct and a repoint moves it. Reporting the bare
+# line cannot tell the two apart, and flagging a correct pattern as a defect wastes the reader's
+# trust. Proven 2026-07-27: this scan's first run flagged linkedin_judgment_queue.py:44, which is the
+# TAIL of `os.environ.get(A) or os.environ.get(B) or "<literal>"` — not a pin at all.
 for d in /home/*/treasurer /home/*/apply-machine /home/*/the-conductor /home/*/taeys-hands; do
   [ -d "$d" ] || continue
-  grep -rnoE '"https?://10\.0\.0\.(8|197):[0-9]+[^"]*"' "$d" --include=*.py 2>/dev/null |
-    grep -v '/\.git/' | while IFS= read -r hit; do
-      match "$hit" || continue
-      printf '  %s\n' "$hit"
+  grep -rlE '"https?://10\.0\.0\.(8|197):[0-9]+' "$d" --include=*.py 2>/dev/null | grep -v '/\.git/' |
+  while IFS= read -r f; do
+    grep -nE '"https?://10\.0\.0\.(8|197):[0-9]+' "$f" | while IFS=: read -r ln rest; do
+      match "$rest" || continue
+      ctx=$(sed -n "$((ln>3?ln-3:1)),${ln}p" "$f" | tr '\n' ' ')
+      case "$ctx" in
+        *environ.get*|*getenv*) tag="ENV-FIRST (a repoint moves it)" ;;
+        *argparse*|*add_argument*|*--base-url*) tag="CLI-OVERRIDABLE" ;;
+        *) tag="BARE PIN (no repoint reaches it)" ;;
+      esac
+      printf '  %-24s %s:%s\n' "$tag" "${f##*/}" "$ln"
     done
-done
+  done
+done | sort -u
+
+HL "== HARDCODED MODEL NAMES — worse than a pinned endpoint =="
+# A pinned ENDPOINT sends traffic to the wrong node; a pinned MODEL NAME fails to resolve at all once
+# the served id moves, and it fails as a 404 that reads like an outage. The served id is `ep3` on
+# every node by standing rule, so any literal naming a specific checkpoint is already stale or will be.
+for d in /home/*/treasurer /home/*/apply-machine; do
+  [ -d "$d" ] || continue
+  grep -rnoE '(MODEL|model)[A-Z_a-z]*\s*=\s*"(Qwen[^"]*|ep3_[^"]*|module[0-9][^"]*|cpt_[^"]*)"' "$d" --include=*.py 2>/dev/null |
+    grep -v '/\.git/' | sed 's#.*/##' | sed 's/^/  PINNED CHECKPOINT  /'
+done | sort -u
+echo "  (a literal 'ep3' is fine — that is the permanent alias. A literal CHECKPOINT name is not.)"
+
 echo "  (grep covers .py under the scanned roots only — a literal in another language or path is"
 echo "   still invisible. This narrows the hole; it does not close it.)"
 
