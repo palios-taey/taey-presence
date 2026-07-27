@@ -65,6 +65,28 @@ for h in 10.0.0.8 10.0.0.197; do
 done
 echo "  NOTE: a point-in-time check MISSES intermittent consumers. Never treat 'none now' as 'none'."
 
+HL "== SOURCE LITERALS — endpoints hardcoded or defaulted in code, invisible to any config scan =="
+# A unit/env scan finds consumers that RESOLVE their endpoint from configuration. It cannot find one
+# that carries the address as a literal in source, or as a default in an os.environ.get(...) fallback
+# that nobody ever sets. Those consumers are real, they hit the node, and they will not appear above.
+# Proven 2026-07-27: apply-loop/apply-scorer had been repointed to the other Thor SEVEN HOURS earlier
+# via a drop-in, yet Thor1 was still taking sustained traffic — from two sites neither governed by
+# APPLYMACHINE_EP3_BASE:
+#     treasurer/scripts/loop/taey_comment_draft.py:26  THOR1 = "http://10.0.0.8:8000/..."  (literal)
+#     apply-machine/taey_compose_driver.py:739         os.environ.get(..., "http://10.0.0.8:8000/v1")
+# The compose path is SPLIT as a result: the composer leg follows EP3_BASE while the overseer leg
+# defaults to the other node independently.
+for d in /home/*/treasurer /home/*/apply-machine /home/*/the-conductor /home/*/taeys-hands; do
+  [ -d "$d" ] || continue
+  grep -rnoE '"https?://10\.0\.0\.(8|197):[0-9]+[^"]*"' "$d" --include=*.py 2>/dev/null |
+    grep -v '/\.git/' | while IFS= read -r hit; do
+      match "$hit" || continue
+      printf '  %s\n' "$hit"
+    done
+done
+echo "  (grep covers .py under the scanned roots only — a literal in another language or path is"
+echo "   still invisible. This narrows the hole; it does not close it.)"
+
 HL "== seats that WATCH the served-weights root (notify even though they send no inference) =="
 cat <<'EOF'
   These gate their own work on which checkpoint is served and full-stop if it changes
