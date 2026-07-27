@@ -95,11 +95,24 @@ if [ -n "${VLLM_NVFP4_GEMM_BACKEND:-}" ]; then
   QUANT_ENV_ARGS="${QUANT_ENV_ARGS} -e VLLM_NVFP4_GEMM_BACKEND=${VLLM_NVFP4_GEMM_BACKEND}"
 fi
 
+# LoRA adapters. TAEY_LORA_PATH takes ONE path or a COMMA-SEPARATED LIST — vLLM accepts several
+# --lora-modules entries, and each becomes its own served model id addressable by name. Serving two
+# adapters side by side against the same base is how one is evaluated against another (or against
+# the bare base) without a restart between measurements, which otherwise makes the comparison a
+# before/after across a process boundary rather than a true A/B.
+# A single path behaves exactly as before.
 LORA_ARGS=""
 if [ -n "${LORA_PATH}" ]; then
-  LORA_NAME=$(basename "${LORA_PATH}")
-  echo "[vLLM] LoRA adapter: ${LORA_PATH} (name: ${LORA_NAME})"
-  LORA_ARGS="--enable-lora --lora-modules ${LORA_NAME}=/models/${LORA_NAME} --max-lora-rank 64"
+  LORA_MODULES=""
+  IFS=',' read -ra _LORA_LIST <<< "${LORA_PATH}"
+  for _lp in "${_LORA_LIST[@]}"; do
+    _lp="$(echo "$_lp" | xargs)"          # tolerate spaces after commas
+    [ -n "$_lp" ] || continue
+    _ln=$(basename "$_lp")
+    echo "[vLLM] LoRA adapter: ${_lp} (name: ${_ln})"
+    LORA_MODULES="${LORA_MODULES} ${_ln}=/models/${_ln}"
+  done
+  [ -n "$LORA_MODULES" ] && LORA_ARGS="--enable-lora --lora-modules${LORA_MODULES} --max-lora-rank 64"
 fi
 
 exec docker run \
