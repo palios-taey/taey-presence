@@ -103,6 +103,15 @@ def main():
     lora = load_file(os.path.join(LORA, "adapter_model.safetensors"), device="cpu")
     r, alpha = cfg["r"], cfg["lora_alpha"]
     scale = alpha / r
+    # Echo the INPUTS. Without this the run is not self-documenting: a merged artifact carries no
+    # record of which base it was built on, and at bf16 the per-element deltas can sit at or below
+    # representable resolution, so reconstructing the base numerically afterwards does NOT reliably
+    # discriminate — both candidate reconstructions land inside rounding noise. Observed 2026-07-27
+    # trying to confirm a merge base after the fact. The log is the provenance; write it down.
+    print(f"[bake] BASE_MODEL  = {BASE}")
+    print(f"[bake] LORA_PATH   = {LORA}")
+    print(f"[bake] OUTPUT_PATH = {OUT}")
+    print(f"[bake] adapter records base_model_name_or_path = {cfg.get('base_model_name_or_path')}")
     print(f"[bake] LoRA r={r} alpha={alpha} scale={scale}  tensors={len(lora)}")
 
     modules = {}
