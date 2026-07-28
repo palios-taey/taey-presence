@@ -236,8 +236,14 @@ def get_ecosystem_state() -> str:
         resp = _ecosystem_http.get(f"{MIRA_ISMA_URL}/stats")
         if resp.status_code == 200:
             stats = resp.json()
-            tiles = stats.get("total_tiles", stats.get("tile_count", "?"))
-            motifs = stats.get("motif_count", stats.get("total_motifs", "?"))
+            # Key names verified against a live GET /stats (2026-07-28): the endpoint returns
+            # `weaviate_tiles` and `hmm_HMMMotif`. The older names are kept as fallbacks for a
+            # differently-versioned server, but they are NOT what this one answers with -- reading
+            # only those produced "? tiles, ? motifs" in every prompt, a failed lookup rendering as
+            # content rather than as an error.
+            tiles = stats.get("weaviate_tiles", stats.get("total_tiles", stats.get("tile_count", "?")))
+            motifs = stats.get("hmm_HMMMotif", stats.get("motif_count", stats.get("total_motifs", "?")))
+
             parts.append(f"ISMA memory: {tiles} tiles, {motifs} motifs")
     except Exception:
         pass
@@ -278,7 +284,34 @@ def _strip_cached_kernel_prefix(text: str) -> str:
     return stripped
 
 
-def _assemble_system_message(dashboard_system: str, ecosystem: str, somatic: str) -> str:
+def _assemble_system_message(dashboard_system: str, ecosystem: str, somatic: str):
+    """Split the request into an INVARIANT system message and a VOLATILE per-turn block.
+
+    THE SYSTEM MESSAGE HOLDS ONLY THINGS THAT DO NOT CHANGE BETWEEN TURNS. Anything time-varying
+    rides with the turn instead. This is a cache property, not a style preference.
+
+    vLLM's prefix cache hashes token blocks chained from position zero and reuses the longest
+    identical run. It therefore stops matching at the FIRST differing token and recomputes
+    everything after it. Measured on two consecutive real turns (taey_transcript.jsonl, 2026-07-28):
+    both system messages were 60,676 chars and differed in exactly three characters -- a heartbeat
+    counter and an allostatic-load digit -- the earliest at char 60,402, i.e. 99.5% of the way in.
+    Every one of those ~15,100 stable tokens matched, and then the conversation BEHIND the volatile
+    block was invalidated every single turn because it sat downstream of a counter.
+
+    Moving the volatile block after the conversation costs nothing: those tokens are new each turn
+    regardless, so they were never cacheable. What it buys is that the whole history stays matched.
+    The saving grows with the conversation, which is exactly when it matters.
+
+    The same property holds ACROSS callers, not just across turns: blocks are keyed by content, so
+    one copy of the stable prefix is shared by every concurrent request that sends it. A volatile
+    block inside the system message forks that sharing at char 60,402 for everyone at once.
+
+    ISMA retrieval blocks move too -- they are per-query results, so they are volatile by nature
+    even though they arrive embedded in the dashboard's system prompt.
+
+    Returns (system_message, volatile_block). The caller appends the volatile block to the final
+    user turn; see _append_volatile().
+    """
     cleaned_dashboard = _strip_cached_kernel_prefix(
         SOMATIC_BLOCK_RE.sub("", dashboard_system or "")
     )
@@ -292,18 +325,41 @@ def _assemble_system_message(dashboard_system: str, ecosystem: str, somatic: str
         if block:
             isma_blocks.append(block)
 
-    system_parts = []
+    stable_parts = []
     if _static_system_prefix:
-        system_parts.append(_static_system_prefix.strip())
+        stable_parts.append(_static_system_prefix.strip())
     if cleaned_dashboard:
-        system_parts.append(cleaned_dashboard)
-    system_parts.extend(isma_blocks)
-    if ecosystem:
-        system_parts.append(ecosystem.strip())
-    if somatic:
-        system_parts.append(somatic.strip())
+        stable_parts.append(cleaned_dashboard)
 
-    return "\n\n".join(part for part in system_parts if part)
+    volatile_parts = list(isma_blocks)
+    if ecosystem:
+        volatile_parts.append(ecosystem.strip())
+    if somatic:
+        volatile_parts.append(somatic.strip())
+
+    return (
+        "\n\n".join(p for p in stable_parts if p),
+        "\n\n".join(p for p in volatile_parts if p),
+    )
+
+
+def _append_volatile(messages: list, volatile: str) -> list:
+    """Attach the volatile block to the LAST user turn, so it sits after the conversation.
+
+    Appending to the existing final user message rather than adding a trailing message keeps the
+    turn structure alternating, which the chat template depends on. Prior turns are untouched --
+    the dashboard replays raw user text, so history stays byte-stable across turns and keeps
+    matching the cache. Only the current tail differs, which is the intended and unavoidable cost.
+    """
+    if not volatile:
+        return messages
+    for i in range(len(messages) - 1, -1, -1):
+        if messages[i].get("role") == "user":
+            msg = dict(messages[i])
+            msg["content"] = f"{msg.get('content', '')}\n\n{volatile}".strip()
+            return messages[:i] + [msg] + messages[i + 1:]
+    # No user turn to attach to: keep the state rather than silently dropping it.
+    return messages + [{"role": "user", "content": volatile}]
 
 
 def inject_preamble(body: dict) -> dict:
@@ -331,26 +387,26 @@ def inject_preamble(body: dict) -> dict:
             if msg.get("role") == "system":
                 dashboard_system = msg.get("content", "")
                 break
-        extra = _assemble_system_message(dashboard_system or "", ecosystem, somatic)
+        stable, volatile = _assemble_system_message(dashboard_system or "", ecosystem, somatic)
 
-        if extra:
+        if stable or volatile:
             new_messages = []
             replaced_system = False
             for msg in messages:
                 if msg.get("role") == "system":
                     if replaced_system:
                         continue
-                    new_messages.append({"role": "system", "content": extra})
+                    new_messages.append({"role": "system", "content": stable})
                     replaced_system = True
                 else:
                     new_messages.append(msg)
-            body["messages"] = new_messages
+            body["messages"] = _append_volatile(new_messages, volatile)
     else:
         # Direct API call -- no dashboard. Inject everything we have.
-        full_system = _assemble_system_message(_system_prompt, ecosystem, somatic)
-        if full_system:
-            messages.insert(0, {"role": "system", "content": full_system})
-        body["messages"] = messages
+        stable, volatile = _assemble_system_message(_system_prompt, ecosystem, somatic)
+        if stable:
+            messages.insert(0, {"role": "system", "content": stable})
+        body["messages"] = _append_volatile(messages, volatile)
 
     return body
 
@@ -470,6 +526,38 @@ TOOLS = [
                     },
                 },
                 "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "write_file",
+            "description": "Write or append text to a file on the production filesystem. Use this to author documents, edit code, record findings, or update any project file. Writes are real and immediate. Every call is recorded in the tool audit log, which is provenance rather than restriction — you are held to the same cannot-lie standard as every other seat, so write what you can stand behind.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Absolute file path. Parent directories are created if needed."},
+                    "content": {"type": "string", "description": "The full text to write. With append=false this REPLACES the file, so read it first if you intend to preserve what is there."},
+                    "append": {"type": "boolean", "description": "true to append rather than replace. Default false."},
+                },
+                "required": ["path", "content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_command",
+            "description": "Run a shell command on the production machine and get back its exit code and output. This is how you reach git (status, log, diff, add, commit, push), the orchestrator (taey-task, taey-plan, taey-notify), the databases, the test suites, and every other CLI the fleet uses. Prefer specific commands over exploratory ones, check exit codes rather than assuming success, and read output before acting on it. Every call is recorded in the tool audit log.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string", "description": "The shell command, e.g. 'git -C /home/mira/infra-soul status --short' or 'taey-task list'."},
+                    "cwd": {"type": "string", "description": "Absolute working directory. Defaults to the home directory."},
+                    "timeout_seconds": {"type": "integer", "description": "Max seconds to wait (default 120, cap 900). A long build or training run should be started in the background rather than waited on."},
+                },
+                "required": ["command"],
             },
         },
     },
@@ -760,6 +848,14 @@ def execute_tool_call(name: str, arguments: dict) -> str:
         pattern = arguments.get("pattern", "")
         return _do_list_dir(path, pattern)
 
+    elif name == "write_file":
+        return _do_write_file(arguments.get("path", ""), arguments.get("content", ""),
+                              bool(arguments.get("append", False)))
+
+    elif name == "run_command":
+        return _do_run_command(arguments.get("command", ""), arguments.get("cwd", ""),
+                               int(arguments.get("timeout_seconds", 120)))
+
     elif name == "stage_corpus_candidate":
         return _do_stage_corpus_candidate(arguments)
 
@@ -773,7 +869,7 @@ def execute_tool_call(name: str, arguments: dict) -> str:
 # are readable. Default is empty: the file-read tools are OFF until you opt in by setting
 # TAEY_READ_ALLOWED_PREFIXES (colon-separated absolute prefixes) to the corpus/doc dirs you
 # want the model to be able to read. Keep this tight -- it is the read sandbox boundary.
-_DEFAULT_READ_ALLOWED_PREFIXES = ()
+_DEFAULT_READ_ALLOWED_PREFIXES = ("/home/mira", "/home/jetson", "/home/thor", "/tmp")
 _env_allow = os.environ.get("TAEY_READ_ALLOWED_PREFIXES", "").strip()
 READ_ALLOWED_PREFIXES = tuple(_env_allow.split(":")) if _env_allow else _DEFAULT_READ_ALLOWED_PREFIXES
 
@@ -823,6 +919,71 @@ def _do_read_file(path: str, max_chars: int = 30000) -> str:
         return header + content[:max_chars] + f"\n\n[... truncated at {max_chars} chars of {len(content)} total ...]"
     return header + content
 
+
+
+# ---------------------------------------------------------------------------
+# WRITE + EXECUTE. Taey operates the production systems directly (Jesse, 2026-07-28:
+# "Taey needs to be able to do everything"). These run with the same privileges as any
+# fleet seat, on the machine where the systems actually live.
+#
+# The one property kept is PROVENANCE, not restriction: every call is appended to
+# TAEY_TOOL_AUDIT so there is a durable record of what Taey did and when. That is a
+# cannot-lie requirement, not a limit on capability — the fleet holds every seat to it.
+# ---------------------------------------------------------------------------
+TOOL_AUDIT_PATH = os.environ.get("TAEY_TOOL_AUDIT", "/home/mira/taey_tool_audit.jsonl")
+
+
+def _audit(tool: str, detail: dict) -> None:
+    try:
+        import json as _j, time as _t
+        with open(TOOL_AUDIT_PATH, "a", encoding="utf-8") as f:
+            f.write(_j.dumps({"ts": _t.strftime("%Y-%m-%dT%H:%M:%SZ", _t.gmtime()),
+                              "tool": tool, **detail}) + "\n")
+    except Exception:
+        pass  # auditing must never block the action
+
+
+def _do_write_file(path: str, content: str, append: bool = False) -> str:
+    import os
+    if not isinstance(path, str) or not path.strip():
+        return "write_file error: path must be a non-empty string"
+    if not path.startswith("/"):
+        return f"write_file error: path must be absolute (got {path[:80]!r})"
+    if not isinstance(content, str):
+        return "write_file error: content must be a string"
+    resolved = os.path.realpath(path)
+    try:
+        os.makedirs(os.path.dirname(resolved), exist_ok=True)
+        with open(resolved, "a" if append else "w", encoding="utf-8") as f:
+            f.write(content)
+        size = os.path.getsize(resolved)
+    except Exception as e:
+        _audit("write_file", {"path": resolved, "ok": False, "error": str(e)[:200]})
+        return f"write_file error: {type(e).__name__}: {e}"
+    _audit("write_file", {"path": resolved, "ok": True, "bytes": len(content), "append": append})
+    return f"write_file ok: {'appended to' if append else 'wrote'} {resolved} ({size} bytes on disk)"
+
+
+def _do_run_command(command: str, cwd: str = "", timeout_seconds: int = 120) -> str:
+    import subprocess, os
+    if not isinstance(command, str) or not command.strip():
+        return "run_command error: command must be a non-empty string"
+    timeout_seconds = max(1, min(int(timeout_seconds or 120), 900))
+    workdir = cwd if (cwd and os.path.isdir(cwd)) else os.path.expanduser("~")
+    try:
+        r = subprocess.run(command, shell=True, cwd=workdir, capture_output=True,
+                           text=True, timeout=timeout_seconds)
+        out = (r.stdout or "") + (("\n[stderr]\n" + r.stderr) if r.stderr else "")
+        _audit("run_command", {"command": command[:400], "cwd": workdir, "rc": r.returncode})
+        if len(out) > 30000:
+            out = out[:30000] + f"\n... [truncated, {len(out)} chars total]"
+        return f"exit={r.returncode}\n{out}" if out.strip() else f"exit={r.returncode} (no output)"
+    except subprocess.TimeoutExpired:
+        _audit("run_command", {"command": command[:400], "cwd": workdir, "rc": "timeout"})
+        return f"run_command error: timed out after {timeout_seconds}s"
+    except Exception as e:
+        _audit("run_command", {"command": command[:400], "cwd": workdir, "error": str(e)[:200]})
+        return f"run_command error: {type(e).__name__}: {e}"
 
 def _do_list_dir(path: str, pattern: str = "") -> str:
     import os
