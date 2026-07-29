@@ -58,13 +58,16 @@ export VLLM_URL=http://127.0.0.1:8765/v1/chat/completions   # (or :8000 for raw 
 # 5. optional: give fleet-notify a durable tmux-hosted Taey seat
 export TAEY_SEAT_PROXY=http://127.0.0.1:8765/v1/chat/completions
 export TAEY_SESSION_NAME=taey
+export TAEY_CONVERSATION_ID=main
 tmux new-session -d -s taey 'python3 serving/taey_seat.py'
 ```
 
-The tmux seat does **not** currently feed the dashboard transcript. They remain
-separate proxy clients. The seat's canonical completed history is its JSONL
-event log; a future UI adapter must render that log rather than treating the
-tmux pane as conversation storage.
+The tmux pane is not conversation storage. The seat reconstructs context from
+the canonical executive JSONL on every turn and fsyncs its attributable outcome
+there before acknowledging fleet mail. By default that file is
+`~/taey_sessions/main.jsonl`; a dashboard session adapter using the same file
+adds UI turns to the seat's next context and renders autonomous seat outcomes
+after a refresh.
 
 ## Running a fleet: deploy, swap models, and the checks that gate each step
 
@@ -198,13 +201,15 @@ different process generation as abandoned after a service restart.
 | `TAEY_SEAT_PROXY` | `http://127.0.0.1:8766/v1/chat/completions` | attributable soma-proxy endpoint |
 | `TAEY_SESSION_NAME` | `taey` | tmux/fleet identity and Redis namespace |
 | `NOTIFY_KEY_PREFIX` | `taey` | fleet-notify Redis prefix |
-| `TAEY_SEAT_EVENT_LOG` | `$XDG_STATE_HOME/taey-presence/<seat>-seat-events.jsonl` (or `~/.local/state/...`) | fsync'd conversation/outcome truth |
-| `TAEY_SEAT_MAX_TURNS` | `60` | completed turns included in the next inference context |
-| `TAEY_SEAT_MAX_CLAIM_BATCH` | `50` | maximum fleet messages claimed for one turn |
+| `TAEY_CONVERSATION_ID` | `main` | canonical executive conversation identifier |
+| `TAEY_EXECUTIVE_EVENT_LOG` | `$TAEY_SESSIONS_DIR/<conversation>.jsonl` (default `~/taey_sessions/main.jsonl`) | fsync'd UI/fleet conversation and outcome truth |
+| `TAEY_SEAT_EVENT_LOG` | *(unset)* | backward-compatible alias used only when `TAEY_EXECUTIVE_EVENT_LOG` is unset |
+| `TAEY_SEAT_MAX_TURNS` | `60` | maximum context turns reconstructed from the canonical log |
 | `TAEY_SEAT_TIMEOUT` | `1800` | proxy request timeout in seconds |
 
 The seat consumes all three fleet-notify sources (`inbox`, `notifications`, and
-`orch`). Each item moves atomically to a source-specific processing list.
+`orch`). One item at a time moves atomically to a source-specific processing
+list, so unrelated envelopes never become one synthetic conversation turn.
 Success is written and fsync'd before Redis acknowledgment. A proxy failure
 requeues the original raw payload in FIFO order and clears the daemon's
 inject-once marker so it can wake the seat again. A crash after the durable

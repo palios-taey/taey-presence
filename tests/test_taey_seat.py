@@ -181,12 +181,12 @@ class TaeySeatNonActionableMessageTests(unittest.TestCase):
 
             store = taey_seat.EventStore(path, max_turns=10)
 
-        self.assertEqual({"idle-1", "command-1"}, store.completed_message_ids)
-        messages = store.messages_for("new prompt")
-        contents = [message["content"] for message in messages]
-        self.assertNotIn("peer idle", contents)
-        self.assertIn("real prompt", contents)
-        self.assertIn("real reply", contents)
+            self.assertEqual({"idle-1", "command-1"}, store.completed_message_ids)
+            messages = store.messages_for("new prompt")
+            contents = [message["content"] for message in messages]
+            self.assertNotIn("peer idle", contents)
+            self.assertIn("real prompt", contents)
+            self.assertIn("real reply", contents)
 
 
 if __name__ == "__main__":

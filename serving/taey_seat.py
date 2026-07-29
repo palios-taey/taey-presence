@@ -7,6 +7,7 @@ inference, and mail is acknowledged only after its outcome is durable.
 """
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
@@ -32,22 +33,26 @@ KEY_PREFIX = os.environ.get("NOTIFY_KEY_PREFIX", "taey")
 REDIS_HOST = os.environ.get("REDIS_HOST", "127.0.0.1")
 REDIS_PORT = int(os.environ.get("REDIS_PORT", "6379"))
 MAX_TURNS = max(1, int(os.environ.get("TAEY_SEAT_MAX_TURNS", "60")))
-MAX_CLAIM_BATCH = max(1, int(os.environ.get("TAEY_SEAT_MAX_CLAIM_BATCH", "50")))
 TIMEOUT = max(1, int(os.environ.get("TAEY_SEAT_TIMEOUT", "1800")))
 MODEL = os.environ.get("TAEY_MODEL", "ep3")
+CONVERSATION_ID = os.environ.get("TAEY_CONVERSATION_ID", "main")
 _SEAT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 _TRACE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$")
 _POINTER_RE = re.compile(r"^\[NOTIFY\]\s+You have \d+ messages?\b")
 
 
 def _default_event_log() -> Path:
-    state_root = os.environ.get("XDG_STATE_HOME")
-    root = Path(state_root).expanduser() if state_root else Path.home() / ".local" / "state"
-    return root / "taey-presence" / f"{SESSION}-seat-events.jsonl"
+    session_root = Path(
+        os.environ.get("TAEY_SESSIONS_DIR", str(Path.home() / "taey_sessions"))
+    ).expanduser()
+    return session_root / f"{CONVERSATION_ID}.jsonl"
 
 
 EVENT_LOG = Path(
-    os.environ.get("TAEY_SEAT_EVENT_LOG", str(_default_event_log()))
+    os.environ.get(
+        "TAEY_EXECUTIVE_EVENT_LOG",
+        os.environ.get("TAEY_SEAT_EVENT_LOG", str(_default_event_log())),
+    )
 ).expanduser()
 
 
@@ -153,14 +158,15 @@ class EventStore:
     def __init__(self, path: Path, max_turns: int):
         self.path = path
         self.max_turns = max_turns
-        self._turns: list[tuple[str, str]] = []
         self.completed_message_ids: set[str] = set()
         self._load()
 
-    def _load(self) -> None:
+    def _read_events(self) -> list[dict[str, Any]]:
         if not self.path.exists():
-            return
+            return []
+        events: list[dict[str, Any]] = []
         with self.path.open("r", encoding="utf-8") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_SH)
             for line_number, line in enumerate(handle, 1):
                 if not line.endswith("\n"):
                     raise SeatFailure(
@@ -176,28 +182,23 @@ class EventStore:
                     raise SeatFailure(
                         f"event log record is not an object at {self.path}:{line_number}"
                     )
-                if event.get("event_type") != "turn_outcome" or not event.get("ok"):
-                    continue
+                events.append(event)
+        return events
+
+    def _load(self) -> None:
+        for event in self._read_events():
+            if event.get("event_type") == "turn_outcome" and event.get("ok"):
                 for message_id in event.get("message_ids") or []:
                     self.completed_message_ids.add(str(message_id))
-                if event.get("conversation_visible") is False:
-                    continue
-                prompt = event.get("prompt")
-                reply = event.get("reply")
-                if not isinstance(prompt, str) or not isinstance(reply, str):
-                    raise SeatFailure(
-                        f"turn outcome is incomplete at {self.path}:{line_number}"
-                    )
-                self._turns.append((prompt, reply))
-                if len(self._turns) > self.max_turns:
-                    self._turns = self._turns[-self.max_turns:]
 
     def append(self, event_type: str, **fields: Any) -> None:
         event = {
             "schema_version": 1,
             "event_type": event_type,
             "recorded_at": time.time(),
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "session": SESSION,
+            "conversation_id": CONVERSATION_ID,
             **fields,
         }
         encoded = (
@@ -211,6 +212,7 @@ class EventStore:
             0o600,
         )
         try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
             view = memoryview(encoded)
             while view:
                 written = os.write(descriptor, view)
@@ -219,6 +221,7 @@ class EventStore:
                 view = view[written:]
             os.fsync(descriptor)
         finally:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
             os.close(descriptor)
         if new_log:
             directory = os.open(self.path.parent, os.O_RDONLY | os.O_DIRECTORY)
@@ -229,16 +232,49 @@ class EventStore:
 
     def messages_for(self, prompt: str) -> list[dict[str, str]]:
         messages: list[dict[str, str]] = []
-        for prior_prompt, prior_reply in self._turns[-self.max_turns:]:
-            messages.append({"role": "user", "content": prior_prompt})
-            messages.append({"role": "assistant", "content": prior_reply})
-        messages.append({"role": "user", "content": prompt})
-        return messages
+        recorded_prompt = False
+        seen_ingress: set[str] = set()
+        for event in self._read_events():
+            role = event.get("role")
+            content = event.get("content")
+            if role in {"user", "assistant"} and isinstance(content, str) and content:
+                messages.append({"role": role, "content": content})
+                continue
+            if event.get("event_type") == "executive_ingress":
+                event_id = str(event.get("event_id") or "")
+                if event_id and event_id in seen_ingress:
+                    continue
+                if event_id:
+                    seen_ingress.add(event_id)
+                context_role = event.get("context_role")
+                context_content = event.get("context_content")
+                if (
+                    event.get("conversation_visible") is not False
+                    and context_role in {"user", "assistant"}
+                    and isinstance(context_content, str)
+                    and context_content
+                ):
+                    messages.append(
+                        {"role": context_role, "content": context_content}
+                    )
+                    if context_role == "user" and context_content == prompt:
+                        recorded_prompt = True
+                continue
+            if (
+                event.get("event_type") == "turn_outcome"
+                and event.get("ok")
+                and event.get("conversation_visible") is not False
+            ):
+                prior_prompt = event.get("prompt")
+                prior_reply = event.get("reply")
+                if isinstance(prior_prompt, str) and isinstance(prior_reply, str):
+                    messages.append({"role": "user", "content": prior_prompt})
+                    messages.append({"role": "assistant", "content": prior_reply})
+        if not recorded_prompt:
+            messages.append({"role": "user", "content": prompt})
+        return messages[-(self.max_turns * 2):]
 
     def remember_outcome(self, prompt: str, reply: str, message_ids: list[str]) -> None:
-        self._turns.append((prompt, reply))
-        if len(self._turns) > self.max_turns:
-            self._turns = self._turns[-self.max_turns:]
         self.completed_message_ids.update(message_ids)
 
 
@@ -329,7 +365,7 @@ class ReliableInbox:
         claims: list[ClaimedMessage] = []
         try:
             for source in QUEUES:
-                while len(claims) < MAX_CLAIM_BATCH:
+                while not claims:
                     raw = self.client.lmove(
                         source.queue_key,
                         source.processing_key,
@@ -344,7 +380,7 @@ class ReliableInbox:
                         self._ack(claim)
                         continue
                     claims.append(claim)
-                if len(claims) >= MAX_CLAIM_BATCH:
+                if claims:
                     break
             if claims:
                 self.store.append(
@@ -651,7 +687,20 @@ def _run_turn(
     event_id, correlation_id = _lineage(claims)
     message_ids = [claim.message_id for claim in claims]
     store.append(
+        "executive_ingress",
+        event_id=event_id,
+        correlation_id=correlation_id,
+        message_ids=message_ids,
+        source="fleet" if claims else "tmux",
+        source_id=message_ids[0] if len(message_ids) == 1 else event_id,
+        kind="fleet_message" if claims else "operator_command",
+        context_role="user",
+        context_content=prompt,
+        conversation_visible=True,
+    )
+    store.append(
         "turn_attempt",
+        attempt_id=uuid.uuid4().hex,
         event_id=event_id,
         correlation_id=correlation_id,
         message_ids=message_ids,
@@ -673,6 +722,12 @@ def _run_turn(
             message_ids=message_ids,
             prompt=prompt,
             reply=result.reply,
+            role="assistant",
+            content=result.reply,
+            source="taey",
+            source_id=result.turn_id,
+            kind="assistant_raise" if claims else "assistant_reply",
+            conversation_visible=True,
         )
     except Exception as exc:
         try:
