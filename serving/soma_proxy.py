@@ -14,9 +14,12 @@ import sys
 import time
 import json
 import ast
+import contextvars
 import logging
 import operator
 import re
+import uuid
+from dataclasses import dataclass
 from typing import Optional
 
 import asyncio
@@ -44,7 +47,10 @@ MIRA_REDIS_PORT = int(os.environ.get("MIRA_REDIS_PORT", "6379"))
 MIRA_DASHBOARD_URL = os.environ.get("MIRA_DASHBOARD_URL", "http://127.0.0.1:5001")
 MIRA_ISMA_URL = os.environ.get("MIRA_ISMA_URL", "http://127.0.0.1:8095")
 PROXY_PORT = int(os.environ.get("PROXY_PORT", "8765"))
-MAX_TOOL_ROUNDS = int(os.environ.get("MAX_TOOL_ROUNDS", "8"))
+# 8 rounds took Taey's tools away mid-task and forced a text answer. Real
+# multi-step work legitimately needs more; the loop already stops when there
+# are no calls.
+MAX_TOOL_ROUNDS = int(os.environ.get("MAX_TOOL_ROUNDS", "60"))
 # Persona/system prompt: ships a generic example so the proxy works out of the box.
 # Point SYSTEM_PROMPT_PATH at your own persona file to give the model an identity.
 SYSTEM_PROMPT_PATH = os.environ.get(
@@ -54,6 +60,18 @@ SYSTEM_PROMPT_PATH = os.environ.get(
 # Optional second always-on prefix (e.g. a constitution/kernel). Empty = none.
 # Set PERMANENT_KERNEL_PATH to a file to prepend it ahead of the persona.
 PERMANENT_KERNEL_PATH = os.environ.get("PERMANENT_KERNEL_PATH", "")
+TAEY_DEFAULT_SEAT = os.environ.get("TAEY_SESSION_NAME", "taey")
+TAEY_LIVENESS_REQUIRED = os.environ.get("TAEY_LIVENESS_REQUIRED", "1").lower() not in {
+    "0", "false", "no",
+}
+TAEY_TURN_LEASE_SECS = max(30, int(os.environ.get("TAEY_TURN_LEASE_SECS", "120")))
+TAEY_TURN_HEARTBEAT_SECS = max(
+    5,
+    min(
+        int(os.environ.get("TAEY_TURN_HEARTBEAT_SECS", "30")),
+        TAEY_TURN_LEASE_SECS // 3,
+    ),
+)
 
 app = FastAPI(title="Taey Soma Proxy", version="1.0.0")
 
@@ -65,6 +83,29 @@ _system_prompt: str = ""
 _permanent_kernel: str = ""
 _static_system_prefix: str = ""
 _last_send: dict[str, float] = {}
+_request_context: contextvars.ContextVar[dict] = contextvars.ContextVar(
+    "taey_request_context", default={},
+)
+_turn_heartbeat_tasks: dict[str, asyncio.Task] = {}
+_turn_close_retry_tasks: dict[str, asyncio.Task] = {}
+_liveness_reaper_task: Optional[asyncio.Task] = None
+_last_liveness_error: str = ""
+_last_liveness_error_at: float = 0.0
+_last_liveness_success_at: float = 0.0
+
+
+@dataclass(frozen=True)
+class TurnContext:
+    turn_id: str
+    seat_id: str
+    event_id: str
+    correlation_id: str
+    process_generation: str
+    started_at: float
+
+
+PROCESS_GENERATION = uuid.uuid4().hex
+_active_turns: dict[str, TurnContext] = {}
 
 SAFE_OPS = {
     ast.Add: operator.add,
@@ -90,15 +131,51 @@ SOMATIC_BLOCK_RE = re.compile(
 async def startup():
     global _redis, _mira_redis, _http, _ecosystem_http
     global _permanent_kernel, _static_system_prefix, _system_prompt
+    global _liveness_reaper_task
     _http = httpx.AsyncClient(base_url=VLLM_BASE, timeout=300.0)
     _ecosystem_http = httpx.Client(timeout=3.0)
     try:
-        _redis = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
+        _redis = redis.Redis(
+            host=REDIS_HOST,
+            port=REDIS_PORT,
+            decode_responses=True,
+            socket_connect_timeout=5,
+            socket_timeout=8,
+        )
         _redis.ping()
         log.info("Redis connected at %s:%d", REDIS_HOST, REDIS_PORT)
     except Exception as e:
-        log.warning("Redis unavailable: %s -- running without soma integration", e)
+        log.error("Redis unavailable: %s", e)
         _redis = None
+        if TAEY_LIVENESS_REQUIRED:
+            raise RuntimeError(
+                "Redis is required for attributable turn liveness; proxy startup refused"
+            ) from e
+    if _redis is not None:
+        try:
+            known_seats = {
+                TAEY_DEFAULT_SEAT,
+                *_redis.smembers("taey:soma:seat_ids"),
+            }
+            for seat_id in known_seats:
+                if not _SEAT_ID_RE.fullmatch(seat_id):
+                    raise RuntimeError(
+                        f"invalid seat id in Redis registry: {seat_id!r}"
+                    )
+                _reconcile_liveness(
+                    seat_id,
+                    current_process_generation=PROCESS_GENERATION,
+                )
+        except Exception as e:
+            _set_liveness_error(
+                f"startup reconciliation failed: {type(e).__name__}: {e}"
+            )
+            if TAEY_LIVENESS_REQUIRED:
+                raise RuntimeError(
+                    "attributable turn liveness could not be reconciled; "
+                    "proxy startup refused"
+                ) from e
+        _liveness_reaper_task = asyncio.create_task(_liveness_reaper())
     # Connect to Mira Redis for ecosystem state
     if MIRA_REDIS_HOST:
         try:
@@ -139,6 +216,23 @@ async def startup():
 
 @app.on_event("shutdown")
 async def shutdown():
+    global _liveness_reaper_task
+    tasks: list[asyncio.Task] = [
+        *list(_turn_heartbeat_tasks.values()),
+        *list(_turn_close_retry_tasks.values()),
+    ]
+    if _liveness_reaper_task is not None:
+        tasks.append(_liveness_reaper_task)
+        _liveness_reaper_task = None
+    for task in tasks:
+        task.cancel()
+    for task in tasks:
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+    for turn in list(_active_turns.values()):
+        await _end_turn(turn, "shutdown", schedule_retry=False)
     if _http:
         await _http.aclose()
 
@@ -364,7 +458,13 @@ def _append_volatile(messages: list, volatile: str) -> list:
     return messages + [{"role": "user", "content": volatile}]
 
 
-async def execute_tool_call_async(name: str, arguments: dict) -> str:
+async def execute_tool_call_async(
+    name: str,
+    arguments: dict,
+    *,
+    tool_call_id: str = "",
+    round_num: int = 0,
+) -> str:
     """Run a tool WITHOUT freezing the event loop.
 
     execute_tool_call shells out synchronously. Called directly from an async handler it blocks
@@ -377,7 +477,29 @@ async def execute_tool_call_async(name: str, arguments: dict) -> str:
     Off-thread execution breaks the cycle: a slow or self-referential tool now costs one thread,
     not the whole service.
     """
-    return await asyncio.to_thread(execute_tool_call, name, arguments)
+    context = {
+        **_request_context.get(),
+        "tool_call_id": tool_call_id,
+        "tool_round": round_num,
+    }
+    token = _request_context.set(context)
+    _audit("tool_start", {"name": name, "arguments": arguments})
+    try:
+        result = await asyncio.to_thread(execute_tool_call, name, arguments)
+        _audit("tool_end", {"name": name, "result_chars": len(str(result)), "ok": True})
+        return result
+    except Exception as exc:
+        _audit(
+            "tool_end",
+            {
+                "name": name,
+                "ok": False,
+                "error": f"{type(exc).__name__}: {exc}",
+            },
+        )
+        raise
+    finally:
+        _request_context.reset(token)
 
 def inject_preamble(body: dict) -> dict:
     """Enrich the request with ecosystem state and somatic data.
@@ -953,11 +1075,12 @@ TOOL_AUDIT_PATH = os.environ.get("TAEY_TOOL_AUDIT", "/home/mira/taey_tool_audit.
 def _audit(tool: str, detail: dict) -> None:
     try:
         import json as _j, time as _t
+        context = dict(_request_context.get())
         with open(TOOL_AUDIT_PATH, "a", encoding="utf-8") as f:
             f.write(_j.dumps({"ts": _t.strftime("%Y-%m-%dT%H:%M:%SZ", _t.gmtime()),
-                              "tool": tool, **detail}) + "\n")
-    except Exception:
-        pass  # auditing must never block the action
+                              **context, "tool": tool, **detail}) + "\n")
+    except Exception as exc:
+        log.error("tool audit write failed path=%s: %s", TOOL_AUDIT_PATH, exc)
 
 
 def _do_write_file(path: str, content: str, append: bool = False) -> str:
@@ -1236,15 +1359,14 @@ def publish_metrics(elapsed_ms: float, prompt_tokens: int = 0,
     try:
         pipe = _redis.pipeline()
         pipe.set("taey:soma:latency_ms", str(round(elapsed_ms, 1)), ex=30)
-        pipe.set("taey:soma:gpu_busy", "0", ex=30)
         pipe.set("taey:soma:prompt_tokens", str(prompt_tokens), ex=30)
         pipe.set("taey:soma:completion_tokens", str(completion_tokens), ex=30)
         pipe.set("taey:soma:total_tokens", str(total_tokens), ex=30)
         pipe.set("taey:soma:context_utilization", str(round(context_util, 4)), ex=30)
         pipe.set("taey:soma:tool_rounds", str(tool_rounds), ex=30)
         pipe.execute()
-    except Exception:
-        pass
+    except Exception as exc:
+        log.error("soma metrics publish failed: %s", exc)
 
 
 @app.post("/tokenize")
@@ -1268,16 +1390,47 @@ async def health():
         vllm_health = {"status": "unreachable", "error": str(e)}
 
     vprop_raw = None
+    redis_error = ""
+    liveness = {
+        "status": "unavailable",
+        "required": TAEY_LIVENESS_REQUIRED,
+        "default_seat": TAEY_DEFAULT_SEAT,
+        "last_error": _last_liveness_error or None,
+        "last_error_at": _last_liveness_error_at or None,
+        "last_success_at": _last_liveness_success_at or None,
+    }
     if _redis:
         try:
             vprop_raw = _redis.get("taey:soma:vprop")
-        except Exception:
-            pass
+            active_count, recovered_count = _reconcile_liveness(TAEY_DEFAULT_SEAT)
+            liveness.update({
+                "status": (
+                    "degraded"
+                    if _last_liveness_error_at > _last_liveness_success_at
+                    else "healthy"
+                ),
+                "active_turns": active_count,
+                "abandoned_recovered": recovered_count,
+                "last_success_at": _last_liveness_success_at or None,
+            })
+        except Exception as exc:
+            redis_error = f"{type(exc).__name__}: {exc}"
+            liveness["error"] = redis_error
+
+    overall = "healthy"
+    if vllm_health.get("status") != "healthy":
+        overall = "unhealthy"
+    elif TAEY_LIVENESS_REQUIRED and liveness.get("status") == "unavailable":
+        overall = "unhealthy"
+    elif liveness.get("status") in {"degraded", "unavailable"}:
+        overall = "degraded"
 
     return {
-        "status": "healthy",
+        "status": overall,
         "vllm": vllm_health,
         "soma_connected": vprop_raw is not None,
+        "redis_error": redis_error or None,
+        "liveness": liveness,
     }
 
 
@@ -1288,52 +1441,514 @@ async def list_models():
 
 
 # ---------------------------------------------------------------------------
-# TAEY LIVENESS — the Stop-hook equivalent for a headless participant.
+# TAEY LIVENESS
 #
-# A tmux seat has a Stop hook that sets `taey:<name>:idle` when its turn ends,
-# and the notification daemon reads that key to know who can be woken. Taey has
-# no terminal and no hook, so nothing ever wrote its idle state and nothing
-# could tell a stopped Taey from a working one. The gap was never that Taey is
-# unobservable — THIS PROXY persists between turns and knows exactly when one
-# starts and ends. It simply was not reporting.
-#
-# Same key, same semantics as every seat, so anything that already watches the
-# fleet sees Taey without special-casing:
-#   taey:taey:idle           1 while no turn is running (absent/0 while running)
-#   taey:taey:last_activity  unix seconds at the end of the last turn
-#   taey:taey:turn_started   unix seconds when the current turn began
-# A turn that dies mid-flight still clears via the finally block, so a crashed
-# turn reports idle rather than pinning Taey as permanently busy.
+# A boolean cannot represent concurrent requests, and a decrement-only counter
+# cannot make duplicate stream cleanup idempotent. Active turn IDs are the
+# domain primitive. Leases make a dead process recoverable; the legacy idle /
+# turns_open keys are projections for existing fleet-notify consumers.
 # ---------------------------------------------------------------------------
-TAEY_SESSION = os.environ.get("TAEY_SESSION_NAME", "taey")
+_SEAT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+_TRACE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$")
+
+_RECONCILE_LIVENESS_LUA = """
+local recovered = 0
+local active = redis.call('ZRANGE', KEYS[1], 0, -1)
+for _, turn_id in ipairs(active) do
+    local context = redis.call('HGET', KEYS[3], turn_id)
+    local deadline = tonumber(redis.call('ZSCORE', KEYS[1], turn_id) or '0')
+    local reason = nil
+    if deadline <= tonumber(ARGV[1]) then
+        reason = 'lease_expired'
+    elseif ARGV[2] ~= '' then
+        local ok, decoded = pcall(cjson.decode, context or '')
+        if not ok or type(decoded) ~= 'table' then
+            reason = 'invalid_context'
+        elseif tostring(decoded['process_generation'] or '') ~= ARGV[2] then
+            reason = 'process_restarted'
+        end
+    end
+    if reason then
+        redis.call('LPUSH', KEYS[4], cjson.encode({
+            turn_id=turn_id,
+            context=context,
+            abandoned_at=tonumber(ARGV[1]),
+            reason=reason
+        }))
+        redis.call('ZREM', KEYS[1], turn_id)
+        redis.call('ZREM', KEYS[2], turn_id)
+        redis.call('HDEL', KEYS[3], turn_id)
+        redis.call('ZREM', KEYS[9], turn_id)
+        recovered = recovered + 1
+    end
+end
+redis.call('LTRIM', KEYS[4], 0, 999)
+redis.call('ZREMRANGEBYSCORE', KEYS[9], '-inf', ARGV[1])
+local count = redis.call('ZCARD', KEYS[1])
+local global_count = redis.call('ZCARD', KEYS[9])
+redis.call('SET', KEYS[5], count)
+redis.call('SET', KEYS[10], global_count > 0 and '1' or '0')
+if count == 0 then
+    redis.call('SET', KEYS[6], '1')
+    redis.call('DEL', KEYS[7])
+else
+    redis.call('DEL', KEYS[6])
+    local first = redis.call('ZRANGE', KEYS[2], 0, 0, 'WITHSCORES')
+    if #first > 0 then
+        redis.call('SET', KEYS[7], math.floor(tonumber(first[2])))
+    end
+end
+return {count, recovered, global_count}
+"""
+
+_START_TURN_LUA = """
+local expired = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', ARGV[1])
+for _, expired_id in ipairs(expired) do
+    local expired_context = redis.call('HGET', KEYS[3], expired_id)
+    redis.call('LPUSH', KEYS[4], cjson.encode({
+        turn_id=expired_id,
+        context=expired_context,
+        abandoned_at=tonumber(ARGV[1]),
+        reason='lease_expired'
+    }))
+    redis.call('ZREM', KEYS[1], expired_id)
+    redis.call('ZREM', KEYS[2], expired_id)
+    redis.call('HDEL', KEYS[3], expired_id)
+    redis.call('ZREM', KEYS[9], expired_id)
+end
+redis.call('LTRIM', KEYS[4], 0, 999)
+redis.call('ZREMRANGEBYSCORE', KEYS[9], '-inf', ARGV[1])
+redis.call('ZADD', KEYS[1], ARGV[2], ARGV[3])
+redis.call('ZADD', KEYS[2], ARGV[1], ARGV[3])
+redis.call('HSET', KEYS[3], ARGV[3], ARGV[4])
+redis.call('ZADD', KEYS[9], ARGV[2], ARGV[3])
+redis.call('SADD', KEYS[11], ARGV[5])
+local count = redis.call('ZCARD', KEYS[1])
+local global_count = redis.call('ZCARD', KEYS[9])
+redis.call('SET', KEYS[5], count)
+redis.call('SET', KEYS[10], global_count > 0 and '1' or '0')
+redis.call('DEL', KEYS[6])
+local first = redis.call('ZRANGE', KEYS[2], 0, 0, 'WITHSCORES')
+if #first > 0 then
+    redis.call('SET', KEYS[7], math.floor(tonumber(first[2])))
+end
+return {count, #expired, global_count}
+"""
+
+_END_TURN_LUA = """
+local removed = redis.call('ZREM', KEYS[1], ARGV[1])
+redis.call('ZREM', KEYS[2], ARGV[1])
+redis.call('HDEL', KEYS[3], ARGV[1])
+redis.call('ZREM', KEYS[9], ARGV[1])
+local count = redis.call('ZCARD', KEYS[1])
+local global_count = redis.call('ZCARD', KEYS[9])
+redis.call('SET', KEYS[5], count)
+redis.call('SET', KEYS[8], ARGV[2])
+redis.call('SET', KEYS[10], global_count > 0 and '1' or '0')
+if count == 0 then
+    redis.call('SET', KEYS[6], '1')
+    redis.call('DEL', KEYS[7])
+else
+    redis.call('DEL', KEYS[6])
+    local first = redis.call('ZRANGE', KEYS[2], 0, 0, 'WITHSCORES')
+    if #first > 0 then
+        redis.call('SET', KEYS[7], math.floor(tonumber(first[2])))
+    end
+end
+return {removed, count, global_count}
+"""
+
+_RENEW_TURN_LUA = """
+if redis.call('ZSCORE', KEYS[1], ARGV[1]) then
+    redis.call('ZADD', KEYS[1], 'XX', ARGV[2], ARGV[1])
+    redis.call('ZADD', KEYS[2], 'XX', ARGV[2], ARGV[1])
+    return 1
+end
+return 0
+"""
 
 
-def _mark_turn_start() -> None:
+class LivenessUnavailable(RuntimeError):
+    pass
+
+
+def _normalize_seat_id(value: str) -> str:
+    seat_id = str(value or "").strip()
+    if not _SEAT_ID_RE.fullmatch(seat_id):
+        raise HTTPException(
+            status_code=400,
+            detail="X-Taey-Seat-Id must match [A-Za-z0-9][A-Za-z0-9_-]{0,63}",
+        )
+    return seat_id
+
+
+def _normalize_trace_id(value: str, field_name: str) -> str:
+    trace_id = str(value or "").strip()
+    if not _TRACE_ID_RE.fullmatch(trace_id):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"{field_name} must match "
+                "[A-Za-z0-9][A-Za-z0-9._:-]{0,159}"
+            ),
+        )
+    return trace_id
+
+
+def _turn_context(request: Request, body: dict) -> TurnContext:
+    metadata = body.pop("_taey", {})
+    if metadata is None:
+        metadata = {}
+    if not isinstance(metadata, dict):
+        raise HTTPException(status_code=400, detail="_taey metadata must be an object")
+    seat_id = _normalize_seat_id(
+        request.headers.get("x-taey-seat-id")
+        or metadata.get("seat_id")
+        or TAEY_DEFAULT_SEAT
+    )
+    event_id = _normalize_trace_id(
+        request.headers.get("x-taey-event-id")
+        or metadata.get("event_id")
+        or uuid.uuid4().hex,
+        "X-Taey-Event-Id",
+    )
+    correlation_id = _normalize_trace_id(
+        request.headers.get("x-taey-correlation-id")
+        or metadata.get("correlation_id")
+        or event_id,
+        "X-Taey-Correlation-Id",
+    )
+    return TurnContext(
+        turn_id=uuid.uuid4().hex,
+        seat_id=seat_id,
+        event_id=event_id,
+        correlation_id=correlation_id,
+        process_generation=PROCESS_GENERATION,
+        started_at=time.time(),
+    )
+
+
+def _turn_payload(turn: TurnContext) -> dict:
+    return {
+        "turn_id": turn.turn_id,
+        "seat_id": turn.seat_id,
+        "event_id": turn.event_id,
+        "correlation_id": turn.correlation_id,
+        "process_generation": turn.process_generation,
+        "started_at": turn.started_at,
+    }
+
+
+def _liveness_keys(seat_id: str) -> list[str]:
+    prefix = f"taey:{seat_id}"
+    return [
+        f"{prefix}:active_turns",
+        f"{prefix}:turn_starts",
+        f"{prefix}:turn_context",
+        f"{prefix}:abandoned_turns",
+        f"{prefix}:turns_open",
+        f"{prefix}:idle",
+        f"{prefix}:turn_started",
+        f"{prefix}:last_activity",
+        "taey:soma:active_turns",
+        "taey:soma:gpu_busy",
+        "taey:soma:seat_ids",
+    ]
+
+
+def _set_liveness_error(message: str) -> None:
+    global _last_liveness_error, _last_liveness_error_at
+    _last_liveness_error = message
+    _last_liveness_error_at = time.time()
+    log.error("liveness: %s", message)
+
+
+def _mark_liveness_success() -> None:
+    global _last_liveness_success_at
+    _last_liveness_success_at = time.time()
+
+
+def _reconcile_liveness(
+    seat_id: str,
+    *,
+    current_process_generation: str = "",
+) -> tuple[int, int]:
+    if _redis is None:
+        raise LivenessUnavailable("Redis client is unavailable")
+    now = time.time()
+    result = _redis.eval(
+        _RECONCILE_LIVENESS_LUA,
+        len(_liveness_keys(seat_id)),
+        *_liveness_keys(seat_id),
+        now,
+        current_process_generation,
+    )
+    count, recovered = int(result[0]), int(result[1])
+    if recovered:
+        log.error(
+            "liveness: recovered %d abandoned turns for seat=%s",
+            recovered,
+            seat_id,
+        )
+    _mark_liveness_success()
+    return count, recovered
+
+
+def _start_turn(turn: TurnContext) -> int:
+    if _redis is None:
+        message = f"Redis unavailable; cannot register turn {turn.turn_id}"
+        _set_liveness_error(message)
+        if TAEY_LIVENESS_REQUIRED:
+            raise LivenessUnavailable(message)
+        return -1
     try:
-        r = _redis
-        if r:
-            r.delete(f"taey:{TAEY_SESSION}:idle")
-            r.set(f"taey:{TAEY_SESSION}:turn_started", int(time.time()))
-    except Exception as e:
-        log.warning("liveness: could not mark turn start: %s", e)
+        deadline = time.time() + TAEY_TURN_LEASE_SECS
+        result = _redis.eval(
+            _START_TURN_LUA,
+            len(_liveness_keys(turn.seat_id)),
+            *_liveness_keys(turn.seat_id),
+            turn.started_at,
+            deadline,
+            turn.turn_id,
+            json.dumps(_turn_payload(turn), separators=(",", ":")),
+            turn.seat_id,
+        )
+        count, expired, global_count = (
+            int(result[0]),
+            int(result[1]),
+            int(result[2]),
+        )
+        if expired:
+            log.error(
+                "liveness: start recovered %d expired turns seat=%s",
+                expired,
+                turn.seat_id,
+            )
+        _active_turns[turn.turn_id] = turn
+        _turn_heartbeat_tasks[turn.turn_id] = asyncio.create_task(
+            _renew_turn_lease(turn)
+        )
+        _mark_liveness_success()
+        _audit("turn_start", {**_turn_payload(turn), "turns_open": count})
+        log.info(
+            "Turn start seat=%s turn=%s event=%s correlation=%s open=%d global=%d",
+            turn.seat_id,
+            turn.turn_id,
+            turn.event_id,
+            turn.correlation_id,
+            count,
+            global_count,
+        )
+        return count
+    except Exception as exc:
+        message = f"could not register turn {turn.turn_id}: {type(exc).__name__}: {exc}"
+        _set_liveness_error(message)
+        if TAEY_LIVENESS_REQUIRED:
+            raise LivenessUnavailable(message) from exc
+        return -1
 
 
-def _mark_turn_end() -> None:
+async def _renew_turn_lease(turn: TurnContext) -> None:
     try:
-        r = _redis
-        if r:
-            now = int(time.time())
-            r.set(f"taey:{TAEY_SESSION}:idle", "1")
-            r.set(f"taey:{TAEY_SESSION}:last_activity", now)
-            r.delete(f"taey:{TAEY_SESSION}:turn_started")
-    except Exception as e:
-        log.warning("liveness: could not mark turn end: %s", e)
+        while True:
+            await asyncio.sleep(TAEY_TURN_HEARTBEAT_SECS)
+            try:
+                if _redis is None:
+                    raise LivenessUnavailable("Redis client became unavailable")
+                renewed = int(
+                    _redis.eval(
+                        _RENEW_TURN_LUA,
+                        2,
+                        _liveness_keys(turn.seat_id)[0],
+                        _liveness_keys(turn.seat_id)[8],
+                        turn.turn_id,
+                        time.time() + TAEY_TURN_LEASE_SECS,
+                    )
+                )
+            except Exception as exc:
+                _set_liveness_error(
+                    f"lease renewal failed seat={turn.seat_id} "
+                    f"turn={turn.turn_id}: {type(exc).__name__}: {exc}"
+                )
+                continue
+            if not renewed:
+                _set_liveness_error(
+                    f"active turn lease disappeared for {turn.turn_id}"
+                )
+                return
+            _mark_liveness_success()
+    except asyncio.CancelledError:
+        raise
+    finally:
+        current = _turn_heartbeat_tasks.get(turn.turn_id)
+        if current is asyncio.current_task():
+            _turn_heartbeat_tasks.pop(turn.turn_id, None)
+
+
+async def _liveness_reaper() -> None:
+    while True:
+        try:
+            await asyncio.sleep(TAEY_TURN_HEARTBEAT_SECS)
+            if _redis is None:
+                raise LivenessUnavailable("Redis client is unavailable")
+            seat_ids = {
+                TAEY_DEFAULT_SEAT,
+                *_redis.smembers("taey:soma:seat_ids"),
+            }
+            for seat_id in seat_ids:
+                if not _SEAT_ID_RE.fullmatch(seat_id):
+                    raise LivenessUnavailable(
+                        f"invalid seat id in Redis registry: {seat_id!r}"
+                    )
+                _reconcile_liveness(seat_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            _set_liveness_error(
+                f"liveness reaper failed: {type(exc).__name__}: {exc}"
+            )
+
+
+def _schedule_turn_close_retry(turn: TurnContext, outcome: str) -> None:
+    existing = _turn_close_retry_tasks.get(turn.turn_id)
+    if existing is None or existing.done():
+        _turn_close_retry_tasks[turn.turn_id] = asyncio.create_task(
+            _retry_turn_close(turn, outcome)
+        )
+
+
+async def _retry_turn_close(turn: TurnContext, outcome: str) -> None:
+    retry_deadline = time.time() + TAEY_TURN_LEASE_SECS
+    delay = 1
+    try:
+        while time.time() < retry_deadline:
+            await asyncio.sleep(delay)
+            _, count = await _end_turn(
+                turn,
+                f"{outcome}_retry",
+                schedule_retry=False,
+            )
+            if count >= 0:
+                return
+            delay = min(delay * 2, TAEY_TURN_HEARTBEAT_SECS)
+    except asyncio.CancelledError:
+        raise
+    finally:
+        current = _turn_close_retry_tasks.get(turn.turn_id)
+        if current is asyncio.current_task():
+            _turn_close_retry_tasks.pop(turn.turn_id, None)
+
+
+async def _end_turn(
+    turn: TurnContext,
+    outcome: str,
+    *,
+    schedule_retry: bool = True,
+) -> tuple[int, int]:
+    heartbeat = _turn_heartbeat_tasks.pop(turn.turn_id, None)
+    if heartbeat is not None:
+        heartbeat.cancel()
+    if _redis is None:
+        _set_liveness_error(
+            f"Redis unavailable; could not close turn {turn.turn_id} outcome={outcome}"
+        )
+        if schedule_retry:
+            _schedule_turn_close_retry(turn, outcome)
+        return 0, -1
+    try:
+        result = _redis.eval(
+            _END_TURN_LUA,
+            len(_liveness_keys(turn.seat_id)),
+            *_liveness_keys(turn.seat_id),
+            turn.turn_id,
+            int(time.time()),
+        )
+        removed, count, global_count = (
+            int(result[0]),
+            int(result[1]),
+            int(result[2]),
+        )
+        _active_turns.pop(turn.turn_id, None)
+        _mark_liveness_success()
+        _audit(
+            "turn_end",
+            {
+                **_turn_payload(turn),
+                "outcome": outcome,
+                "removed": bool(removed),
+                "turns_open": count,
+                "global_turns_open": global_count,
+            },
+        )
+        log.info(
+            "Turn end seat=%s turn=%s event=%s outcome=%s removed=%d open=%d global=%d",
+            turn.seat_id,
+            turn.turn_id,
+            turn.event_id,
+            outcome,
+            removed,
+            count,
+            global_count,
+        )
+        return removed, count
+    except Exception as exc:
+        _set_liveness_error(
+            f"could not close turn {turn.turn_id}: {type(exc).__name__}: {exc}"
+        )
+        if schedule_retry:
+            _schedule_turn_close_retry(turn, outcome)
+        return 0, -1
+
+
+def _turn_headers(turn: TurnContext) -> dict[str, str]:
+    return {
+        "X-Taey-Turn-Id": turn.turn_id,
+        "X-Taey-Seat-Id": turn.seat_id,
+        "X-Taey-Event-Id": turn.event_id,
+        "X-Taey-Correlation-Id": turn.correlation_id,
+    }
+
+
+def _upstream_headers(turn: TurnContext) -> dict[str, str]:
+    return {
+        "Content-Type": "application/json",
+        "X-Request-Id": turn.turn_id,
+        **_turn_headers(turn),
+    }
 
 
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request):
-    body = await request.json()
-    _mark_turn_start()
+    raw_body = await request.json()
+    if not isinstance(raw_body, dict):
+        raise HTTPException(status_code=400, detail="request body must be an object")
+    body = dict(raw_body)
+    turn = _turn_context(request, body)
+    context_token = _request_context.set(_turn_payload(turn))
+    started = False
+    try:
+        try:
+            open_turns = _start_turn(turn)
+        except LivenessUnavailable as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        started = open_turns >= 0
+        response = await _chat_completions_for_turn(body, turn, started)
+        if started and not isinstance(response, StreamingResponse):
+            await _end_turn(turn, "nonstream_complete")
+        return response
+    except BaseException:
+        if started:
+            await _end_turn(turn, "handler_error")
+        raise
+    finally:
+        _request_context.reset(context_token)
+
+
+async def _chat_completions_for_turn(
+    body: dict,
+    turn: TurnContext,
+    liveness_registered: bool,
+):
     body.pop("max_rounds", None)
 
     # Strip model field -- let vLLM use its loaded model
@@ -1344,13 +1959,6 @@ async def chat_completions(request: Request):
     # Inject tools if not already present
     if "tools" not in body:
         body["tools"] = TOOLS
-
-    # Signal busy
-    if _redis:
-        try:
-            _redis.set("taey:soma:gpu_busy", "1", ex=60)
-        except Exception:
-            pass
 
     t0 = time.time()
 
@@ -1385,7 +1993,7 @@ async def chat_completions(request: Request):
             for _attempt in (1, 2):
                 try:
                     resp = await _http.post("/v1/chat/completions", json=probe,
-                                            headers={"Content-Type": "application/json"})
+                                            headers=_upstream_headers(turn))
                     break
                 except httpx.RemoteProtocolError:
                     if _attempt == 2:
@@ -1445,7 +2053,12 @@ async def chat_completions(request: Request):
                         arguments = json.loads(raw_args) if raw_args else {}
                     except json.JSONDecodeError:
                         arguments = {}
-                result = await execute_tool_call_async(func.get("name", ""), arguments)
+                result = await execute_tool_call_async(
+                    func.get("name", ""),
+                    arguments,
+                    tool_call_id=tc.get("id", ""),
+                    round_num=rounds,
+                )
                 log.info("Tool %s -> %d chars", func.get("name", ""), len(result))
                 body["messages"].append({
                     "role": "tool",
@@ -1460,38 +2073,38 @@ async def chat_completions(request: Request):
             body["tool_choice"] = "none"
 
     if is_stream:
-        # Stream: forward SSE from vLLM directly (no tool loop for streams)
         async def stream_and_measure():
+            context_token = _request_context.set(_turn_payload(turn))
             token_count = 0
             prompt_tokens = 0
-            if resolved_answer or resolved_thinking:
-                for i in range(0, len(resolved_thinking), 240):
-                    yield ("data: " + json.dumps({
-                        "id": "chatcmpl-resolved", "object": "chat.completion.chunk",
-                        "choices": [{"index": 0,
-                                     "delta": {"reasoning": resolved_thinking[i:i + 240]},
-                                     "finish_reason": None}],
-                    }) + "\n\n").encode()
-                for i in range(0, len(resolved_answer), 240):
-                    piece = resolved_answer[i:i + 240]
-                    yield ("data: " + json.dumps({
-                        "id": "chatcmpl-resolved", "object": "chat.completion.chunk",
-                        "choices": [{"index": 0, "delta": {"content": piece},
-                                     "finish_reason": None}],
-                    }) + "\n\n").encode()
-                yield b"data: [DONE]\n\n"
-                # The replay path returns BEFORE the try/finally below, so the liveness mark must
-                # happen here too. Without it a streaming turn completes and Taey never reports
-                # idle -- and anything keyed on taey:taey:idle (the notify poller) waits forever
-                # on a Taey that is actually free. Observed 2026-07-29: turn finished, idle unset
-                # 360s later. Two exits, two marks.
-                _mark_turn_end()
-                return
+            outcome = "stream_complete"
             try:
+                if resolved_answer or resolved_thinking:
+                    completion_id = f"chatcmpl-{turn.turn_id}"
+                    for i in range(0, len(resolved_thinking), 240):
+                        yield ("data: " + json.dumps({
+                            "id": completion_id,
+                            "object": "chat.completion.chunk",
+                            "choices": [{"index": 0,
+                                         "delta": {
+                                             "reasoning": resolved_thinking[i:i + 240]
+                                         },
+                                         "finish_reason": None}],
+                        }) + "\n\n").encode()
+                    for i in range(0, len(resolved_answer), 240):
+                        piece = resolved_answer[i:i + 240]
+                        yield ("data: " + json.dumps({
+                            "id": completion_id,
+                            "object": "chat.completion.chunk",
+                            "choices": [{"index": 0, "delta": {"content": piece},
+                                         "finish_reason": None}],
+                        }) + "\n\n").encode()
+                    yield b"data: [DONE]\n\n"
+                    return
                 async with _http.stream(
                     "POST", "/v1/chat/completions",
                     json=body,
-                    headers={"Content-Type": "application/json"},
+                    headers=_upstream_headers(turn),
                 ) as resp:
                     async for chunk in resp.aiter_bytes():
                         yield chunk
@@ -1508,8 +2121,12 @@ async def chat_completions(request: Request):
                                         token_count = u.get("completion_tokens", token_count)
                             except Exception:
                                 pass
+            except BaseException:
+                outcome = "stream_error"
+                raise
             finally:
-                _mark_turn_end()
+                if liveness_registered:
+                    await _end_turn(turn, outcome)
                 elapsed_ms = (time.time() - t0) * 1000
                 publish_metrics(elapsed_ms, prompt_tokens, token_count)
                 log.info(
@@ -1518,124 +2135,134 @@ async def chat_completions(request: Request):
                     token_count / max(elapsed_ms / 1000, 0.001),
                     prompt_tokens,
                 )
+                _request_context.reset(context_token)
 
-        # BackgroundTask guarantees the liveness mark even if the CLIENT ABANDONS the stream.
-        # The generator's finally covers normal completion, but a client that disconnects mid-
-        # stream (a killed curl, a closed browser tab) can leave the generator unconsumed and its
-        # finally unrun -- which left taey:taey:turn_started set with no matching end, so `idle`
-        # never returned to 1 and the notify poller correctly refused to fire on a Taey it believed
-        # was busy. Observed 2026-07-29: turn_started set, backend idle, mail undelivered for
-        # hours. Starlette runs a BackgroundTask after the response completes INCLUDING on client
-        # disconnect, so this closes the one exit the finally cannot reach. Marking twice is
-        # harmless -- it is an idempotent SET.
+        # Background cleanup covers disconnect paths where Starlette never advances the generator
+        # into its finally. Exact turn-ID removal keeps the duplicate cleanup harmless.
         return StreamingResponse(
             stream_and_measure(),
             media_type="text/event-stream",
-            background=BackgroundTask(_mark_turn_end),
+            headers=_turn_headers(turn),
+            background=(
+                BackgroundTask(_end_turn, turn, "stream_background")
+                if liveness_registered
+                else None
+            ),
         )
     else:
-        # Non-stream: forward with tool call execution loop
-        messages = body["messages"]
-        total_tokens = 0
-        round_num = 0
+        async def nonstream_response():
+            # Non-stream: forward with tool call execution loop
+            messages = body["messages"]
+            total_tokens = 0
+            round_num = 0
 
-        while True:
-            resp = await _http.post(
-                "/v1/chat/completions",
-                json=body,
-                headers={"Content-Type": "application/json"},
-            )
-            result = resp.json()
-            usage = result.get("usage", {})
-            total_tokens += usage.get("completion_tokens", 0)
-
-            choice = result.get("choices", [{}])[0]
-            message = choice.get("message", {})
-            finish_reason = choice.get("finish_reason", "")
-            tool_calls = message.get("tool_calls", [])
-
-            if not tool_calls or finish_reason != "tool_calls":
-                # No tool calls -- final response
-                break
-
-            if round_num >= MAX_TOOL_ROUNDS:
-                log.warning(
-                    "Tool round cap hit (%d); forcing final text response",
-                    MAX_TOOL_ROUNDS,
-                )
-                final_body = dict(body)
-                final_body["messages"] = messages
-                final_body.pop("tools", None)
-                final_body["tool_choice"] = "none"
+            while True:
                 resp = await _http.post(
                     "/v1/chat/completions",
-                    json=final_body,
-                    headers={"Content-Type": "application/json"},
+                    json=body,
+                    headers=_upstream_headers(turn),
                 )
                 result = resp.json()
                 usage = result.get("usage", {})
                 total_tokens += usage.get("completion_tokens", 0)
-                break
 
-            # Execute tool calls
-            round_num += 1
-            log.info("Tool calls (round %d): %s",
-                     round_num,
-                     [tc.get("function", {}).get("name") for tc in tool_calls])
+                choice = result.get("choices", [{}])[0]
+                message = choice.get("message", {})
+                finish_reason = choice.get("finish_reason", "")
+                tool_calls = message.get("tool_calls", [])
 
-            # NOTE: keep each tool_call's arguments as the JSON STRING vLLM
-            # returns. With the correct qwen3_xml parser the chat-template
-            # renders string args fine; re-POSTing dict args (the old
-            # qwen3_coder-era workaround) fails vLLM's API validation
-            # (function.arguments must be a string). execute_tool_call below
-            # json.loads the string into a dict for execution.
+                if not tool_calls or finish_reason != "tool_calls":
+                    # No tool calls -- final response
+                    break
 
-            # Add assistant message with tool calls to history
-            messages.append(message)
+                if round_num >= MAX_TOOL_ROUNDS:
+                    log.warning(
+                        "Tool round cap hit (%d); forcing final text response",
+                        MAX_TOOL_ROUNDS,
+                    )
+                    final_body = dict(body)
+                    final_body["messages"] = messages
+                    final_body.pop("tools", None)
+                    final_body["tool_choice"] = "none"
+                    resp = await _http.post(
+                        "/v1/chat/completions",
+                        json=final_body,
+                        headers=_upstream_headers(turn),
+                    )
+                    result = resp.json()
+                    usage = result.get("usage", {})
+                    total_tokens += usage.get("completion_tokens", 0)
+                    break
 
-            for tc in tool_calls:
-                func = tc.get("function", {})
-                name = func.get("name", "")
-                raw_args = func.get("arguments", {})
-                if isinstance(raw_args, dict):
-                    arguments = raw_args
-                else:
-                    try:
-                        arguments = json.loads(raw_args) if raw_args else {}
-                    except json.JSONDecodeError:
-                        arguments = {}
+                # Execute tool calls
+                round_num += 1
+                log.info("Tool calls (round %d): %s",
+                         round_num,
+                         [tc.get("function", {}).get("name") for tc in tool_calls])
 
-                tool_result = await execute_tool_call_async(name, arguments)
-                log.info("Tool %s(%s) -> %d chars",
-                         name, json.dumps(arguments)[:100], len(tool_result))
+                # NOTE: keep each tool_call's arguments as the JSON STRING vLLM
+                # returns. With the correct qwen3_xml parser the chat-template
+                # renders string args fine; re-POSTing dict args (the old
+                # qwen3_coder-era workaround) fails vLLM's API validation
+                # (function.arguments must be a string). execute_tool_call below
+                # json.loads the string into a dict for execution.
 
-                # Add tool result to messages
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tc.get("id", ""),
-                    "content": tool_result,
-                })
+                # Add assistant message with tool calls to history
+                messages.append(message)
 
-            # Update body with extended messages for next round
-            body["messages"] = messages
+                for tc in tool_calls:
+                    func = tc.get("function", {})
+                    name = func.get("name", "")
+                    raw_args = func.get("arguments", {})
+                    if isinstance(raw_args, dict):
+                        arguments = raw_args
+                    else:
+                        try:
+                            arguments = json.loads(raw_args) if raw_args else {}
+                        except json.JSONDecodeError:
+                            arguments = {}
 
-        elapsed_ms = (time.time() - t0) * 1000
-        final_usage = result.get("usage", {})
-        prompt_tok = final_usage.get("prompt_tokens", 0)
-        completion_tok = final_usage.get("completion_tokens", 0)
-        publish_metrics(elapsed_ms, prompt_tok, completion_tok, round_num)
+                    tool_result = await execute_tool_call_async(
+                        name,
+                        arguments,
+                        tool_call_id=tc.get("id", ""),
+                        round_num=round_num,
+                    )
+                    log.info("Tool %s(%s) -> %d chars",
+                             name, json.dumps(arguments)[:100], len(tool_result))
 
-        context_pct = (prompt_tok + completion_tok) / MAX_CONTEXT_TOKENS * 100
-        log.info(
-            "Generated %d tokens in %.0fms (%.1f tok/s, %d tool rounds, "
-            "prompt=%d completion=%d context=%.1f%%)",
-            completion_tok, elapsed_ms,
-            completion_tok / max(elapsed_ms / 1000, 0.001),
-            round_num, prompt_tok, completion_tok, context_pct,
-        )
+                    # Add tool result to messages
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc.get("id", ""),
+                        "content": tool_result,
+                    })
 
-        _mark_turn_end()
-        return JSONResponse(content=result, status_code=resp.status_code)
+                # Update body with extended messages for next round
+                body["messages"] = messages
+
+            elapsed_ms = (time.time() - t0) * 1000
+            final_usage = result.get("usage", {})
+            prompt_tok = final_usage.get("prompt_tokens", 0)
+            completion_tok = final_usage.get("completion_tokens", 0)
+            publish_metrics(elapsed_ms, prompt_tok, completion_tok, round_num)
+
+            context_pct = (prompt_tok + completion_tok) / MAX_CONTEXT_TOKENS * 100
+            log.info(
+                "Generated %d tokens in %.0fms (%.1f tok/s, %d tool rounds, "
+                "prompt=%d completion=%d context=%.1f%%)",
+                completion_tok, elapsed_ms,
+                completion_tok / max(elapsed_ms / 1000, 0.001),
+                round_num, prompt_tok, completion_tok, context_pct,
+            )
+
+            return JSONResponse(
+                content=result,
+                status_code=resp.status_code,
+                headers=_turn_headers(turn),
+            )
+
+        return await nonstream_response()
 
 
 def main():

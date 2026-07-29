@@ -539,7 +539,7 @@
 
 <script>
 // --- State ---
-let currentSession = null;
+let currentSession = 'main';
 let abortController = null;
 let selfState = null;
 
@@ -788,31 +788,32 @@ function scrollChatToBottom() {
 
 function renderChatHistory(messages) {
   clearChatArea();
-  if (!messages || messages.length === 0) {
+  const visible = (messages || []).filter(
+    message =>
+      (message.role === 'user' || message.role === 'assistant') &&
+      message.content
+  );
+  if (visible.length === 0) {
+    ensureEmptyState();
     return;
   }
 
-  messages.forEach(message => addMessage(message.role, message.content, message.sources, false));
+  visible.forEach(
+    message =>
+      addMessage(
+        message.role,
+        message.content,
+        message.sources,
+        false,
+        message.thinking
+      )
+  );
   scrollChatToBottom();
 }
 
 async function loadChatHistory() {
   try {
-    const sessionsResponse = await fetch('/api/chat/sessions');
-    const sessionsData = await sessionsResponse.json();
-    const sessions = Array.isArray(sessionsData.sessions) ? sessionsData.sessions : [];
-
-    if (!sessions.length) {
-      currentSession = null;
-      ensureEmptyState();
-      return;
-    }
-
-    clearEmptyState();
-    const resumedSession = sessions.find(session => session.id === sessionsData.last_session_id);
-    const sessionToLoad = resumedSession || sessions[0];
-    currentSession = sessionToLoad.id;
-
+    currentSession = 'main';
     const historyResponse = await fetch(`/api/chat/sessions/${currentSession}`);
     if (!historyResponse.ok) {
       throw new Error(`Failed to load session ${currentSession}`);
@@ -831,13 +832,6 @@ async function sendMessage() {
   const msg = input.value.trim();
   if (!msg) return;
   input.value = '';
-
-  // Create session if needed
-  if (!currentSession) {
-    const r = await fetch('/api/chat/sessions', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'});
-    const data = await r.json();
-    currentSession = data.session_id;
-  }
 
   // Clear empty state
   clearEmptyState();

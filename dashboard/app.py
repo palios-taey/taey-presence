@@ -4,13 +4,16 @@ Dynamic emoji face (model-chosen), chat with full tool access, memory search,
 worker status, and a prediction WebSocket for partial-input thought prediction.
 """
 import os
+import fcntl
 import json
 import asyncio
 import logging
+import re
 import time
+import uuid
 import redis
 import httpx
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -58,11 +61,91 @@ try:
 except Exception:
     _thor_redis = None
 _http = httpx.AsyncClient(timeout=300.0)
+TAEY_SESSIONS_DIR = os.environ.get(
+    "TAEY_SESSIONS_DIR",
+    str(os.path.join(os.path.expanduser("~"), "taey_sessions")),
+)
+TAEY_CONVERSATION_ID = os.environ.get("TAEY_CONVERSATION_ID", "main")
+TAEY_SESSION_MAX_TURNS = max(
+    1,
+    int(os.environ.get("TAEY_SESSION_MAX_TURNS", "60")),
+)
+_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 
 DASH_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(DASH_DIR, "static")
 if os.path.exists(STATIC_DIR):
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+
+def _session_file(session_id: str) -> str:
+    if not _SESSION_ID_RE.fullmatch(str(session_id)):
+        raise HTTPException(status_code=400, detail="invalid session id")
+    return os.path.join(TAEY_SESSIONS_DIR, f"{session_id}.jsonl")
+
+
+def _read_session_events(session_id: str) -> list[dict]:
+    path = _session_file(session_id)
+    if not os.path.exists(path):
+        return []
+    events = []
+    with open(path, encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_SH)
+        for line_number, line in enumerate(handle, 1):
+            if not line.endswith("\n"):
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"partial conversation record at line {line_number}",
+                )
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"invalid conversation record at line {line_number}",
+                ) from exc
+            if not isinstance(event, dict):
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"non-object conversation record at line {line_number}",
+                )
+            events.append(event)
+    return events
+
+
+def _append_session_event(session_id: str, event: dict) -> None:
+    path = _session_file(session_id)
+    os.makedirs(TAEY_SESSIONS_DIR, mode=0o700, exist_ok=True)
+    row = {
+        "schema_version": 1,
+        "recorded_at": time.time(),
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "conversation_id": session_id,
+        **event,
+    }
+    encoded = (
+        json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n"
+    ).encode("utf-8")
+    new_log = not os.path.exists(path)
+    descriptor = os.open(path, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        view = memoryview(encoded)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise OSError(f"conversation append made no progress: {path}")
+            view = view[written:]
+        os.fsync(descriptor)
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+    if new_log:
+        directory = os.open(TAEY_SESSIONS_DIR, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
 
 
 # ── HTML ──────────────────────────────────────────────────────────────────
@@ -326,6 +409,40 @@ async function refreshServices() {
 // ── Chat ──
 let currentController = null;
 const chatHistory = [];
+const executiveSessionId = 'main';
+let executiveSessionSignature = '';
+
+async function restoreExecutiveSession() {
+  try {
+    const r = await fetch('/api/chat/sessions/' + executiveSessionId);
+    if (!r.ok) throw new Error('session load failed: ' + r.status);
+    const data = await r.json();
+    const visible = (data.messages || []).filter(
+      m => (m.role === 'user' || m.role === 'assistant') && m.content
+    );
+    const last = visible.length ? visible[visible.length - 1] : {};
+    const signature = visible.length + ':' + (last.event_id || last.ts || '') +
+      ':' + String(last.content || '').length;
+    if (signature === executiveSessionSignature) return;
+    executiveSessionSignature = signature;
+
+    const log = $('#chat-log');
+    log.innerHTML = '';
+    chatHistory.length = 0;
+    for (const message of visible) {
+      chatHistory.push({role: message.role, content: message.content});
+      const row = document.createElement('div');
+      row.className = message.role === 'user' ? 'msg-user' : 'msg-taey';
+      row.textContent = (message.role === 'user' ? 'You: ' : 'Taey: ') +
+        message.content;
+      log.appendChild(row);
+    }
+    log.scrollTop = log.scrollHeight;
+    syncHistory();
+  } catch (error) {
+    $('#status-line').textContent = 'conversation load failed: ' + error;
+  }
+}
 
 function autoResize(el) {
   el.style.height = 'auto';
@@ -366,24 +483,56 @@ async function sendChat() {
   currentController = new AbortController();
 
   try {
-    const endpoint = '/api/chat';
-    const r = await fetch(endpoint, {
+    const r = await fetch(
+      '/api/chat/sessions/' + executiveSessionId + '/messages/stream',
+      {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({message: msg, history: chatHistory.slice(-20), use_proxy: useProxy, isma_tiles: tiles}),
+      body: JSON.stringify({message: msg, use_proxy: useProxy, isma_tiles: tiles}),
       signal: currentController.signal
     });
-
-    responseDiv.innerHTML = '<span class="thinking">Taey: searching...</span>';
-    const d = await r.json();
-    if (d.content) {
-      const tokens = d.usage ? ' ('+d.usage.completion_tokens+' tok)' : '';
-      responseDiv.textContent = 'Taey'+tokens+': ' + d.content;
-      chatHistory.push({role:'assistant',content:d.content});
-      syncHistory();
-    } else {
-      responseDiv.textContent = 'Taey: ' + (d.error || '(empty response)');
+    if (!r.ok) {
+      throw new Error(r.status + ' ' + (await r.text()).slice(0, 200));
     }
+
+    responseDiv.innerHTML = '';
+    const thinkingDiv = document.createElement('div');
+    thinkingDiv.className = 'thinking';
+    const contentDiv = document.createElement('div');
+    responseDiv.appendChild(thinkingDiv);
+    responseDiv.appendChild(contentDiv);
+
+    const reader = r.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let content = '';
+    let thinking = '';
+    while (true) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      buffer += decoder.decode(chunk.value, {stream: true});
+      const lines = buffer.split('\n');
+      buffer = lines.pop();
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const raw = line.slice(6).trim();
+        if (!raw || raw === '[DONE]') continue;
+        let event;
+        try { event = JSON.parse(raw); } catch (_) { continue; }
+        if (event.type === 'thinking') {
+          thinking += event.text || '';
+          thinkingDiv.textContent = thinking;
+        } else if (event.type === 'content') {
+          content += event.text || '';
+          contentDiv.textContent = 'Taey: ' + content;
+        } else if (event.type === 'error') {
+          contentDiv.textContent = 'Taey: ERROR — ' + (event.text || 'unknown');
+        }
+        log.scrollTop = log.scrollHeight;
+      }
+    }
+    if (content) chatHistory.push({role:'assistant', content:content});
+    syncHistory();
   } catch(e) {
     if (e.name === 'AbortError') {
       responseDiv.innerHTML += ' <span class="thinking">[stopped]</span>';
@@ -576,10 +725,12 @@ function dismissInterrupt() {
 }
 
 connectWS();
+restoreExecutiveSession();
 refreshSoma();
 refreshServices();
 setInterval(refreshSoma, 2618);
 setInterval(refreshServices, 15000);
+setInterval(() => { if (!currentController) restoreExecutiveSession(); }, 15000);
 </script>
 </body>
 </html>"""
@@ -796,6 +947,279 @@ async def chat_hybrid(request: Request):
             async for line in r.aiter_lines():
                 if line.startswith("data: "):
                     yield line + "\n\n"
+
+    return StreamingResponse(generate(), media_type="text/event-stream")
+
+
+@app.get("/api/chat/sessions")
+async def chat_sessions_list():
+    os.makedirs(TAEY_SESSIONS_DIR, mode=0o700, exist_ok=True)
+    sessions = []
+    for entry in os.scandir(TAEY_SESSIONS_DIR):
+        if not entry.is_file() or not entry.name.endswith(".jsonl"):
+            continue
+        session_id = entry.name[:-6]
+        if not _SESSION_ID_RE.fullmatch(session_id):
+            continue
+        messages = _read_session_events(session_id)
+        visible = [
+            message
+            for message in messages
+            if message.get("role") in {"user", "assistant"}
+            and message.get("content")
+        ]
+        first_user = next(
+            (
+                str(message.get("content"))
+                for message in visible
+                if message.get("role") == "user"
+            ),
+            "",
+        )
+        sessions.append(
+            {
+                "id": session_id,
+                "updated": entry.stat().st_mtime,
+                "message_count": len(visible),
+                "title": first_user[:60] or "New conversation",
+            }
+        )
+    sessions.sort(key=lambda item: item["updated"], reverse=True)
+    return {
+        "sessions": sessions,
+        "last_session_id": TAEY_CONVERSATION_ID,
+    }
+
+
+@app.post("/api/chat/sessions")
+async def chat_session_create():
+    return {"session_id": TAEY_CONVERSATION_ID}
+
+
+@app.get("/api/chat/sessions/{session_id}")
+async def chat_session_get(session_id: str):
+    return {
+        "session_id": session_id,
+        "messages": _read_session_events(session_id),
+    }
+
+
+@app.post("/api/chat/sessions/{session_id}/messages")
+async def chat_session_append(session_id: str, request: Request):
+    body = await request.json()
+    role = str(body.get("role") or "user")
+    if role not in {"user", "assistant"}:
+        raise HTTPException(status_code=400, detail="invalid message role")
+    content = str(body.get("content") or "")
+    if not content:
+        raise HTTPException(status_code=400, detail="message content is required")
+    event_id = str(body.get("event_id") or uuid.uuid4().hex)
+    _append_session_event(
+        session_id,
+        {
+            "event_type": "executive_ingress"
+            if role == "user"
+            else "turn_outcome",
+            "event_id": event_id,
+            "correlation_id": str(body.get("correlation_id") or event_id),
+            "source": str(body.get("source") or "ui"),
+            "kind": "user_prompt" if role == "user" else "assistant_reply",
+            "role": role,
+            "content": content,
+            "ok": True if role == "assistant" else None,
+        },
+    )
+    return {"ok": True, "event_id": event_id}
+
+
+@app.post("/api/chat/sessions/{session_id}/messages/stream")
+async def chat_session_stream(session_id: str, request: Request):
+    body = await request.json()
+    message = str(body.get("message") or "")
+    if not message.strip():
+        raise HTTPException(status_code=400, detail="message is required")
+    use_proxy = bool(body.get("use_proxy", True))
+    event_id = uuid.uuid4().hex
+    correlation_id = event_id
+    _append_session_event(
+        session_id,
+        {
+            "event_type": "executive_ingress",
+            "event_id": event_id,
+            "correlation_id": correlation_id,
+            "source": "ui",
+            "source_id": event_id,
+            "kind": "user_prompt",
+            "role": "user",
+            "content": message,
+            "mode": "proxy" if use_proxy else "raw",
+        },
+    )
+
+    history = [
+        {
+            "role": event["role"],
+            "content": str(event["content"]),
+        }
+        for event in _read_session_events(session_id)
+        if event.get("role") in {"user", "assistant"} and event.get("content")
+    ][-(TAEY_SESSION_MAX_TURNS * 2):]
+    upstream = THOR_PROXY if use_proxy else THOR_RAW
+    payload = {
+        "model": MODEL or "ep3",
+        "messages": history,
+        "stream": True,
+    }
+    isma_tiles = body.get("isma_tiles")
+    if isma_tiles:
+        payload["isma_prefetch"] = isma_tiles
+    headers = {
+        "X-Taey-Seat-Id": "taey",
+        "X-Taey-Event-Id": event_id,
+        "X-Taey-Correlation-Id": correlation_id,
+    }
+
+    async def generate():
+        thinking_parts = []
+        content_parts = []
+        terminal_recorded = False
+        proxy_turn_id = ""
+        try:
+            async with _http.stream(
+                "POST",
+                f"{upstream}/v1/chat/completions",
+                json=payload,
+                headers=headers if use_proxy else None,
+                timeout=3600,
+            ) as response:
+                response.raise_for_status()
+                if use_proxy:
+                    returned_event_id = response.headers.get("X-Taey-Event-Id", "")
+                    returned_correlation_id = response.headers.get(
+                        "X-Taey-Correlation-Id",
+                        "",
+                    )
+                    proxy_turn_id = response.headers.get("X-Taey-Turn-Id", "")
+                    if (
+                        returned_event_id != event_id
+                        or returned_correlation_id != correlation_id
+                        or not proxy_turn_id
+                    ):
+                        raise RuntimeError(
+                            "proxy lineage mismatch "
+                            f"event={returned_event_id!r} "
+                            f"correlation={returned_correlation_id!r} "
+                            f"turn={proxy_turn_id!r}"
+                        )
+                async for line in response.aiter_lines():
+                    if not line or not line.startswith("data: "):
+                        continue
+                    raw = line[6:].strip()
+                    if raw == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(raw)
+                    except json.JSONDecodeError:
+                        continue
+                    delta = (
+                        (chunk.get("choices") or [{}])[0].get("delta") or {}
+                    )
+                    thinking = delta.get("reasoning") or delta.get(
+                        "reasoning_content"
+                    )
+                    content = delta.get("content")
+                    if thinking:
+                        thinking_parts.append(str(thinking))
+                        yield (
+                            "data: "
+                            + json.dumps(
+                                {"type": "thinking", "text": str(thinking)}
+                            )
+                            + "\n\n"
+                        )
+                    if content:
+                        content_parts.append(str(content))
+                        yield (
+                            "data: "
+                            + json.dumps(
+                                {"type": "content", "text": str(content)}
+                            )
+                            + "\n\n"
+                        )
+
+            content = "".join(content_parts)
+            if not content:
+                raise RuntimeError("upstream completed without assistant content")
+            outcome = {
+                "event_type": "turn_outcome",
+                "event_id": event_id,
+                "correlation_id": correlation_id,
+                "proxy_turn_id": proxy_turn_id or None,
+                "source": "taey",
+                "source_id": proxy_turn_id or event_id,
+                "kind": "assistant_reply",
+                "role": "assistant",
+                "content": content,
+                "ok": True,
+            }
+            if thinking_parts:
+                outcome["thinking"] = "".join(thinking_parts)
+            _append_session_event(session_id, outcome)
+            terminal_recorded = True
+        except asyncio.CancelledError:
+            _append_session_event(
+                session_id,
+                {
+                    "event_type": "turn_outcome",
+                    "event_id": event_id,
+                    "correlation_id": correlation_id,
+                    "proxy_turn_id": proxy_turn_id or None,
+                    "source": "ui",
+                    "kind": "ui_stream_interrupted",
+                    "ok": False,
+                    "error": "browser stream disconnected before durable outcome",
+                },
+            )
+            terminal_recorded = True
+            raise
+        except Exception as exc:
+            _append_session_event(
+                session_id,
+                {
+                    "event_type": "turn_outcome",
+                    "event_id": event_id,
+                    "correlation_id": correlation_id,
+                    "proxy_turn_id": proxy_turn_id or None,
+                    "source": "ui",
+                    "kind": "assistant_failure",
+                    "ok": False,
+                    "error": f"{type(exc).__name__}: {exc}",
+                },
+            )
+            terminal_recorded = True
+            yield (
+                "data: "
+                + json.dumps(
+                    {"type": "error", "text": f"{type(exc).__name__}: {exc}"}
+                )
+                + "\n\n"
+            )
+        finally:
+            if not terminal_recorded:
+                _append_session_event(
+                    session_id,
+                    {
+                        "event_type": "turn_outcome",
+                        "event_id": event_id,
+                        "correlation_id": correlation_id,
+                        "proxy_turn_id": proxy_turn_id or None,
+                        "source": "ui",
+                        "kind": "assistant_failure",
+                        "ok": False,
+                        "error": "stream ended without a terminal outcome",
+                    },
+                )
+        yield "data: [DONE]\n\n"
 
     return StreamingResponse(generate(), media_type="text/event-stream")
 
