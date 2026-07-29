@@ -63,6 +63,13 @@ FastAPI dashboard renders all of it.
   correlation, proxy-turn, and tool-call IDs through response headers and audit
   records. Leased Redis sorted sets represent concurrent open turns; the legacy
   `idle` key is a projection of that set rather than a single request's flag.
+- **Seven-seat council runtime definition** — `serving/council_seats.json`
+  binds the immutable tmux identities `taey-council-1..7` to seven explicit
+  cognitive roles. `serving/manage_council_seats.py` validates and launches
+  those seats with separate inbox namespaces, conversation IDs, 0600 event
+  logs, and role prompts while sharing one configured proxy/model/tool path.
+  The launcher does not make a deployment claim; production registration and
+  concurrent-inference acceptance remain separate gates.
 
 **Not built — do not expect it:**
 
@@ -138,6 +145,7 @@ fleet-notify ──claim──► taey_seat.py┘          │
 | `taey:<seat>:processing:<source>` | `taey_seat.py` | claimed but not yet durably completed mail; recovered on restart |
 | `taey:<seat>:active_turns`, `:turn_starts`, `:turn_context` | soma proxy | leased, identity-keyed open turns and their lineage |
 | `taey:<seat>:idle`, `:turns_open`, `:turn_started`, `:last_activity` | soma proxy | compatibility projections derived atomically from open-turn membership |
+| `taey:<seat>:seat_registration` | `taey_council_seat.py` | latest supporting-seat process generation, immutable role identity, private transcript, prompt-contract hash, and startup timestamp |
 | `taey:soma:active_turns`, `taey:soma:gpu_busy` | soma proxy | global leased open-turn membership and its boolean projection |
 
 ### Dashboard endpoints
@@ -203,6 +211,10 @@ dashboard/static/               index.html (v2 UI), console.html, hmm.html.
 serving/vllm_serve.sh           Serve a model on Jetson Thor via the pinned NVIDIA vLLM image.
 serving/soma_proxy.py           OpenAI-compatible proxy: persona injection + soma + tools.
 serving/taey_seat.py            Durable tmux fleet seat: claim/outcome/ack + event-log recovery.
+serving/taey_council_seat.py    Isolated private runtime for seven supporting council seats.
+serving/manage_council_seats.py Validate, render, launch, and inspect seven private council seats.
+serving/council_seats.json      Canonical numeric seat IDs to semantic role IDs.
+serving/council_prompts/        Shared supporting-seat contract plus seven stable role prompts.
 serving/persona.example.md      Generic example persona (replace with your own).
 serving/SERVING.md              Spark/Thor bring-up: model + presence, end to end.
 ```

@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "contract": "taey-local-council-seats/v1",
+  "shared_prompt": "council_prompts/shared.md",
+  "seats": [
+    {
+      "seat_id": "taey-council-1",
+      "role_id": "context-memory",
+      "conversation_id": "council-context-memory",
+      "role_prompt": "council_prompts/context-memory.md"
+    },
+    {
+      "seat_id": "taey-council-2",
+      "role_id": "evidence-reality",
+      "conversation_id": "council-evidence-reality",
+      "role_prompt": "council_prompts/evidence-reality.md"
+    },
+    {
+      "seat_id": "taey-council-3",
+      "role_id": "systems-dependencies",
+      "conversation_id": "council-systems-dependencies",
+      "role_prompt": "council_prompts/systems-dependencies.md"
+    },
+    {
+      "seat_id": "taey-council-4",
+      "role_id": "adversarial-failure",
+      "conversation_id": "council-adversarial-failure",
+      "role_prompt": "council_prompts/adversarial-failure.md"
+    },
+    {
+      "seat_id": "taey-council-5",
+      "role_id": "scope-intent",
+      "conversation_id": "council-scope-intent",
+      "role_prompt": "council_prompts/scope-intent.md"
+    },
+    {
+      "seat_id": "taey-council-6",
+      "role_id": "options-alternatives",
+      "conversation_id": "council-options-alternatives",
+      "role_prompt": "council_prompts/options-alternatives.md"
+    },
+    {
+      "seat_id": "taey-council-7",
+      "role_id": "control-acceptance",
+      "conversation_id": "council-control-acceptance",
+      "role_prompt": "council_prompts/control-acceptance.md"
+    }
+  ]
+}

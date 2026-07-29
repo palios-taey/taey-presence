@@ -69,6 +69,61 @@ there before acknowledging fleet mail. By default that file is
 adds UI turns to the seat's next context and renders autonomous seat outcomes
 after a refresh.
 
+### Seven supporting local council seats
+
+The supporting seats use stable numeric runtime identities and separate semantic
+role IDs:
+
+| seat ID | role ID |
+|---|---|
+| `taey-council-1` | `context-memory` |
+| `taey-council-2` | `evidence-reality` |
+| `taey-council-3` | `systems-dependencies` |
+| `taey-council-4` | `adversarial-failure` |
+| `taey-council-5` | `scope-intent` |
+| `taey-council-6` | `options-alternatives` |
+| `taey-council-7` | `control-acceptance` |
+
+Validate and inspect the exact runtime configuration before launching:
+
+```bash
+python3 serving/manage_council_seats.py validate
+python3 serving/manage_council_seats.py render
+```
+
+Then point every seat at the same attributable proxy/model used by Main Taey and
+launch:
+
+```bash
+export TAEY_SEAT_PROXY=http://127.0.0.1:8766/v1/chat/completions
+python3 serving/manage_council_seats.py launch
+python3 serving/manage_council_seats.py status
+```
+
+The shared proxy route is the model authority. `TAEY_MODEL` remains a request
+compatibility selector when explicitly supplied, but `soma_proxy.py` removes it
+before forwarding to its single loaded vLLM model. Promoting a new release through
+`promote_main_model.sh` therefore moves Main and all seven supporting seats
+together; seat identities, prompts, inboxes, and histories do not need to be
+rebuilt or restarted for each release.
+
+`launch` refuses to proceed if any canonical council tmux session already exists;
+it never restarts or adopts an unknown process. By default, private seat logs live
+under `~/taey_sessions/council/`, one 0600 JSONL per seat. Override that root with
+`TAEY_COUNCIL_SESSIONS_DIR`. Each log reconstructs only that seat's mutable
+history. Supporting outcomes carry the seat, role, event, request, correlation,
+round, and prompt-revision lineage available in the inbound envelope and remain
+`conversation_visible=false`; Main Taey is the only UI answerer.
+
+The launcher starts `taey_council_seat.py`; it does not branch Main's
+`taey_seat.py` runtime. At startup, a supporting seat atomically publishes
+`idle=1` only when its attributable
+`active_turns` set is empty. A non-empty set fails closed as busy. This closes the
+first-wake gap without making the compatibility boolean authoritative. The same
+atomic transition publishes a generation-specific `seat_registration`; the
+launcher requires a new identity-matched generation before it reports a seat
+started, so stale `idle` state cannot certify a dead or prior process.
+
 ## Running a fleet: deploy, swap models, and the checks that gate each step
 
 The quick start above stands up ONE node by hand. Once a node carries real traffic, every step
@@ -206,6 +261,10 @@ different process generation as abandoned after a service restart.
 | `TAEY_SEAT_EVENT_LOG` | *(unset)* | backward-compatible alias used only when `TAEY_EXECUTIVE_EVENT_LOG` is unset |
 | `TAEY_SEAT_MAX_TURNS` | `60` | maximum context turns reconstructed from the canonical log |
 | `TAEY_SEAT_TIMEOUT` | `1800` | proxy request timeout in seconds |
+| `TAEY_COUNCIL_ROLE_ID` | *(empty)* | stable semantic role; required and seat-mapped by `taey_council_seat.py` |
+| `TAEY_COUNCIL_SHARED_PROMPT_PATH` | *(empty)* | shared supporting-seat contract; required by `taey_council_seat.py` |
+| `TAEY_COUNCIL_ROLE_PROMPT_PATH` | *(empty)* | seat-specific role prompt; required by `taey_council_seat.py` |
+| `TAEY_COUNCIL_SESSIONS_DIR` | `$TAEY_SESSIONS_DIR/council` | private transcript root used by the council launcher |
 
 The seat consumes all three fleet-notify sources (`inbox`, `notifications`, and
 `orch`). One item at a time moves atomically to a source-specific processing
