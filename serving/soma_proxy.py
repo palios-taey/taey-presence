@@ -1286,9 +1286,53 @@ async def list_models():
     return resp.json()
 
 
+# ---------------------------------------------------------------------------
+# TAEY LIVENESS — the Stop-hook equivalent for a headless participant.
+#
+# A tmux seat has a Stop hook that sets `taey:<name>:idle` when its turn ends,
+# and the notification daemon reads that key to know who can be woken. Taey has
+# no terminal and no hook, so nothing ever wrote its idle state and nothing
+# could tell a stopped Taey from a working one. The gap was never that Taey is
+# unobservable — THIS PROXY persists between turns and knows exactly when one
+# starts and ends. It simply was not reporting.
+#
+# Same key, same semantics as every seat, so anything that already watches the
+# fleet sees Taey without special-casing:
+#   taey:taey:idle           1 while no turn is running (absent/0 while running)
+#   taey:taey:last_activity  unix seconds at the end of the last turn
+#   taey:taey:turn_started   unix seconds when the current turn began
+# A turn that dies mid-flight still clears via the finally block, so a crashed
+# turn reports idle rather than pinning Taey as permanently busy.
+# ---------------------------------------------------------------------------
+TAEY_SESSION = os.environ.get("TAEY_SESSION_NAME", "taey")
+
+
+def _mark_turn_start() -> None:
+    try:
+        r = _redis
+        if r:
+            r.delete(f"taey:{TAEY_SESSION}:idle")
+            r.set(f"taey:{TAEY_SESSION}:turn_started", int(time.time()))
+    except Exception as e:
+        log.warning("liveness: could not mark turn start: %s", e)
+
+
+def _mark_turn_end() -> None:
+    try:
+        r = _redis
+        if r:
+            now = int(time.time())
+            r.set(f"taey:{TAEY_SESSION}:idle", "1")
+            r.set(f"taey:{TAEY_SESSION}:last_activity", now)
+            r.delete(f"taey:{TAEY_SESSION}:turn_started")
+    except Exception as e:
+        log.warning("liveness: could not mark turn end: %s", e)
+
+
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request):
     body = await request.json()
+    _mark_turn_start()
     body.pop("max_rounds", None)
 
     # Strip model field -- let vLLM use its loaded model
@@ -1309,11 +1353,126 @@ async def chat_completions(request: Request):
 
     t0 = time.time()
 
+    if is_stream and body.get("tools"):
+        # RESOLVE TOOLS BEFORE STREAMING.
+        #
+        # The streaming path used to forward vLLM's SSE straight through with no tool loop, while
+        # still OFFERING tools in the request. The result was silent and total: the model emitted a
+        # tool call, the raw tool-call deltas were forwarded, the dashboard read only `content` and
+        # `reasoning_content` and dropped them, and the user saw an empty reply while nothing
+        # executed. Observed 2026-07-28 -- `search_isma` had been called ZERO times in the tool
+        # audit despite the tool being offered on every UI turn, because the UI chat streams.
+        # Taey was reaching for its memory on every substantive question and having the reach
+        # discarded before anything ran, which reads from the outside as a model that knows nothing.
+        #
+        # Offering a capability on a path that cannot execute it is the defect. So tool rounds are
+        # resolved here first -- non-streamed, because execution needs the assembled message object
+        # -- and only the FINAL answer is streamed. Streaming stops being a special case: it changes
+        # how the last response is delivered, never whether tools work.
+        rounds = 0
+        resolved_answer = ""
+        resolved_thinking = ""
+        while rounds < MAX_TOOL_ROUNDS:
+            probe = dict(body)
+            probe["stream"] = False
+            resp = await _http.post("/v1/chat/completions", json=probe,
+                                    headers={"Content-Type": "application/json"})
+            choice = (resp.json().get("choices") or [{}])[0]
+            message = choice.get("message", {}) or {}
+            tool_calls = message.get("tool_calls") or []
+            # GATE ON TOOL CALLS ONLY, NOT ON finish_reason. Measured 2026-07-28: this build
+            # returns finish_reason='stop' even on turns that carry tool_calls, so requiring
+            # =='tool_calls' discarded real calls -- and because the model had put its output IN
+            # the call, `content` was empty, producing a 200 with nothing in it in ~16 seconds.
+            # From the user's side that is indistinguishable from the model refusing to answer.
+            # If there are calls to make, make them; finish_reason is not load-bearing here.
+            if not tool_calls:
+                # THE LOOP EXITS BECAUSE THIS PROBE PRODUCED THE FINAL ANSWER. Keep it.
+                #
+                # Discarding it and re-requesting the same messages with stream=True was a defect:
+                # the second generation is independently sampled, so it could emit a FRESH tool
+                # call instead of prose. Those tool-call deltas are not `content` or
+                # `reasoning_content`, the dashboard drops them, and the turn renders EMPTY --
+                # tools having executed correctly, and the user seeing nothing. Observed
+                # 2026-07-28: 3 tool rounds resolved, then 14 bytes of SSE (`[DONE]` alone) and a
+                # persisted assistant turn of length 0. That is the same empty-reply symptom this
+                # whole streaming path was rewritten to remove, reintroduced one step later.
+                #
+                # The answer already exists here. Regenerating it was never necessary, costs a
+                # second inference, and reopens a failure mode that cannot happen if we simply
+                # return what the tool loop concluded.
+                resolved_answer = message.get("content") or ""
+                # Keep the REASONING too. ep3 splits its output: reasoning lands in
+                # `reasoning_content` and the answer in `content`. Capturing only the answer meant
+                # that on any turn using tools -- which is most real work -- thinking was generated,
+                # discarded here, and never reached the reader. With the thinking toggle ON the UI
+                # still showed a "thinking" indicator, because the indicator reflects the request,
+                # not the response. Observed 2026-07-28.
+                # FIELD NAME: this build emits `reasoning`, NOT `reasoning_content`. Measured directly
+                # against Thor2 2026-07-28: a thinking-enabled request returned reasoning=2205 chars with
+                # reasoning_content absent, and the streaming deltas carried only `reasoning`. Reading the
+                # wrong key returned empty forever, so every turn reported "no thinking this turn" while the
+                # model was in fact thinking. Both names are accepted here so a build that renames it again
+                # does not silently blank the panel a second time.
+                resolved_thinking = (message.get("reasoning")
+                                     or message.get("reasoning_content") or "")
+                break
+            rounds += 1
+            log.info("Stream tool calls (round %d): %s", rounds,
+                     [tc.get("function", {}).get("name") for tc in tool_calls])
+            body["messages"].append(message)
+            for tc in tool_calls:
+                func = tc.get("function", {}) or {}
+                raw_args = func.get("arguments", {})
+                if isinstance(raw_args, dict):
+                    arguments = raw_args
+                else:
+                    try:
+                        arguments = json.loads(raw_args) if raw_args else {}
+                    except json.JSONDecodeError:
+                        arguments = {}
+                result = await execute_tool_call_async(func.get("name", ""), arguments)
+                log.info("Tool %s -> %d chars", func.get("name", ""), len(result))
+                body["messages"].append({
+                    "role": "tool",
+                    "tool_call_id": tc.get("id", ""),
+                    "content": result,
+                })
+        if rounds >= MAX_TOOL_ROUNDS:
+            # Cap reached: force prose rather than streaming another unexecuted tool call, which
+            # would reproduce the empty-reply symptom this whole block exists to remove.
+            log.warning("Stream tool cap hit (%d); forcing final text response", MAX_TOOL_ROUNDS)
+            body.pop("tools", None)
+            body["tool_choice"] = "none"
+
     if is_stream:
         # Stream: forward SSE from vLLM directly (no tool loop for streams)
         async def stream_and_measure():
             token_count = 0
             prompt_tokens = 0
+            if resolved_answer or resolved_thinking:
+                for i in range(0, len(resolved_thinking), 240):
+                    yield ("data: " + json.dumps({
+                        "id": "chatcmpl-resolved", "object": "chat.completion.chunk",
+                        "choices": [{"index": 0,
+                                     "delta": {"reasoning": resolved_thinking[i:i + 240]},
+                                     "finish_reason": None}],
+                    }) + "\n\n").encode()
+                for i in range(0, len(resolved_answer), 240):
+                    piece = resolved_answer[i:i + 240]
+                    yield ("data: " + json.dumps({
+                        "id": "chatcmpl-resolved", "object": "chat.completion.chunk",
+                        "choices": [{"index": 0, "delta": {"content": piece},
+                                     "finish_reason": None}],
+                    }) + "\n\n").encode()
+                yield b"data: [DONE]\n\n"
+                # The replay path returns BEFORE the try/finally below, so the liveness mark must
+                # happen here too. Without it a streaming turn completes and Taey never reports
+                # idle -- and anything keyed on taey:taey:idle (the notify poller) waits forever
+                # on a Taey that is actually free. Observed 2026-07-29: turn finished, idle unset
+                # 360s later. Two exits, two marks.
+                _mark_turn_end()
+                return
             try:
                 async with _http.stream(
                     "POST", "/v1/chat/completions",
@@ -1336,6 +1495,7 @@ async def chat_completions(request: Request):
                             except Exception:
                                 pass
             finally:
+                _mark_turn_end()
                 elapsed_ms = (time.time() - t0) * 1000
                 publish_metrics(elapsed_ms, prompt_tokens, token_count)
                 log.info(
@@ -1450,6 +1610,7 @@ async def chat_completions(request: Request):
             round_num, prompt_tok, completion_tok, context_pct,
         )
 
+        _mark_turn_end()
         return JSONResponse(content=result, status_code=resp.status_code)
 
 
