@@ -108,6 +108,7 @@ QUEUES = (
     ),
 )
 POINTER_BACKOFF_KEY = f"{KEY_PREFIX}:{SESSION}:pointer_inject_backoff"
+NON_ACTIONABLE_MESSAGE_TYPES = frozenset({"peer_idle"})
 
 _HANDOFF_RECEIPT_LUA = """
 local raw = redis.call('GET', KEYS[1])
@@ -177,6 +178,10 @@ class EventStore:
                     )
                 if event.get("event_type") != "turn_outcome" or not event.get("ok"):
                     continue
+                for message_id in event.get("message_ids") or []:
+                    self.completed_message_ids.add(str(message_id))
+                if event.get("conversation_visible") is False:
+                    continue
                 prompt = event.get("prompt")
                 reply = event.get("reply")
                 if not isinstance(prompt, str) or not isinstance(reply, str):
@@ -186,8 +191,6 @@ class EventStore:
                 self._turns.append((prompt, reply))
                 if len(self._turns) > self.max_turns:
                     self._turns = self._turns[-self.max_turns:]
-                for message_id in event.get("message_ids") or []:
-                    self.completed_message_ids.add(str(message_id))
 
     def append(self, event_type: str, **fields: Any) -> None:
         event = {
@@ -547,6 +550,61 @@ def _format_claims(claims: list[ClaimedMessage]) -> str:
     return "\n\n".join(sections)
 
 
+def _message_type(claim: ClaimedMessage) -> str:
+    return str(claim.payload.get("type") or "message").strip().lower()
+
+
+def _split_actionable_claims(
+    claims: list[ClaimedMessage],
+) -> tuple[list[ClaimedMessage], list[ClaimedMessage]]:
+    actionable: list[ClaimedMessage] = []
+    skipped: list[ClaimedMessage] = []
+    for claim in claims:
+        if _message_type(claim) in NON_ACTIONABLE_MESSAGE_TYPES:
+            skipped.append(claim)
+        else:
+            actionable.append(claim)
+    return actionable, skipped
+
+
+def _format_non_actionable_reply(claims: list[ClaimedMessage]) -> str:
+    message_types = sorted({_message_type(claim) for claim in claims})
+    return (
+        f"[taey-seat] acknowledged {len(claims)} non-actionable fleet "
+        f"message(s): {', '.join(message_types)}"
+    )
+
+
+def _ack_non_actionable_claims(
+    claims: list[ClaimedMessage],
+    *,
+    inbox: ReliableInbox,
+    store: EventStore,
+) -> str:
+    prompt = _format_claims(claims)
+    reply = _format_non_actionable_reply(claims)
+    event_id, correlation_id = _lineage(claims)
+    message_ids = [claim.message_id for claim in claims]
+    fields = {
+        "event_id": event_id,
+        "correlation_id": correlation_id,
+        "message_ids": message_ids,
+        "prompt": prompt,
+        "skipped_inference": True,
+    }
+    store.append("turn_attempt", **fields)
+    store.append(
+        "turn_outcome",
+        ok=True,
+        reply=reply,
+        conversation_visible=False,
+        **fields,
+    )
+    inbox.acknowledge(claims)
+    store.completed_message_ids.update(message_ids)
+    return reply
+
+
 def _prompt_for(text: str, claims: list[ClaimedMessage]) -> str:
     if not claims:
         return text
@@ -576,7 +634,17 @@ def _run_turn(
     proxy: ProxyClient,
 ) -> str:
     claims = inbox.claim_available()
+    claims, skipped_claims = _split_actionable_claims(claims)
+    skipped_reply = ""
+    if skipped_claims:
+        skipped_reply = _ack_non_actionable_claims(
+            skipped_claims,
+            inbox=inbox,
+            store=store,
+        )
     if not claims and _POINTER_RE.match(text):
+        if skipped_reply:
+            return skipped_reply
         inbox.release_pointer()
         return "[taey-seat] notification pointer contained no pending messages"
     prompt = _prompt_for(text, claims)
