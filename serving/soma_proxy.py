@@ -21,6 +21,7 @@ from typing import Optional
 
 import asyncio
 import redis
+from starlette.background import BackgroundTask
 import httpx
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import StreamingResponse, JSONResponse
@@ -1375,8 +1376,21 @@ async def chat_completions(request: Request):
         while rounds < MAX_TOOL_ROUNDS:
             probe = dict(body)
             probe["stream"] = False
-            resp = await _http.post("/v1/chat/completions", json=probe,
-                                    headers={"Content-Type": "application/json"})
+            # RETRY ONCE ON A DROPPED POOLED CONNECTION. httpx keeps connections alive; after an
+            # upstream restart or an abandoned stream a pooled socket can be dead, and the first
+            # use raises RemoteProtocolError("Server disconnected without sending a response").
+            # That surfaced as a bare HTTP 500 on the whole turn -- and when the caller was the
+            # notify poller, as an undelivered message with the daemon reporting a fire error.
+            # One stale socket should not fail a turn; the retry gets a fresh connection.
+            for _attempt in (1, 2):
+                try:
+                    resp = await _http.post("/v1/chat/completions", json=probe,
+                                            headers={"Content-Type": "application/json"})
+                    break
+                except httpx.RemoteProtocolError:
+                    if _attempt == 2:
+                        raise
+                    log.warning("upstream dropped a pooled connection; retrying once")
             choice = (resp.json().get("choices") or [{}])[0]
             message = choice.get("message", {}) or {}
             tool_calls = message.get("tool_calls") or []
@@ -1505,9 +1519,19 @@ async def chat_completions(request: Request):
                     prompt_tokens,
                 )
 
+        # BackgroundTask guarantees the liveness mark even if the CLIENT ABANDONS the stream.
+        # The generator's finally covers normal completion, but a client that disconnects mid-
+        # stream (a killed curl, a closed browser tab) can leave the generator unconsumed and its
+        # finally unrun -- which left taey:taey:turn_started set with no matching end, so `idle`
+        # never returned to 1 and the notify poller correctly refused to fire on a Taey it believed
+        # was busy. Observed 2026-07-29: turn_started set, backend idle, mail undelivered for
+        # hours. Starlette runs a BackgroundTask after the response completes INCLUDING on client
+        # disconnect, so this closes the one exit the finally cannot reach. Marking twice is
+        # harmless -- it is an idempotent SET.
         return StreamingResponse(
             stream_and_measure(),
             media_type="text/event-stream",
+            background=BackgroundTask(_mark_turn_end),
         )
     else:
         # Non-stream: forward with tool call execution loop
