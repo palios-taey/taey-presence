@@ -5,12 +5,15 @@ an **OpenAI-compatible chat-completions endpoint**. You bring that endpoint. Thi
 is the production serving glue we run on NVIDIA hardware so a cold clone can stand the whole
 thing up — model **and** presence — end to end.
 
-Two pieces:
+Three pieces:
 
 1. **`vllm_serve.sh`** — serves your model as a raw vLLM endpoint (`:8000`).
 2. **`soma_proxy.py`** — sits in front of vLLM on `:8765`, injects your persona, publishes
    soma telemetry to Redis, and (optionally) wires `search`-style tools. This is the endpoint
    you point the presence workers at (`VLLM_URL=http://<host>:8765/v1/chat/completions`).
+3. **`taey_seat.py`** — optional durable executive loop hosted in tmux. It receives
+   fleet-notify mail, keeps completed conversation turns across restarts, and calls the proxy
+   with attributable event/correlation headers.
 
 You can run just vLLM (`:8000`) and skip the proxy if you don't want persona/soma/tools.
 
@@ -51,7 +54,17 @@ python serving/soma_proxy.py                       # OpenAI-compatible on :8765
 # 4. point presence at whichever endpoint you chose
 export VLLM_URL=http://127.0.0.1:8765/v1/chat/completions   # (or :8000 for raw vLLM)
 # ...then start the presence workers / dashboard as in the top-level README.
+
+# 5. optional: give fleet-notify a durable tmux-hosted Taey seat
+export TAEY_SEAT_PROXY=http://127.0.0.1:8765/v1/chat/completions
+export TAEY_SESSION_NAME=taey
+tmux new-session -d -s taey 'python3 serving/taey_seat.py'
 ```
+
+The tmux seat does **not** currently feed the dashboard transcript. They remain
+separate proxy clients. The seat's canonical completed history is its JSONL
+event log; a future UI adapter must render that log rather than treating the
+tmux pane as conversation storage.
 
 ## Running a fleet: deploy, swap models, and the checks that gate each step
 
@@ -149,10 +162,47 @@ For other model families, set the parsers your model expects.
 | `PROXY_PORT` | `8765` | port the proxy serves on |
 | `SYSTEM_PROMPT_PATH` | `serving/persona.example.md` | persona file injected as the system prefix |
 | `PERMANENT_KERNEL_PATH` | *(empty)* | optional file prepended ahead of the persona |
-| `REDIS_HOST` / `REDIS_PORT` | `127.0.0.1` / `6379` | soma telemetry bus (skipped if unreachable) |
+| `REDIS_HOST` / `REDIS_PORT` | `127.0.0.1` / `6379` | soma, fleet delivery, and attributable liveness bus |
 | `MIRA_ISMA_URL` | `http://127.0.0.1:8095` | optional search backend for the `search` tool |
 | `MIRA_DASHBOARD_URL` | `http://127.0.0.1:5001` | optional metrics push target |
 | `TAEY_READ_ALLOWED_PREFIXES` | *(empty → file-read tools off)* | colon-separated absolute prefixes the model may read |
+| `TAEY_SESSION_NAME` | `taey` | default liveness namespace; request header `X-Taey-Seat-Id` can select another |
+| `TAEY_LIVENESS_REQUIRED` | `1` | refuse proxy startup/turn admission when Redis cannot provide attributable liveness |
+| `TAEY_TURN_LEASE_SECS` | `120` | active-turn lease; expiry is archived as an abandoned turn |
+| `TAEY_TURN_HEARTBEAT_SECS` | `30` | lease-renewal interval, capped at one-third of the lease |
 
-The proxy degrades gracefully: no Redis → no soma publish; no ISMA → no search tool; empty
-`TAEY_READ_ALLOWED_PREFIXES` → the file-read tools are disabled. Provide only what you have.
+Redis is required by default because a proxy that serves while unable to report
+concurrent open turns is unsafe for fleet wake routing. Set
+`TAEY_LIVENESS_REQUIRED=0` only for a standalone, non-fleet deployment; the
+health response remains explicit about unavailable liveness. No ISMA still
+means no search tool, and empty `TAEY_READ_ALLOWED_PREFIXES` keeps file-read
+tools disabled.
+
+Run one soma-proxy process per Redis liveness namespace. The shipped
+`python serving/soma_proxy.py` launcher does that. A multi-worker Uvicorn launch
+is not supported: startup reconciliation deliberately classifies leases from a
+different process generation as abandoned after a service restart.
+
+## Durable tmux seat configuration
+
+| env | default | meaning |
+|-----|---------|---------|
+| `TAEY_SEAT_PROXY` | `http://127.0.0.1:8766/v1/chat/completions` | attributable soma-proxy endpoint |
+| `TAEY_SESSION_NAME` | `taey` | tmux/fleet identity and Redis namespace |
+| `NOTIFY_KEY_PREFIX` | `taey` | fleet-notify Redis prefix |
+| `TAEY_SEAT_EVENT_LOG` | `$XDG_STATE_HOME/taey-presence/<seat>-seat-events.jsonl` (or `~/.local/state/...`) | fsync'd conversation/outcome truth |
+| `TAEY_SEAT_MAX_TURNS` | `60` | completed turns included in the next inference context |
+| `TAEY_SEAT_MAX_CLAIM_BATCH` | `50` | maximum fleet messages claimed for one turn |
+| `TAEY_SEAT_TIMEOUT` | `1800` | proxy request timeout in seconds |
+
+The seat consumes all three fleet-notify sources (`inbox`, `notifications`, and
+`orch`). Each item moves atomically to a source-specific processing list.
+Success is written and fsync'd before Redis acknowledgment. A proxy failure
+requeues the original raw payload in FIFO order and clears the daemon's
+inject-once marker so it can wake the seat again. A crash after the durable
+outcome but before acknowledgment is deduplicated from the event log at restart.
+Delivery is at-least-once across the narrower window where inference may have
+completed upstream but no response/outcome reached the seat; correlation IDs
+make that retry auditable, but the proxy does not yet provide an idempotent
+result cache. An explicit-handoff receipt means the seat durably claimed the
+message, not that its requested work is complete.

@@ -47,11 +47,28 @@ FastAPI dashboard renders all of it.
   access, streaming responses, the live face, ghost text, interrupts, memory,
   and worker status.
 
+**Included serving component (explicitly deployed, not auto-started):**
+
+- **Durable fleet seat** — `serving/taey_seat.py` runs in a tmux session, claims
+  fleet-notify mail into Redis processing queues, persists each successful turn
+  to an fsync'd JSONL event log, and acknowledges the claimed mail only after
+  that outcome is durable. A restart requeues unfinished claims and acknowledges
+  already-completed ones without repeating inference.
+- **Attributable proxy turns** — `serving/soma_proxy.py` carries seat, event,
+  correlation, proxy-turn, and tool-call IDs through response headers and audit
+  records. Leased Redis sorted sets represent concurrent open turns; the legacy
+  `idle` key is a projection of that set rather than a single request's flag.
+
 **Not built — do not expect it:**
 
 - **Cross-host / multi-instance coordination.** Everything coordinates through
   one Redis (and optionally one Neo4j) on a single trusted host. There is no
   cross-machine presence sync.
+- **A shared dashboard/tmux conversation view.** The dashboard and
+  `taey_seat.py` are still separate clients of the inference proxy. tmux does
+  not feed its transcript into the current UI, and the UI does not render the
+  seat event log. The durable seat is the executive runtime foundation for that
+  adapter; it is not a claim that the adapter already exists.
 - **DCM peer-state read-back — in the code, not yet wired (planned).** The
   foundation ships here on purpose: `presence/dcm_presence.py` *writes* per-worker
   state to Neo4j as `:TaeyInstance` nodes (`neo4j_write_state`), and a
@@ -91,6 +108,15 @@ coordinate only through Redis keys (and optional Neo4j).
                     soma/mira_soma.py  ──►  taey:soma:vprop  (+ taey:soma:*)
 ```
 
+The optional fleet seat is a separate serving path:
+
+```
+fleet-notify Redis queues ──claim──► taey_seat.py (tmux)
+                                      ├──fsync──► seat event log
+                                      └──HTTP───► soma_proxy.py ──► vLLM
+                                         outcome durable ──► Redis claim ack
+```
+
 ### Redis keys (the contract)
 
 | Key | Writer | Meaning |
@@ -104,7 +130,13 @@ coordinate only through Redis keys (and optional Neo4j).
 | `taey:dcm:memory_tiles` | dcm_presence MEMORY worker | retrieved memory tiles |
 | `taey:dcm:thought`, `taey:dcm:prediction`, `taey:dcm:state` | dcm_presence THINKER worker | running inference on partial input |
 | `taey:soma:vprop` | soma daemon | 8-facet state vector + `rho` headline scalar + `heartbeat` + GPU vitals (JSON); `clarity` is currently a placeholder facet |
-| `taey:soma:*` (gpu_busy, latency_ms, *_tokens, …) | soma daemon | individual runtime metrics |
+| `taey:soma:*` (gpu_busy, latency_ms, *_tokens, …) | soma proxy | individual generation metrics and global open-turn projection |
+| `taey:<seat>:inbox` | fleet-notify senders | FIFO inter-session mail (`LPUSH`, oldest consumed from the right) |
+| `taey:<seat>:notifications`, `taey:notify:<seat>:orch` | fleet monitors/orchestrator | auxiliary FIFO delivery queues |
+| `taey:<seat>:processing:<source>` | `taey_seat.py` | claimed but not yet durably completed mail; recovered on restart |
+| `taey:<seat>:active_turns`, `:turn_starts`, `:turn_context` | soma proxy | leased, identity-keyed open turns and their lineage |
+| `taey:<seat>:idle`, `:turns_open`, `:turn_started`, `:last_activity` | soma proxy | compatibility projections derived atomically from open-turn membership |
+| `taey:soma:active_turns`, `taey:soma:gpu_busy` | soma proxy | global leased open-turn membership and its boolean projection |
 
 ### Dashboard endpoints
 
@@ -168,6 +200,7 @@ dashboard/app.py                FastAPI app: UI, chat, SSE/WS, prediction push, 
 dashboard/static/               index.html (v2 UI), console.html, hmm.html.
 serving/vllm_serve.sh           Serve a model on Jetson Thor via the pinned NVIDIA vLLM image.
 serving/soma_proxy.py           OpenAI-compatible proxy: persona injection + soma + tools.
+serving/taey_seat.py            Durable tmux fleet seat: claim/outcome/ack + event-log recovery.
 serving/persona.example.md      Generic example persona (replace with your own).
 serving/SERVING.md              Spark/Thor bring-up: model + presence, end to end.
 ```
@@ -188,6 +221,9 @@ serving/SERVING.md              Spark/Thor bring-up: model + presence, end to en
   per-session namespacing. Two browsers/users against the same backend will
   share and overwrite each other's face/ghost/interrupt state. This is a
   single-operator local tool by design.
+- **Seat history is not yet a dashboard history.** Successful tmux/fleet turns
+  survive in the seat JSONL log and are reused by the seat, but the dashboard
+  has its own chat history until a UI event-store adapter is added.
 - **Error responses surface exception text.** The diagnostic endpoints and a few
   500 paths include `str(e)` in their JSON. That is useful operator-facing
   diagnostics on a trusted-local host; if you ever expose the dashboard beyond
