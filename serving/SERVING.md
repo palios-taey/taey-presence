@@ -86,6 +86,14 @@ than a habit — a habit is what lapses at 2am.
 ./serving/deploy_thor.sh --model-path /models/<new> --served-name <new-id> --restart <user@host>
 #   --served-name <id>   a node serving a CANDIDATE its peers lack -> stale callers get a clean 404
 #   --keep-served-name   a fleet-wide PROMOTION -> every caller of that id should move together
+
+# PROMOTE AN ALREADY-SERVED RELEASE INTO MAIN TAEY. This waits for zero open turns,
+# writes the endpoint drop-in, restarts the UI-facing proxy, verifies the exact model/root
+# through that proxy, runs one real inference, and emits a JSON release receipt. A failed
+# CONTROL gate restores the previous route automatically.
+./serving/promote_main_model.sh \
+  --endpoint http://<serving-host>:8000 \
+  --model <new-id>
 ```
 
 **Served id vs weights.** The served name is a stable alias chosen at launch, which is exactly why
