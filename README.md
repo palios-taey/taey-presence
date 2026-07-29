@@ -51,9 +51,14 @@ FastAPI dashboard renders all of it.
 
 - **Durable fleet seat** — `serving/taey_seat.py` runs in a tmux session, claims
   fleet-notify mail into Redis processing queues, persists each successful turn
-  to an fsync'd JSONL event log, and acknowledges the claimed mail only after
-  that outcome is durable. A restart requeues unfinished claims and acknowledges
-  already-completed ones without repeating inference.
+  to the same fsync'd executive JSONL used by the dashboard, and acknowledges
+  the claimed mail only after that outcome is durable. A restart requeues
+  unfinished claims and acknowledges already-completed ones without repeating
+  inference.
+- **One main conversation** — dashboard UI turns and autonomous fleet outcomes
+  share `~/taey_sessions/main.jsonl` by default. Both adapters rebuild model
+  context from that file; a browser refresh resumes the conversation and renders
+  attributable seat raises without treating tmux pane text as state.
 - **Attributable proxy turns** — `serving/soma_proxy.py` carries seat, event,
   correlation, proxy-turn, and tool-call IDs through response headers and audit
   records. Leased Redis sorted sets represent concurrent open turns; the legacy
@@ -64,11 +69,6 @@ FastAPI dashboard renders all of it.
 - **Cross-host / multi-instance coordination.** Everything coordinates through
   one Redis (and optionally one Neo4j) on a single trusted host. There is no
   cross-machine presence sync.
-- **A shared dashboard/tmux conversation view.** The dashboard and
-  `taey_seat.py` are still separate clients of the inference proxy. tmux does
-  not feed its transcript into the current UI, and the UI does not render the
-  seat event log. The durable seat is the executive runtime foundation for that
-  adapter; it is not a claim that the adapter already exists.
 - **DCM peer-state read-back — in the code, not yet wired (planned).** The
   foundation ships here on purpose: `presence/dcm_presence.py` *writes* per-worker
   state to Neo4j as `:TaeyInstance` nodes (`neo4j_write_state`), and a
@@ -108,13 +108,15 @@ coordinate only through Redis keys (and optional Neo4j).
                     soma/mira_soma.py  ──►  taey:soma:vprop  (+ taey:soma:*)
 ```
 
-The optional fleet seat is a separate serving path:
+The dashboard and optional fleet seat are separate ingress adapters over one
+canonical conversation log:
 
 ```
-fleet-notify Redis queues ──claim──► taey_seat.py (tmux)
-                                      ├──fsync──► seat event log
-                                      └──HTTP───► soma_proxy.py ──► vLLM
-                                         outcome durable ──► Redis claim ack
+dashboard UI ────────append/read────┐
+                                    ├──► ~/taey_sessions/main.jsonl
+fleet-notify ──claim──► taey_seat.py┘          │
+                           │                    └── durable outcome before ack
+                           └──HTTP──► soma_proxy.py ──► vLLM
 ```
 
 ### Redis keys (the contract)
