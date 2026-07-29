@@ -29,7 +29,8 @@ ROLE_PROMPT_VALUE = os.environ.get(
 SHARED_PROMPT_PATH = Path(SHARED_PROMPT_VALUE).expanduser()
 ROLE_PROMPT_PATH = Path(ROLE_PROMPT_VALUE).expanduser()
 RESPONSE_CONTRACT = "taey-council-contribution/v1"
-PROMPT_REVISION = 1
+ROLE_CONTRACT_REVISION = 1
+DEFAULT_PROMPT_REVISION = 1
 PROCESS_GENERATION = uuid.uuid4().hex
 _COUNCIL_SEAT_RE = re.compile(r"^taey-council-[1-7]$")
 ROLE_BY_SEAT = {
@@ -82,7 +83,7 @@ def _seat_role_contract() -> str:
     return (
         f"Immutable runtime identity: seat_id={executive.SESSION}; "
         f"role_id={ROLE_ID}; response_contract={RESPONSE_CONTRACT}; "
-        f"prompt_revision={PROMPT_REVISION}.\n\n"
+        f"role_contract_revision={ROLE_CONTRACT_REVISION}.\n\n"
         f"{shared_prompt}\n\n{role_prompt}"
     )
 
@@ -196,7 +197,10 @@ def _response_lineage(
         payload.get("request_id") or event_id,
         event_id,
     )
-    prompt_revision = payload.get("prompt_revision", PROMPT_REVISION)
+    prompt_revision = payload.get(
+        "prompt_revision",
+        DEFAULT_PROMPT_REVISION,
+    )
     try:
         normalized_revision = int(prompt_revision)
     except (TypeError, ValueError) as exc:
@@ -408,7 +412,7 @@ def _register_at_rest_liveness(
             "conversation_id": executive.CONVERSATION_ID,
             "event_log": str(executive.EVENT_LOG),
             "process_generation": PROCESS_GENERATION,
-            "prompt_revision": PROMPT_REVISION,
+            "role_contract_revision": ROLE_CONTRACT_REVISION,
             "prompt_contract_sha256": store.prompt_contract_sha256,
             "response_contract": RESPONSE_CONTRACT,
             "pid": os.getpid(),
@@ -449,7 +453,7 @@ def main() -> int:
             seat_kind="council",
             role_id=ROLE_ID,
             process_generation=PROCESS_GENERATION,
-            prompt_revision=PROMPT_REVISION,
+            role_contract_revision=ROLE_CONTRACT_REVISION,
             prompt_contract_sha256=store.prompt_contract_sha256,
             response_contract=RESPONSE_CONTRACT,
             conversation_visible=False,
