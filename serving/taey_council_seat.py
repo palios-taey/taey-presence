@@ -32,6 +32,29 @@ RESPONSE_CONTRACT = "taey-council-contribution/v1"
 ROLE_CONTRACT_REVISION = 1
 DEFAULT_PROMPT_REVISION = 1
 PROCESS_GENERATION = uuid.uuid4().hex
+CONTRIBUTION_FIELDS = (
+    "schema_version",
+    "seat_id",
+    "role_id",
+    "status",
+    "prompt_revision",
+    "observations",
+    "inferences",
+    "unknowns",
+    "evidence_refs",
+    "concerns",
+    "questions",
+    "recommendation",
+    "confidence",
+)
+CONTRIBUTION_LIST_FIELDS = (
+    "observations",
+    "inferences",
+    "unknowns",
+    "evidence_refs",
+    "concerns",
+    "questions",
+)
 _COUNCIL_SEAT_RE = re.compile(r"^taey-council-[1-7]$")
 ROLE_BY_SEAT = {
     "taey-council-1": "context-memory",
@@ -250,6 +273,114 @@ def _prompt_for(
     )
 
 
+def _contribution_response_format(lineage: dict[str, Any]) -> dict[str, Any]:
+    properties: dict[str, Any] = {
+        "schema_version": {"type": "integer", "const": 1},
+        "seat_id": {"type": "string", "const": executive.SESSION},
+        "role_id": {"type": "string", "const": ROLE_ID},
+        "status": {"type": "string", "minLength": 1},
+        "prompt_revision": {
+            "type": "integer",
+            "const": lineage["prompt_revision"],
+        },
+        "recommendation": {"type": "string", "minLength": 1},
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+    }
+    for field_name in CONTRIBUTION_LIST_FIELDS:
+        properties[field_name] = {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+        }
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "taey_council_contribution_v1",
+            "strict": True,
+            "schema": {
+                "type": "object",
+                "properties": properties,
+                "required": list(CONTRIBUTION_FIELDS),
+                "additionalProperties": False,
+            },
+        },
+    }
+
+
+def _validated_contribution(
+    reply: str,
+    lineage: dict[str, Any],
+) -> dict[str, Any]:
+    try:
+        contribution = json.loads(reply)
+    except json.JSONDecodeError as exc:
+        raise executive.SeatFailure(
+            f"{RESPONSE_CONTRACT} reply is not valid JSON: {exc}"
+        ) from exc
+    if not isinstance(contribution, dict):
+        raise executive.SeatFailure(f"{RESPONSE_CONTRACT} reply must be an object")
+    actual_fields = set(contribution)
+    expected_fields = set(CONTRIBUTION_FIELDS)
+    if actual_fields != expected_fields:
+        missing = sorted(expected_fields - actual_fields)
+        unexpected = sorted(actual_fields - expected_fields)
+        raise executive.SeatFailure(
+            f"{RESPONSE_CONTRACT} fields mismatch "
+            f"missing={missing} unexpected={unexpected}"
+        )
+    if (
+        type(contribution["schema_version"]) is not int
+        or contribution["schema_version"] != 1
+    ):
+        raise executive.SeatFailure(
+            f"{RESPONSE_CONTRACT} schema_version must be integer 1"
+        )
+    if contribution["seat_id"] != executive.SESSION:
+        raise executive.SeatFailure(
+            f"{RESPONSE_CONTRACT} seat_id must be {executive.SESSION}"
+        )
+    if contribution["role_id"] != ROLE_ID:
+        raise executive.SeatFailure(
+            f"{RESPONSE_CONTRACT} role_id must be {ROLE_ID}"
+        )
+    if (
+        type(contribution["prompt_revision"]) is not int
+        or contribution["prompt_revision"] != lineage["prompt_revision"]
+    ):
+        raise executive.SeatFailure(
+            f"{RESPONSE_CONTRACT} prompt_revision must be integer "
+            f"{lineage['prompt_revision']}"
+        )
+    status = contribution["status"]
+    if not isinstance(status, str) or not status.strip():
+        raise executive.SeatFailure(
+            f"{RESPONSE_CONTRACT} status must be a non-empty string"
+        )
+    for field_name in CONTRIBUTION_LIST_FIELDS:
+        values = contribution[field_name]
+        if not isinstance(values, list) or any(
+            not isinstance(value, str) or not value.strip() for value in values
+        ):
+            raise executive.SeatFailure(
+                f"{RESPONSE_CONTRACT} {field_name} must be an array "
+                "of non-empty strings"
+            )
+    recommendation = contribution["recommendation"]
+    if not isinstance(recommendation, str) or not recommendation.strip():
+        raise executive.SeatFailure(
+            f"{RESPONSE_CONTRACT} recommendation must be a non-empty string"
+        )
+    confidence = contribution["confidence"]
+    if (
+        isinstance(confidence, bool)
+        or not isinstance(confidence, (int, float))
+        or not 0 <= confidence <= 1
+    ):
+        raise executive.SeatFailure(
+            f"{RESPONSE_CONTRACT} confidence must be a number from 0 through 1"
+        )
+    return contribution
+
+
 def _ack_non_actionable_claims(
     claims: list[executive.ClaimedMessage],
     *,
@@ -348,6 +479,13 @@ def _run_turn(
             event_id=event_id,
             correlation_id=correlation_id,
             messages=store.messages_for(prompt),
+            response_format=_contribution_response_format(lineage),
+        )
+        contribution = _validated_contribution(result.reply, lineage)
+        reply = json.dumps(
+            contribution,
+            ensure_ascii=False,
+            separators=(",", ":"),
         )
         store.append(
             "turn_outcome",
@@ -357,9 +495,10 @@ def _run_turn(
             proxy_turn_id=result.turn_id,
             message_ids=message_ids,
             prompt=prompt,
-            reply=result.reply,
+            reply=reply,
+            contribution=contribution,
             role="assistant",
-            content=result.reply,
+            content=reply,
             source=executive.SESSION,
             source_id=result.turn_id,
             kind="council_contribution",
@@ -387,9 +526,9 @@ def _run_turn(
                 f"turn failed ({exc}); durable recovery failed ({recovery_exc})"
             ) from recovery_exc
         raise
-    store.remember_outcome(prompt, result.reply, message_ids)
+    store.remember_outcome(prompt, reply, message_ids)
     inbox.acknowledge(claims)
-    return result.reply
+    return reply
 
 
 def _register_at_rest_liveness(

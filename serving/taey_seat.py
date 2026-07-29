@@ -451,14 +451,16 @@ class ProxyClient:
         event_id: str,
         correlation_id: str,
         messages: list[dict[str, str]],
+        response_format: dict[str, Any] | None = None,
     ) -> ProxyResult:
-        body = json.dumps(
-            {
-                "model": MODEL,
-                "messages": messages,
-                "chat_template_kwargs": {"enable_thinking": False},
-            }
-        ).encode("utf-8")
+        request_body: dict[str, Any] = {
+            "model": MODEL,
+            "messages": messages,
+            "chat_template_kwargs": {"enable_thinking": False},
+        }
+        if response_format is not None:
+            request_body["response_format"] = response_format
+        body = json.dumps(request_body).encode("utf-8")
         request = urllib.request.Request(
             PROXY_URL,
             data=body,
