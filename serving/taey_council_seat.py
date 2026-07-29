@@ -177,13 +177,7 @@ class CouncilEventStore(executive.EventStore):
             f"{self.seat_contract}\n"
             "[/COUNCIL ROLE CONTRACT]"
         )
-        for message in messages:
-            if message["role"] == "user":
-                message["content"] = f"{contract}\n\n{message['content']}"
-                break
-        else:
-            messages.insert(0, {"role": "user", "content": contract})
-        return messages
+        return [{"role": "system", "content": contract}, *messages]
 
 
 def _response_lineage(
