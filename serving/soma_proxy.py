@@ -1449,6 +1449,7 @@ async def list_models():
 # turns_open keys are projections for existing fleet-notify consumers.
 # ---------------------------------------------------------------------------
 _SEAT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+_COUNCIL_SEAT_RE = re.compile(r"^taey-council-[1-7]$")
 _TRACE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$")
 
 _RECONCILE_LIVENESS_LUA = """
@@ -1956,8 +1957,8 @@ async def _chat_completions_for_turn(
     body = inject_preamble(body)
     is_stream = body.get("stream", False)
 
-    # Inject tools if not already present
-    if "tools" not in body:
+    # Council seats are advisory unless a caller supplies an explicit bounded tool grant.
+    if "tools" not in body and not _COUNCIL_SEAT_RE.fullmatch(turn.seat_id):
         body["tools"] = TOOLS
 
     t0 = time.time()
