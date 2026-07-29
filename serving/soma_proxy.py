@@ -47,7 +47,10 @@ MIRA_REDIS_PORT = int(os.environ.get("MIRA_REDIS_PORT", "6379"))
 MIRA_DASHBOARD_URL = os.environ.get("MIRA_DASHBOARD_URL", "http://127.0.0.1:5001")
 MIRA_ISMA_URL = os.environ.get("MIRA_ISMA_URL", "http://127.0.0.1:8095")
 PROXY_PORT = int(os.environ.get("PROXY_PORT", "8765"))
-MAX_TOOL_ROUNDS = int(os.environ.get("MAX_TOOL_ROUNDS", "8"))
+# 8 rounds took Taey's tools away mid-task and forced a text answer. Real
+# multi-step work legitimately needs more; the loop already stops when there
+# are no calls.
+MAX_TOOL_ROUNDS = int(os.environ.get("MAX_TOOL_ROUNDS", "60"))
 # Persona/system prompt: ships a generic example so the proxy works out of the box.
 # Point SYSTEM_PROMPT_PATH at your own persona file to give the model an identity.
 SYSTEM_PROMPT_PATH = os.environ.get(
