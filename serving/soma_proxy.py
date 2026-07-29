@@ -19,6 +19,7 @@ import operator
 import re
 from typing import Optional
 
+import asyncio
 import redis
 import httpx
 from fastapi import FastAPI, Request, HTTPException
@@ -361,6 +362,21 @@ def _append_volatile(messages: list, volatile: str) -> list:
     # No user turn to attach to: keep the state rather than silently dropping it.
     return messages + [{"role": "user", "content": volatile}]
 
+
+async def execute_tool_call_async(name: str, arguments: dict) -> str:
+    """Run a tool WITHOUT freezing the event loop.
+
+    execute_tool_call shells out synchronously. Called directly from an async handler it blocks
+    the entire proxy for the duration -- every other caller, the health endpoint, and any turn in
+    flight. That is not theoretical: on 2026-07-29 Taey delegated to its own :8767 instance with
+    `curl --max-time 1800`, the call ran inside :8766's handler, and the worker was told to fetch
+    from :8766 -- which could not answer because it was blocked waiting for that worker. Circular
+    deadlock, 30-minute ceiling, nothing logged, the proxy indistinguishable from dead.
+
+    Off-thread execution breaks the cycle: a slow or self-referential tool now costs one thread,
+    not the whole service.
+    """
+    return await asyncio.to_thread(execute_tool_call, name, arguments)
 
 def inject_preamble(body: dict) -> dict:
     """Enrich the request with ecosystem state and somatic data.
@@ -1405,7 +1421,7 @@ async def chat_completions(request: Request):
                     except json.JSONDecodeError:
                         arguments = {}
 
-                tool_result = execute_tool_call(name, arguments)
+                tool_result = await execute_tool_call_async(name, arguments)
                 log.info("Tool %s(%s) -> %d chars",
                          name, json.dumps(arguments)[:100], len(tool_result))
 
