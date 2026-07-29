@@ -203,14 +203,20 @@ import sys
 import urllib.request
 
 proxy, expected, output = sys.argv[1:]
-with urllib.request.urlopen(proxy.rstrip("/") + "/health", timeout=10) as response:
-    health = json.load(response)
+try:
+    with urllib.request.urlopen(proxy.rstrip("/") + "/health", timeout=10) as response:
+        health = json.load(response)
+except Exception:
+    raise SystemExit(1)
 if health.get("status") != "healthy":
     raise SystemExit(1)
 if health.get("liveness", {}).get("active_turns") != 0:
     raise SystemExit(1)
-with urllib.request.urlopen(proxy.rstrip("/") + "/v1/models", timeout=10) as response:
-    payload = json.load(response)
+try:
+    with urllib.request.urlopen(proxy.rstrip("/") + "/v1/models", timeout=10) as response:
+        payload = json.load(response)
+except Exception:
+    raise SystemExit(1)
 models = payload.get("data", [])
 matches = [model for model in models if model.get("id") == expected]
 if len(matches) != 1:
