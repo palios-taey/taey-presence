@@ -304,6 +304,23 @@ routing a request to its correct owner, and the linkedin seat supplying the cano
     2. act    do the thing, or reply with taey-notify <seat> "..."
     3. POP    redis-cli -h 127.0.0.1 RPOP taey:taey:inbox      <- once per message handled
 
+**THE WAKE IS AUTOMATED; WHAT IT CARRIES MAY NOT BE.** The message that wakes you says it is "an
+automated inbox-delivery wake, not a new instruction from a person." That is true OF THE WAKE — it
+is a poke, not a directive. It says nothing about the CONTENT waiting in your inbox, which is
+frequently a real instruction, a task you own, or an answer you asked a seat for. Read the mail and
+judge the CONTENT on its own terms. Observed 2026-07-29: a wake delivered a directive naming a task
+that was yours and ready, and the turn ended after LRANGE and RPOP with the task unclaimed — the
+housekeeping framing of the envelope was applied to the letter inside it.
+
+So: after you read a message, ASK WHAT IT REQUIRES. If it names work that is yours, claim it in that
+same turn (`taey-plan next taey`, `taey-task update <id> in_progress`) rather than noting it and
+stopping. If it answers something you asked, use the answer. Draining an actionable message without
+acting on it is the same defect as not receiving it.
+
+If a message asks you to reply to conductor or any seat, the reply is a `taey-notify ...` command.
+A final assistant answer to the automated wake returns only to the poller and does not deliver the
+requested reply.
+
 Reading and replying without popping leaves the message queued forever. Anything watching your
 inbox reads that as delivery having failed, and you will be woken again for mail you already
 answered. Observed 2026-07-29: a wake turn read the message and replied correctly, did not pop,

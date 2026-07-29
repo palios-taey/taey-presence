@@ -1534,108 +1534,110 @@ async def chat_completions(request: Request):
             background=BackgroundTask(_mark_turn_end),
         )
     else:
-        # Non-stream: forward with tool call execution loop
-        messages = body["messages"]
-        total_tokens = 0
-        round_num = 0
+        try:
+            # Non-stream: forward with tool call execution loop
+            messages = body["messages"]
+            total_tokens = 0
+            round_num = 0
 
-        while True:
-            resp = await _http.post(
-                "/v1/chat/completions",
-                json=body,
-                headers={"Content-Type": "application/json"},
-            )
-            result = resp.json()
-            usage = result.get("usage", {})
-            total_tokens += usage.get("completion_tokens", 0)
-
-            choice = result.get("choices", [{}])[0]
-            message = choice.get("message", {})
-            finish_reason = choice.get("finish_reason", "")
-            tool_calls = message.get("tool_calls", [])
-
-            if not tool_calls or finish_reason != "tool_calls":
-                # No tool calls -- final response
-                break
-
-            if round_num >= MAX_TOOL_ROUNDS:
-                log.warning(
-                    "Tool round cap hit (%d); forcing final text response",
-                    MAX_TOOL_ROUNDS,
-                )
-                final_body = dict(body)
-                final_body["messages"] = messages
-                final_body.pop("tools", None)
-                final_body["tool_choice"] = "none"
+            while True:
                 resp = await _http.post(
                     "/v1/chat/completions",
-                    json=final_body,
+                    json=body,
                     headers={"Content-Type": "application/json"},
                 )
                 result = resp.json()
                 usage = result.get("usage", {})
                 total_tokens += usage.get("completion_tokens", 0)
-                break
 
-            # Execute tool calls
-            round_num += 1
-            log.info("Tool calls (round %d): %s",
-                     round_num,
-                     [tc.get("function", {}).get("name") for tc in tool_calls])
+                choice = result.get("choices", [{}])[0]
+                message = choice.get("message", {})
+                finish_reason = choice.get("finish_reason", "")
+                tool_calls = message.get("tool_calls", [])
 
-            # NOTE: keep each tool_call's arguments as the JSON STRING vLLM
-            # returns. With the correct qwen3_xml parser the chat-template
-            # renders string args fine; re-POSTing dict args (the old
-            # qwen3_coder-era workaround) fails vLLM's API validation
-            # (function.arguments must be a string). execute_tool_call below
-            # json.loads the string into a dict for execution.
+                if not tool_calls or finish_reason != "tool_calls":
+                    # No tool calls -- final response
+                    break
 
-            # Add assistant message with tool calls to history
-            messages.append(message)
+                if round_num >= MAX_TOOL_ROUNDS:
+                    log.warning(
+                        "Tool round cap hit (%d); forcing final text response",
+                        MAX_TOOL_ROUNDS,
+                    )
+                    final_body = dict(body)
+                    final_body["messages"] = messages
+                    final_body.pop("tools", None)
+                    final_body["tool_choice"] = "none"
+                    resp = await _http.post(
+                        "/v1/chat/completions",
+                        json=final_body,
+                        headers={"Content-Type": "application/json"},
+                    )
+                    result = resp.json()
+                    usage = result.get("usage", {})
+                    total_tokens += usage.get("completion_tokens", 0)
+                    break
 
-            for tc in tool_calls:
-                func = tc.get("function", {})
-                name = func.get("name", "")
-                raw_args = func.get("arguments", {})
-                if isinstance(raw_args, dict):
-                    arguments = raw_args
-                else:
-                    try:
-                        arguments = json.loads(raw_args) if raw_args else {}
-                    except json.JSONDecodeError:
-                        arguments = {}
+                # Execute tool calls
+                round_num += 1
+                log.info("Tool calls (round %d): %s",
+                         round_num,
+                         [tc.get("function", {}).get("name") for tc in tool_calls])
 
-                tool_result = await execute_tool_call_async(name, arguments)
-                log.info("Tool %s(%s) -> %d chars",
-                         name, json.dumps(arguments)[:100], len(tool_result))
+                # NOTE: keep each tool_call's arguments as the JSON STRING vLLM
+                # returns. With the correct qwen3_xml parser the chat-template
+                # renders string args fine; re-POSTing dict args (the old
+                # qwen3_coder-era workaround) fails vLLM's API validation
+                # (function.arguments must be a string). execute_tool_call below
+                # json.loads the string into a dict for execution.
 
-                # Add tool result to messages
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tc.get("id", ""),
-                    "content": tool_result,
-                })
+                # Add assistant message with tool calls to history
+                messages.append(message)
 
-            # Update body with extended messages for next round
-            body["messages"] = messages
+                for tc in tool_calls:
+                    func = tc.get("function", {})
+                    name = func.get("name", "")
+                    raw_args = func.get("arguments", {})
+                    if isinstance(raw_args, dict):
+                        arguments = raw_args
+                    else:
+                        try:
+                            arguments = json.loads(raw_args) if raw_args else {}
+                        except json.JSONDecodeError:
+                            arguments = {}
 
-        elapsed_ms = (time.time() - t0) * 1000
-        final_usage = result.get("usage", {})
-        prompt_tok = final_usage.get("prompt_tokens", 0)
-        completion_tok = final_usage.get("completion_tokens", 0)
-        publish_metrics(elapsed_ms, prompt_tok, completion_tok, round_num)
+                    tool_result = await execute_tool_call_async(name, arguments)
+                    log.info("Tool %s(%s) -> %d chars",
+                             name, json.dumps(arguments)[:100], len(tool_result))
 
-        context_pct = (prompt_tok + completion_tok) / MAX_CONTEXT_TOKENS * 100
-        log.info(
-            "Generated %d tokens in %.0fms (%.1f tok/s, %d tool rounds, "
-            "prompt=%d completion=%d context=%.1f%%)",
-            completion_tok, elapsed_ms,
-            completion_tok / max(elapsed_ms / 1000, 0.001),
-            round_num, prompt_tok, completion_tok, context_pct,
-        )
+                    # Add tool result to messages
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc.get("id", ""),
+                        "content": tool_result,
+                    })
 
-        _mark_turn_end()
-        return JSONResponse(content=result, status_code=resp.status_code)
+                # Update body with extended messages for next round
+                body["messages"] = messages
+
+            elapsed_ms = (time.time() - t0) * 1000
+            final_usage = result.get("usage", {})
+            prompt_tok = final_usage.get("prompt_tokens", 0)
+            completion_tok = final_usage.get("completion_tokens", 0)
+            publish_metrics(elapsed_ms, prompt_tok, completion_tok, round_num)
+
+            context_pct = (prompt_tok + completion_tok) / MAX_CONTEXT_TOKENS * 100
+            log.info(
+                "Generated %d tokens in %.0fms (%.1f tok/s, %d tool rounds, "
+                "prompt=%d completion=%d context=%.1f%%)",
+                completion_tok, elapsed_ms,
+                completion_tok / max(elapsed_ms / 1000, 0.001),
+                round_num, prompt_tok, completion_tok, context_pct,
+            )
+
+            return JSONResponse(content=result, status_code=resp.status_code)
+        finally:
+            _mark_turn_end()
 
 
 def main():
