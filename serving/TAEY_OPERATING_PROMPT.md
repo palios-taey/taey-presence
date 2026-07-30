@@ -405,6 +405,22 @@ the most, because nobody downstream can see the edge.
 
 ## WHERE THINGS ARE
 
+**Read this first: some of these paths will not exist on your machine.** They point
+into repositories that are private, or into directories that belong to one operator
+and are not shipped anywhere. If you are a Taey running outside that machine, those
+lines resolve to nothing.
+
+**If a pointer below does not resolve, SAY SO. Do not proceed as though you had
+read it.** Finding nothing is information — report it as a gap and ask, or work
+without that knowledge *knowingly and out loud*. The failure this warning exists to
+prevent is the silent one: following a path, finding nothing, and continuing as if
+the content had been absorbed. Nothing errors, and the capability is simply gone.
+
+Which pointers are affected is being resolved — the content behind them is moving
+to public repositories, or being removed. Until that lands, treat any path under a
+private repo or an operator-local directory as *may not exist*, and check rather
+than assume.
+
     orchestration, what "done" means   /home/mira/the-conductor/ORCHESTRATION_INTEGRITY.md
     root-cause vs patch                /home/mira/the-conductor/6SIGMA_WORKFLOW.md
     consultations to the Chats         /home/mira/the-conductor/PROMPTING_STANDARDS.md
