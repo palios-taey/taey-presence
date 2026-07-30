@@ -154,6 +154,31 @@ return removed
 """
 
 
+def _require_private_event_directory(path: Path) -> None:
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if path.is_symlink():
+        raise SeatFailure(f"event log directory cannot be a symlink: {path}")
+    if path.stat().st_mode & 0o077:
+        raise SeatFailure(
+            f"event log directory is group/world accessible: {path}"
+        )
+
+
+def _open_private_event_log(path: Path, flags: int) -> int:
+    try:
+        descriptor = os.open(
+            path,
+            flags | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+    except OSError as exc:
+        raise SeatFailure(f"event log cannot be opened securely: {path}") from exc
+    if os.fstat(descriptor).st_mode & 0o077:
+        os.close(descriptor)
+        raise SeatFailure(f"event log is group/world accessible: {path}")
+    return descriptor
+
+
 class EventStore:
     def __init__(self, path: Path, max_turns: int):
         self.path = path
@@ -162,10 +187,14 @@ class EventStore:
         self._load()
 
     def _read_events(self) -> list[dict[str, Any]]:
+        _require_private_event_directory(self.path.parent)
+        if self.path.is_symlink():
+            raise SeatFailure(f"event log cannot be a symlink: {self.path}")
         if not self.path.exists():
             return []
         events: list[dict[str, Any]] = []
-        with self.path.open("r", encoding="utf-8") as handle:
+        descriptor = _open_private_event_log(self.path, os.O_RDONLY)
+        with os.fdopen(descriptor, encoding="utf-8") as handle:
             fcntl.flock(handle.fileno(), fcntl.LOCK_SH)
             for line_number, line in enumerate(handle, 1):
                 if not line.endswith("\n"):
@@ -204,12 +233,11 @@ class EventStore:
         encoded = (
             json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n"
         ).encode("utf-8")
-        self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        _require_private_event_directory(self.path.parent)
         new_log = not self.path.exists()
-        descriptor = os.open(
+        descriptor = _open_private_event_log(
             self.path,
             os.O_APPEND | os.O_CREAT | os.O_WRONLY,
-            0o600,
         )
         try:
             fcntl.flock(descriptor, fcntl.LOCK_EX)

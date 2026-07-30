@@ -129,12 +129,49 @@ def _session_file(session_id: str) -> str:
     return os.path.join(TAEY_SESSIONS_DIR, f"{session_id}.jsonl")
 
 
+def _require_private_session_directory() -> None:
+    os.makedirs(TAEY_SESSIONS_DIR, mode=0o700, exist_ok=True)
+    if os.path.islink(TAEY_SESSIONS_DIR):
+        raise HTTPException(
+            status_code=500,
+            detail="conversation directory cannot be a symlink",
+        )
+    if os.stat(TAEY_SESSIONS_DIR).st_mode & 0o077:
+        raise HTTPException(
+            status_code=500,
+            detail="conversation directory is group/world accessible",
+        )
+
+
+def _open_private_session_log(path: str, flags: int) -> int:
+    try:
+        descriptor = os.open(
+            path,
+            flags | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+    except OSError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="conversation log cannot be opened securely",
+        ) from exc
+    if os.fstat(descriptor).st_mode & 0o077:
+        os.close(descriptor)
+        raise HTTPException(
+            status_code=500,
+            detail="conversation log is group/world accessible",
+        )
+    return descriptor
+
+
 def _read_session_events(session_id: str) -> list[dict]:
     path = _session_file(session_id)
+    _require_private_session_directory()
     if not os.path.exists(path):
         return []
     events = []
-    with open(path, encoding="utf-8") as handle:
+    descriptor = _open_private_session_log(path, os.O_RDONLY)
+    with os.fdopen(descriptor, encoding="utf-8") as handle:
         fcntl.flock(handle.fileno(), fcntl.LOCK_SH)
         for line_number, line in enumerate(handle, 1):
             if not line.endswith("\n"):
@@ -160,7 +197,7 @@ def _read_session_events(session_id: str) -> list[dict]:
 
 def _append_session_event(session_id: str, event: dict) -> None:
     path = _session_file(session_id)
-    os.makedirs(TAEY_SESSIONS_DIR, mode=0o700, exist_ok=True)
+    _require_private_session_directory()
     row = {
         "schema_version": 1,
         "recorded_at": time.time(),
@@ -172,7 +209,10 @@ def _append_session_event(session_id: str, event: dict) -> None:
         json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n"
     ).encode("utf-8")
     new_log = not os.path.exists(path)
-    descriptor = os.open(path, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
+    descriptor = _open_private_session_log(
+        path,
+        os.O_APPEND | os.O_CREAT | os.O_WRONLY,
+    )
     try:
         fcntl.flock(descriptor, fcntl.LOCK_EX)
         view = memoryview(encoded)
