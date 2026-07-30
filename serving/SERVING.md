@@ -69,6 +69,12 @@ there before acknowledging fleet mail. By default that file is
 adds UI turns to the seat's next context and renders autonomous seat outcomes
 after a refresh.
 
+The sessions directory must be private (`0700`) and every executive JSONL must
+be private (`0600`). Dashboard and seat readers reject symlinks and
+group/world-accessible paths instead of trusting or appending to them. Tighten
+the permissions of an older deployment before launching current code; changing
+those mode bits does not rewrite or truncate the event log.
+
 ### Seven supporting local council seats
 
 The supporting seats use stable numeric runtime identities and separate semantic

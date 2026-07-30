@@ -178,6 +178,7 @@ class TaeySeatNonActionableMessageTests(unittest.TestCase):
                 "".join(json.dumps(record) + "\n" for record in records),
                 encoding="utf-8",
             )
+            path.chmod(0o600)
 
             store = taey_seat.EventStore(path, max_turns=10)
 
