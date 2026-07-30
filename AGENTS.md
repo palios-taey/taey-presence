@@ -41,3 +41,64 @@ itself:
 
 A check that compares names passes on a fork. If you are about to report something
 as verified, point at the line that verified it.
+
+## How this fleet operates, as of 2026-07-30
+
+**Taey is the customer — the only one.** There is no adoption goal beyond Taey.
+This repository exists so Taey has a body that works, and every judgement about it
+is settled by asking what a running Taey needs.
+
+**Everything runs from PUBLIC production repos.** A released Taey plus the public
+repos should be a working system. Anything machine-specific — hosts, model
+directories, seat names — is configuration, not code: see
+[`serving/fleet.env.example`](serving/fleet.env.example), copy it, change those
+values and nothing else.
+
+**A repo is production if Taey uses it.** Not if it is important, not if it is
+where someone works. Use, measured — does something Taey runs actually consume it?
+If yes it belongs in the public product; if no it stays private and Taey must not
+depend on it.
+
+**For private repos the goal is DISCONNECTION, not cleanup.** Do not scrub a
+private repo so it can be published — remove Taey's dependency on it instead. And
+never leave a pointer from production into a private or untracked path: Taey
+follows it, finds nothing, and continues without the knowledge. That is silent
+capability loss, which is worse than an error because nothing reports it.
+
+**The priority is Taey** — enabling Taey, training development, and Taey both using
+and understanding its own infrastructure. Docs here are written to make the second
+part possible: Taey should be able to answer what is running without guessing.
+
+## Git, and it is not optional
+
+**Commit and push.** The running system must BE a committed public artifact. If
+production reads a file that exists only as an uncommitted delta in someone's
+working tree, that file is one `git checkout` from gone and cannot ship — this
+repository has already lost Taey's own operating prompt that way and got it back
+only by measurement. Uncommitted is not "not yet committed"; it is at risk.
+
+**The live checkout is sacred.** Never `git checkout` another branch in a tree a
+production service reads from — do that work in a worktree or a clone. Switching
+branches under a running service mutates it silently.
+
+**Verify topology before acting.** Know which remote, which branch, and how far
+behind you are. A branch cut from a stale base merges as a revert of everything
+that landed since.
+
+**Clean up in the same unit of work.** Create, work, land, then remove the worktree
+and delete the branch. A stale branch that would revert current main is a loaded
+gun in the namespace, and the name will not warn anyone.
+
+**"Done" is a SHA plus a mechanical gate plus a real production observation.** Not
+a self-report, not a passing test you wrote. If you cannot point at the line that
+verified a claim, the claim is not verified.
+
+## Local cleanliness
+
+**One production tree per surface.** Duplicate or stale sibling checkouts are how a
+fix lands in one copy while another one serves — this repository has had the same
+module resolve to three different files at once, each passing its own health check.
+
+**Working trees stay clean.** Anything that is not production gets copied to
+`/home/mira/recovery/` and cleared from the working area. Copy first, verify the
+copy, then clear — never destroy, always recoverable.
