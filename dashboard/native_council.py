@@ -5,6 +5,7 @@ import asyncio
 import fcntl
 import hashlib
 import json
+import logging
 import os
 import re
 import time
@@ -14,6 +15,9 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 import redis
+
+
+log = logging.getLogger(__name__)
 
 
 class CouncilTransportFailure(RuntimeError):
@@ -725,8 +729,20 @@ class NativeCouncilTransport:
 
         def forget(done: asyncio.Task[None]) -> None:
             self._tasks.pop(ledger.round_id, None)
-            if not done.cancelled():
-                done.exception()
+            if done.cancelled():
+                return
+            failure = done.exception()
+            if failure is not None:
+                log.error(
+                    "native council coordinator escaped durable recovery "
+                    "round=%s",
+                    ledger.round_id,
+                    exc_info=(
+                        type(failure),
+                        failure,
+                        failure.__traceback__,
+                    ),
+                )
 
         task.add_done_callback(forget)
 
@@ -1299,6 +1315,7 @@ class NativeCouncilTransport:
                     continue
                 packet = {
                     "council_protocol": "taey-native-dcm/v1",
+                    "conversation_id": ledger.conversation_id,
                     "round_id": ledger.round_id,
                     "prompt_revision": prompt_revision,
                     "user_request": prompt,

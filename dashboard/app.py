@@ -95,7 +95,8 @@ TAEY_COUNCIL_LOG_DIR = Path(
 ).expanduser()
 _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 _COUNCIL_PROMPT_OPTOUT_RE = re.compile(
-    r"^\s*(?:/no-council|\[council:off\]|"
+    r"^\s*(?:/no-council(?=$|[\s:;,—-])|"
+    r"\[council:off\](?=$|[\s:;,—-])|"
     r"(?:please\s+)?(?:do\s+not|don't)\s+use\s+"
     r"(?:the\s+)?(?:council|dcm)\b)[\s:;,—-]*",
     re.IGNORECASE,
@@ -196,15 +197,8 @@ async def _synthesize_native_council(
     conversation_id: str,
     packet: dict,
 ) -> dict:
-    history = [
-        {
-            "role": event["role"],
-            "content": str(event["content"]),
-        }
-        for event in _read_session_events(conversation_id)
-        if event.get("role") in {"user", "assistant"}
-        and event.get("content")
-    ][-(TAEY_SESSION_MAX_TURNS * 2):]
+    if packet.get("conversation_id") != conversation_id:
+        raise RuntimeError("council synthesis conversation identity mismatch")
     synthesis_request = (
         "[TAEY-NATIVE DCM SYNTHESIS PACKET]\n"
         + json.dumps(packet, ensure_ascii=False, separators=(",", ":"))
@@ -215,7 +209,7 @@ async def _synthesize_native_council(
         "expose hidden chain-of-thought or claim execution that the packet "
         "does not evidence."
     )
-    messages = [*history, {"role": "user", "content": synthesis_request}]
+    messages = [{"role": "user", "content": synthesis_request}]
     round_id = str(packet["round_id"])
     prompt_revision = int(packet["prompt_revision"])
     event_id = f"{round_id}:{prompt_revision}:synthesis"
@@ -346,6 +340,24 @@ async def native_council_startup() -> None:
     await _resume_native_council_rounds()
 
 
+def _native_council_terminal_payload(
+    event: dict | None,
+) -> dict[str, str] | None:
+    if not event:
+        return None
+    if event.get("event_type") == "round_completed":
+        return {
+            "type": "content",
+            "text": str(event.get("answer") or ""),
+        }
+    if event.get("event_type") == "round_failed":
+        return {
+            "type": "error",
+            "text": str(event.get("error") or "council round failed"),
+        }
+    return None
+
+
 async def _stream_native_council(
     conversation_id: str,
     round_id: str,
@@ -357,6 +369,19 @@ async def _stream_native_council(
     while True:
         events = ledger.events(sequence)
         if not events:
+            terminal = ledger.terminal_event()
+            terminal_payload = _native_council_terminal_payload(terminal)
+            if (
+                terminal_payload is not None
+                and int(terminal.get("sequence") or 0) <= sequence
+            ):
+                yield (
+                    "data: "
+                    + json.dumps(terminal_payload, ensure_ascii=False)
+                    + "\n\n"
+                )
+                yield "data: [DONE]\n\n"
+                return
             await asyncio.sleep(TAEY_COUNCIL_POLL_INTERVAL)
             continue
         for event in events:
@@ -369,33 +394,11 @@ async def _stream_native_council(
                 )
                 + "\n\n"
             )
-            if event.get("event_type") == "round_completed":
+            terminal_payload = _native_council_terminal_payload(event)
+            if terminal_payload is not None:
                 yield (
                     "data: "
-                    + json.dumps(
-                        {
-                            "type": "content",
-                            "text": str(event.get("answer") or ""),
-                        },
-                        ensure_ascii=False,
-                    )
-                    + "\n\n"
-                )
-                yield "data: [DONE]\n\n"
-                return
-            if event.get("event_type") == "round_failed":
-                yield (
-                    "data: "
-                    + json.dumps(
-                        {
-                            "type": "error",
-                            "text": str(
-                                event.get("error")
-                                or "council round failed"
-                            ),
-                        },
-                        ensure_ascii=False,
-                    )
+                    + json.dumps(terminal_payload, ensure_ascii=False)
                     + "\n\n"
                 )
                 yield "data: [DONE]\n\n"
@@ -699,6 +702,11 @@ function renderCouncilEvent(event) {
   const ledger = $('#council-ledger');
   const target = $('#council-events');
   ledger.classList.add('active');
+  if (event.event_type === 'round_opened' &&
+      event.round_id &&
+      event.round_id !== activeCouncilRoundId) {
+    councilLastSequence = 0;
+  }
   councilLastSequence = Math.max(
     councilLastSequence,
     Number(event.sequence || 0)
@@ -820,9 +828,13 @@ async function restoreActiveCouncil() {
     }
     const active = await activeResponse.json();
     if (!active.round_id) return;
+    if (active.round_id !== activeCouncilRoundId) {
+      councilLastSequence = 0;
+    }
     activeCouncilRoundId = active.round_id;
     activeCouncilRevision = Number(active.prompt_revision || 1);
     $('#send-btn').textContent = 'Add thought';
+    $('#stop-btn').style.display = '';
     const responseDiv = document.createElement('div');
     responseDiv.className = 'msg-taey';
     const thinkingDiv = document.createElement('div');
@@ -881,6 +893,9 @@ async function restoreActiveCouncil() {
     currentController = null;
     $('#send-btn').textContent = activeCouncilRoundId ? 'Add thought' : 'Send';
     $('#stop-btn').style.display = 'none';
+    if (activeCouncilRoundId) {
+      setTimeout(restoreActiveCouncil, 3000);
+    }
   }
 }
 
@@ -893,7 +908,7 @@ async function sendChat() {
   const input = $('#chat-input');
   const msg = input.value.trim();
   if (!msg) return;
-  const promptCouncilOptOut = /^\s*(?:\/no-council|\[council:off\]|(?:please\s+)?(?:do\s+not|don't)\s+use\s+(?:the\s+)?(?:council|dcm)\b)[\s:;,—-]*/i.test(msg);
+  const promptCouncilOptOut = /^\s*(?:\/no-council(?=$|[\s:;,—-])|\[council:off\](?=$|[\s:;,—-])|(?:please\s+)?(?:do\s+not|don't)\s+use\s+(?:the\s+)?(?:council|dcm)\b)[\s:;,—-]*/i.test(msg);
   input.value = ''; autoResize(input);
 
   clearGhost();
@@ -903,7 +918,16 @@ async function sendChat() {
   prefetchedTiles = null;
 
   const log = $('#chat-log');
-  if (activeCouncilRoundId && !promptCouncilOptOut) {
+  const councilToggleEnabled = $('#use-council').checked;
+  if (activeCouncilRoundId &&
+      (promptCouncilOptOut || !councilToggleEnabled)) {
+    input.value = msg;
+    autoResize(input);
+    $('#status-line').textContent =
+      'A council round is already open; add an amendment or wait before opting out.';
+    return;
+  }
+  if (activeCouncilRoundId) {
     try {
       const amendment = await fetch(
         '/api/chat/sessions/' + executiveSessionId + '/council/rounds/' +
@@ -937,7 +961,7 @@ async function sendChat() {
 
   const responseDiv = document.createElement('div');
   responseDiv.className = 'msg-taey';
-  const useCouncil = $('#use-council').checked && !promptCouncilOptOut;
+  const useCouncil = councilToggleEnabled && !promptCouncilOptOut;
   responseDiv.innerHTML = useCouncil ?
     '<span class="thinking">Council is opening...</span>' :
     '<span class="thinking">Taey is thinking...</span>';
@@ -972,6 +996,9 @@ async function sendChat() {
     }
     const openedRoundId = r.headers.get('X-Taey-Council-Round-Id') || '';
     if (openedRoundId) {
+      if (openedRoundId !== activeCouncilRoundId) {
+        councilLastSequence = 0;
+      }
       activeCouncilRoundId = openedRoundId;
       activeCouncilRevision = Number(
         r.headers.get('X-Taey-Council-Prompt-Revision') || 1
@@ -1666,7 +1693,15 @@ async def chat_session_stream(session_id: str, request: Request):
         active_council = _native_council.active_round(session_id)
     except CouncilTransportFailure as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
-    if use_council and active_council is not None:
+    if active_council is not None and not use_council:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "a council round is already open; submit an amendment "
+                "or wait before opting out"
+            ),
+        )
+    if active_council is not None:
         amendment = None
         try:
             amendment = _native_council.amend(
