@@ -172,9 +172,11 @@ than a habit — a habit is what lapses at 2am.
 
 # PROMOTE AN ALREADY-SERVED RELEASE INTO MAIN TAEY. This waits for zero open turns
 # across Main and every registered supporting seat,
-# writes the endpoint drop-in, restarts the UI-facing proxy, verifies the exact model/root
-# through that proxy, runs one real inference, and emits a JSON release receipt. A failed
-# CONTROL gate restores the previous route automatically.
+# writes the endpoint drop-in, restarts the UI-facing proxy, then verifies through that proxy
+# that the alias resolves to exactly one model AND that its root matches the root the target
+# endpoint was serving before the route was written — the alias alone cannot prove the route
+# changed, since it is permanent by design and reads identical on either node. Runs one real
+# inference and emits a JSON release receipt. A failed CONTROL gate restores the previous route.
 ./serving/promote_main_model.sh \
   --endpoint http://<serving-host>:8000 \
   --model <new-id>

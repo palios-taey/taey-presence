@@ -255,6 +255,30 @@ SRC="$1"; MODEL="$2"
 # Promotion restarts serving nodes, so from here the consumer declaration is mandatory.
 [ -n "$NODE1_CONSUMERS" ] || die "set TAEY_NODE1_CONSUMERS to the systemd --user units pinned to node1, or the literal: none"
 [ -n "$NODE2_CONSUMERS" ] || die "set TAEY_NODE2_CONSUMERS to the systemd --user units pinned to node2, or the literal: none"
+
+# A NON-EMPTY DECLARATION IS NOT A COMPLETE ONE. Checking only that the operator typed something
+# lets an undeclared consumer keep admitting work while its node restarts — observed on this fleet,
+# where a revenue-lane unit was pinned to node2 alongside the delegate proxy and appeared in no
+# example. A crash-looping unit counts too: `activating` is not `active`, but it will admit work the
+# moment it comes up, so the scan covers active, activating and reloading rather than active alone.
+# example. So cross-check the declaration against what is ACTUALLY pointed at each node, and refuse
+# on any consumer that is running but undeclared.
+undeclared_for() {  # <node-host> <declared-list> -> units targeting that host but not declared
+  local host="$1" declared="$2" u env_target
+  for u in $(systemctl --user list-units --state=active,activating,reloading --no-legend --plain 2>/dev/null | awk '{print $1}' | grep '\.service$'); do
+    env_target="$(systemctl --user show "$u" -p Environment --value 2>/dev/null | tr ' ' '\n' | grep -oE 'https?://[^/ ]+' | grep -F "$host" | head -1)"
+    [ -n "$env_target" ] || continue
+    case " $declared " in *" $u "*) ;; *) printf '%s ' "$u" ;; esac
+  done
+}
+for pair in "node1:$NODE1_HOST:$NODE1_CONSUMERS" "node2:$NODE2_HOST:$NODE2_CONSUMERS"; do
+  lbl="${pair%%:*}"; rest="${pair#*:}"; host="${rest%%:*}"; decl="${rest#*:}"
+  [ "$decl" = "none" ] && decl=""
+  missing="$(undeclared_for "$host" "$decl")"
+  [ -z "$missing" ] || die "$lbl: these ACTIVE units target $host but are not in TAEY_${lbl#node}_CONSUMERS: $missing
+Add them (they must be stopped for the maintenance window) or stop them first. Refusing to restart a node while an undeclared consumer can admit work."
+done
+log "consumer declarations cover every active unit targeting each node"
 valid_component "$MODEL" \
   || die "model must be a single directory name matching [A-Za-z0-9][A-Za-z0-9._-]* — got: $MODEL"
 

@@ -139,6 +139,28 @@ with open(output, "w") as handle:
 print(f"RAW PREFLIGHT PASS: model={expected} root={matches[0].get('root')}")
 PY
 
+# The root the TARGET endpoint serves, captured BEFORE the route is written so the post-route gate
+# has something real to compare against. Without it EXPECTED_ROOT is empty, the comparison is
+# skipped, and the gate degrades silently to an alias check — which is the defect this closes.
+EXPECTED_ROOT="$(curl -s --max-time 15 "${ENDPOINT%/}/v1/models" 2>/dev/null \
+  | MODEL="$MODEL" python3 -c '
+import sys, json, os
+alias = os.environ["MODEL"]
+try:
+    data = json.load(sys.stdin).get("data", [])
+except Exception:
+    sys.exit(1)
+hits = [m for m in data if isinstance(m, dict) and m.get("id") == alias]
+if len(hits) != 1:
+    sys.exit(1)
+root = hits[0].get("root")
+if not isinstance(root, str) or not root:
+    sys.exit(1)
+print(root)
+' 2>/dev/null || true)"
+[ -n "$EXPECTED_ROOT" ] || { echo "FATAL: could not read the root the target endpoint serves for alias $MODEL — refusing to promote a route this gate cannot verify" >&2; exit 1; }
+echo "TARGET ROOT: $EXPECTED_ROOT"
+
 current_endpoint="$(
   systemctl --user show "$UNIT" -p Environment --value |
     tr ' ' '\n' | sed -n 's/^VLLM_BASE_URL=//p' | head -1
@@ -197,12 +219,12 @@ systemctl --user restart "$UNIT"
 
 while :; do
   if systemctl --user is-active --quiet "$UNIT" &&
-      python3 - "$PROXY_URL" "$MODEL" "$PROXY_RECEIPT" <<'PY'
+      python3 - "$PROXY_URL" "$MODEL" "$PROXY_RECEIPT" "$EXPECTED_ROOT" <<'PY'
 import json
 import sys
 import urllib.request
 
-proxy, expected, output = sys.argv[1:]
+proxy, expected, output, expected_root = sys.argv[1:]
 try:
     with urllib.request.urlopen(proxy.rstrip("/") + "/health", timeout=10) as response:
         health = json.load(response)
@@ -233,7 +255,7 @@ PY
   }
   sleep 2
 done
-echo "ROUTE CONTROL PASS: Main Taey advertises model=${MODEL}"
+echo "ROUTE CONTROL PASS: Main Taey serves model=${MODEL} at root=${EXPECTED_ROOT:-<unverified>}"
 
 python3 - "$PROXY_URL" "$MODEL" "$CHAT_RECEIPT" <<'PY'
 import json
