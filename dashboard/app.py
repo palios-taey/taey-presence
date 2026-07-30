@@ -11,11 +11,18 @@ import logging
 import re
 import time
 import uuid
+from pathlib import Path
+
 import redis
 import httpx
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+
+from dashboard.native_council import (
+    CouncilTransportFailure,
+    NativeCouncilTransport,
+)
 
 try:
     from dotenv import load_dotenv
@@ -61,16 +68,54 @@ try:
 except Exception:
     _thor_redis = None
 _http = httpx.AsyncClient(timeout=300.0)
-TAEY_SESSIONS_DIR = os.environ.get(
-    "TAEY_SESSIONS_DIR",
-    str(os.path.join(os.path.expanduser("~"), "taey_sessions")),
+TAEY_SESSIONS_DIR = os.path.expanduser(
+    os.environ.get(
+        "TAEY_SESSIONS_DIR",
+        str(os.path.join(os.path.expanduser("~"), "taey_sessions")),
+    )
 )
 TAEY_CONVERSATION_ID = os.environ.get("TAEY_CONVERSATION_ID", "main")
 TAEY_SESSION_MAX_TURNS = max(
     1,
     int(os.environ.get("TAEY_SESSION_MAX_TURNS", "60")),
 )
+TAEY_COUNCIL_WAVE_TIMEOUT = max(
+    1.0,
+    float(os.environ.get("TAEY_COUNCIL_WAVE_TIMEOUT", "600")),
+)
+TAEY_COUNCIL_POLL_INTERVAL = max(
+    0.05,
+    float(os.environ.get("TAEY_COUNCIL_POLL_INTERVAL", "0.25")),
+)
+TAEY_COUNCIL_LOG_DIR = Path(
+    os.environ.get(
+        "TAEY_COUNCIL_LOG_DIR",
+        os.path.join(TAEY_SESSIONS_DIR, "council"),
+    )
+).expanduser()
 _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+_COUNCIL_PROMPT_OPTOUT_RE = re.compile(
+    r"^\s*(?:/no-council(?=$|[\s:;,—-])|"
+    r"\[council:off\](?=$|[\s:;,—-])|"
+    r"(?:please\s+)?(?:do\s+not|don't)\s+use\s+"
+    r"(?:the\s+)?(?:council|dcm)\b)[\s:;,—-]*",
+    re.IGNORECASE,
+)
+_native_council = NativeCouncilTransport(
+    _redis,
+    Path(TAEY_SESSIONS_DIR).expanduser(),
+    council_log_dir=TAEY_COUNCIL_LOG_DIR,
+    wave_timeout=TAEY_COUNCIL_WAVE_TIMEOUT,
+    poll_interval=TAEY_COUNCIL_POLL_INTERVAL,
+)
+
+
+def _council_prompt_opt_out(message: str) -> tuple[bool, str]:
+    match = _COUNCIL_PROMPT_OPTOUT_RE.match(message)
+    if match is None:
+        return False, message
+    stripped = message[match.end() :].strip()
+    return True, stripped or message
 
 DASH_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(DASH_DIR, "static")
@@ -148,6 +193,218 @@ def _append_session_event(session_id: str, event: dict) -> None:
             os.close(directory)
 
 
+async def _synthesize_native_council(
+    conversation_id: str,
+    packet: dict,
+) -> dict:
+    if packet.get("conversation_id") != conversation_id:
+        raise RuntimeError("council synthesis conversation identity mismatch")
+    synthesis_request = (
+        "[TAEY-NATIVE DCM SYNTHESIS PACKET]\n"
+        + json.dumps(packet, ensure_ascii=False, separators=(",", ":"))
+        + "\n[/TAEY-NATIVE DCM SYNTHESIS PACKET]\n\n"
+        "Act only as Main Taey, the lightweight executive and sole UI voice. "
+        "Synthesize the decision-relevant result. Explicitly label missing or "
+        "failed seats, material dissent, and unresolved uncertainty. Do not "
+        "expose hidden chain-of-thought or claim execution that the packet "
+        "does not evidence."
+    )
+    messages = [{"role": "user", "content": synthesis_request}]
+    round_id = str(packet["round_id"])
+    prompt_revision = int(packet["prompt_revision"])
+    event_id = f"{round_id}:{prompt_revision}:synthesis"
+    payload = {
+        "model": MODEL or "ep3",
+        "messages": messages,
+        "chat_template_kwargs": {"enable_thinking": False},
+        "tools": [],
+    }
+    headers = {
+        "X-Taey-Seat-Id": "taey",
+        "X-Taey-Event-Id": event_id,
+        "X-Taey-Correlation-Id": round_id,
+    }
+    response = await _http.post(
+        f"{THOR_PROXY}/v1/chat/completions",
+        json=payload,
+        headers=headers,
+        timeout=3600,
+    )
+    response.raise_for_status()
+    returned_event_id = response.headers.get("X-Taey-Event-Id", "")
+    returned_correlation_id = response.headers.get(
+        "X-Taey-Correlation-Id",
+        "",
+    )
+    proxy_turn_id = response.headers.get("X-Taey-Turn-Id", "")
+    if (
+        returned_event_id != event_id
+        or returned_correlation_id != round_id
+        or not proxy_turn_id
+    ):
+        raise RuntimeError(
+            "council synthesis proxy lineage mismatch "
+            f"event={returned_event_id!r} "
+            f"correlation={returned_correlation_id!r} "
+            f"turn={proxy_turn_id!r}"
+        )
+    data = response.json()
+    answer = (
+        ((data.get("choices") or [{}])[0].get("message") or {}).get(
+            "content"
+        )
+        if isinstance(data, dict)
+        else None
+    )
+    if not isinstance(answer, str) or not answer.strip():
+        raise RuntimeError("council synthesis returned no assistant content")
+    return {
+        "answer": answer.strip(),
+        "proxy_turn_id": proxy_turn_id,
+        "event_id": returned_event_id,
+        "correlation_id": returned_correlation_id,
+        "model": data.get("model"),
+    }
+
+
+async def _record_native_council_terminal(
+    conversation_id: str,
+    round_id: str,
+    opened: dict,
+    terminal: dict,
+) -> None:
+    existing = [
+        event
+        for event in _read_session_events(conversation_id)
+        if event.get("round_id") == round_id
+        and event.get("event_type") == "turn_outcome"
+        and event.get("kind")
+        in {"council_synthesis", "council_round_failure"}
+    ]
+    if existing:
+        return
+    event_id = str(opened.get("executive_event_id") or round_id)
+    if terminal.get("event_type") == "round_completed":
+        receipt = terminal.get("synthesis_receipt") or {}
+        answer = str(terminal.get("answer") or "")
+        _append_session_event(
+            conversation_id,
+            {
+                "event_type": "turn_outcome",
+                "event_id": event_id,
+                "correlation_id": round_id,
+                "round_id": round_id,
+                "prompt_revision": terminal.get("prompt_revision"),
+                "proxy_turn_id": receipt.get("proxy_turn_id"),
+                "proxy_event_id": receipt.get("event_id"),
+                "source": "taey",
+                "source_id": receipt.get("proxy_turn_id") or round_id,
+                "kind": "council_synthesis",
+                "role": "assistant",
+                "content": answer,
+                "ok": True,
+                "council_protocol": "taey-native-dcm/v1",
+                "failed_seats": terminal.get("failed_seats") or [],
+            },
+        )
+        return
+    _append_session_event(
+        conversation_id,
+        {
+            "event_type": "turn_outcome",
+            "event_id": event_id,
+            "correlation_id": round_id,
+            "round_id": round_id,
+            "prompt_revision": terminal.get("prompt_revision"),
+            "source": "taey-native-dcm",
+            "source_id": round_id,
+            "kind": "council_round_failure",
+            "ok": False,
+            "error": str(terminal.get("error") or "council round failed"),
+            "council_protocol": "taey-native-dcm/v1",
+        },
+    )
+
+
+async def _resume_native_council_rounds() -> None:
+    resumed = await _native_council.resume_active_rounds(
+        synthesize=_synthesize_native_council,
+        record_terminal=_record_native_council_terminal,
+    )
+    if resumed:
+        log.warning("resumed native council rounds: %s", ",".join(resumed))
+
+
+@app.on_event("startup")
+async def native_council_startup() -> None:
+    await _resume_native_council_rounds()
+
+
+def _native_council_terminal_payload(
+    event: dict | None,
+) -> dict[str, str] | None:
+    if not event:
+        return None
+    if event.get("event_type") == "round_completed":
+        return {
+            "type": "content",
+            "text": str(event.get("answer") or ""),
+        }
+    if event.get("event_type") == "round_failed":
+        return {
+            "type": "error",
+            "text": str(event.get("error") or "council round failed"),
+        }
+    return None
+
+
+async def _stream_native_council(
+    conversation_id: str,
+    round_id: str,
+    *,
+    after_sequence: int = 0,
+):
+    ledger = _native_council.ledger(conversation_id, round_id)
+    sequence = max(0, after_sequence)
+    while True:
+        terminal = ledger.terminal_event()
+        terminal_payload = _native_council_terminal_payload(terminal)
+        if (
+            terminal_payload is not None
+            and int(terminal.get("sequence") or 0) <= sequence
+        ):
+            yield (
+                "data: "
+                + json.dumps(terminal_payload, ensure_ascii=False)
+                + "\n\n"
+            )
+            yield "data: [DONE]\n\n"
+            return
+        events = ledger.events(sequence)
+        if not events:
+            await asyncio.sleep(TAEY_COUNCIL_POLL_INTERVAL)
+            continue
+        for event in events:
+            sequence = max(sequence, int(event.get("sequence") or 0))
+            yield (
+                "data: "
+                + json.dumps(
+                    {"type": "council_event", "event": event},
+                    ensure_ascii=False,
+                )
+                + "\n\n"
+            )
+            terminal_payload = _native_council_terminal_payload(event)
+            if terminal_payload is not None:
+                yield (
+                    "data: "
+                    + json.dumps(terminal_payload, ensure_ascii=False)
+                    + "\n\n"
+                )
+                yield "data: [DONE]\n\n"
+                return
+
+
 # ── HTML ──────────────────────────────────────────────────────────────────
 INDEX_HTML = r"""<!DOCTYPE html>
 <html lang="en">
@@ -219,6 +476,15 @@ body { font-family: 'SF Mono','Fira Code',monospace; background:var(--bg); color
 .msg-user { color:var(--accent); margin-bottom:6px; white-space:pre-wrap; word-wrap:break-word; }
 .msg-taey { color:var(--text); margin-bottom:14px; white-space:pre-wrap; word-wrap:break-word; }
 .msg-taey .thinking { color:var(--dim); font-style:italic; }
+.council-ledger { display:none; border-bottom:1px solid var(--border); padding:8px 14px;
+  max-height:220px; overflow-y:auto; background:#0d1012; font-size:0.72em; line-height:1.45; }
+.council-ledger.active { display:block; }
+.council-ledger-title { color:var(--accent); margin-bottom:5px; }
+.council-event { color:#9aa; padding:2px 0; white-space:pre-wrap; word-wrap:break-word; }
+.council-event.evidence { color:#9bc; }
+.council-event.dissent { color:var(--warn); }
+.council-event.failure { color:var(--bad); }
+.council-event.synthesis { color:var(--good); }
 
 /* Input area with face */
 .input-area { padding:10px 14px; border-top:1px solid var(--border); }
@@ -291,9 +557,14 @@ body { font-family: 'SF Mono','Fira Code',monospace; background:var(--bg); color
       <div class="chat-header">
         <h3>Talk to Taey</h3>
         <div class="toggle-row">
+          <label><input type="checkbox" id="use-council" checked> Council</label>
           <label><input type="checkbox" id="use-proxy" checked> Full (tools + preamble)</label>
           <label><input type="checkbox" id="raw-mode"> Raw weights</label>
         </div>
+      </div>
+      <div id="council-ledger" class="council-ledger">
+        <div class="council-ledger-title">Council work ledger</div>
+        <div id="council-events"></div>
       </div>
       <div id="chat-log"></div>
       <div class="input-area">
@@ -411,6 +682,108 @@ let currentController = null;
 const chatHistory = [];
 const executiveSessionId = 'main';
 let executiveSessionSignature = '';
+let activeCouncilRoundId = '';
+let activeCouncilRevision = 0;
+let councilLastSequence = 0;
+
+function appendUserMessage(content) {
+  chatHistory.push({role:'user', content:content});
+  const row = document.createElement('div');
+  row.className = 'msg-user';
+  row.textContent = 'You: ' + content;
+  $('#chat-log').appendChild(row);
+}
+
+function councilList(values) {
+  return Array.isArray(values) && values.length ? values.join(' | ') : 'none';
+}
+
+function renderCouncilEvent(event) {
+  const ledger = $('#council-ledger');
+  const target = $('#council-events');
+  ledger.classList.add('active');
+  if (event.event_type === 'round_opened' &&
+      event.round_id &&
+      event.round_id !== activeCouncilRoundId) {
+    councilLastSequence = 0;
+  }
+  councilLastSequence = Math.max(
+    councilLastSequence,
+    Number(event.sequence || 0)
+  );
+  if (event.event_type === 'round_opened') {
+    activeCouncilRoundId = event.round_id || activeCouncilRoundId;
+    activeCouncilRevision = Number(event.prompt_revision || 1);
+    $('#send-btn').textContent = 'Add thought';
+  }
+  if (event.event_type === 'user_amendment') {
+    activeCouncilRevision = Number(event.prompt_revision || activeCouncilRevision);
+  }
+  const row = document.createElement('div');
+  let style = '';
+  let text = event.event_type || 'council_event';
+  if (event.event_type === 'round_opened') {
+    text = `round ${event.round_id} opened at revision ${event.prompt_revision}`;
+  } else if (event.event_type === 'wave_started') {
+    text = `${event.phase} wave started · revision ${event.prompt_revision}`;
+  } else if (event.event_type === 'seat_started') {
+    text = `${event.role_id} started · ${event.dispatch_state}` +
+      (event.registration_observed ? '' : ' · registration not observed');
+  } else if (event.event_type === 'seat_status') {
+    text = `${event.role_id} ${event.status} · ${event.phase}`;
+  } else if (event.event_type === 'evidence') {
+    style = ' evidence';
+    text = `${event.role_id} evidence · observed: ${councilList(event.observations)}` +
+      ` · unknown: ${councilList(event.unknowns)}` +
+      ` · refs: ${councilList(event.evidence_refs)}`;
+  } else if (event.event_type === 'hypothesis') {
+    text = `${event.role_id} hypothesis · ${event.recommendation}` +
+      ` · confidence ${event.confidence}`;
+  } else if (event.event_type === 'contribution') {
+    text = `${event.role_id} contribution accepted · ${event.phase}`;
+  } else if (event.event_type === 'reveal') {
+    text = `independent contributions revealed · ${event.contribution_count} received` +
+      ` · ${event.failure_count} failed`;
+  } else if (event.event_type === 'dissent') {
+    style = event.present ? ' dissent' : '';
+    text = `${event.role_id} dissent ${event.present ? 'present' : 'not material'}` +
+      ` · ${councilList(event.concerns)}`;
+  } else if (event.event_type === 'seat_failed') {
+    style = ' failure';
+    text = `${event.role_id} failed · ${event.reason}`;
+  } else if (event.event_type === 'user_amendment') {
+    style = ' dissent';
+    text = `your amendment accepted · revision ${event.prompt_revision}` +
+      ` · stale work will be rerun`;
+  } else if (event.event_type === 'wave_superseded' ||
+             event.event_type === 'contribution_stale' ||
+             event.event_type === 'synthesis_stale') {
+    style = ' dissent';
+    text = `${event.event_type.replaceAll('_', ' ')} · revision ` +
+      `${event.prompt_revision} → ${event.latest_prompt_revision}`;
+  } else if (event.event_type === 'synthesis_started') {
+    style = ' synthesis';
+    text = `Main Taey synthesis started · ${event.independent_count} independent` +
+      ` · ${event.critique_count} critiques`;
+  } else if (event.event_type === 'synthesis') {
+    style = ' synthesis';
+    text = `synthesis ready · dissent count ${event.dissent_count}`;
+  } else if (event.event_type === 'round_completed') {
+    style = ' synthesis';
+    text = `round completed · revision ${event.prompt_revision}`;
+    activeCouncilRoundId = '';
+    $('#send-btn').textContent = 'Send';
+  } else if (event.event_type === 'round_failed') {
+    style = ' failure';
+    text = `round failed · ${event.error}`;
+    activeCouncilRoundId = '';
+    $('#send-btn').textContent = 'Send';
+  }
+  row.className = 'council-event' + style;
+  row.textContent = text;
+  target.appendChild(row);
+  ledger.scrollTop = ledger.scrollHeight;
+}
 
 async function restoreExecutiveSession() {
   try {
@@ -444,6 +817,88 @@ async function restoreExecutiveSession() {
   }
 }
 
+async function restoreActiveCouncil() {
+  if (currentController) return;
+  try {
+    const activeResponse = await fetch(
+      '/api/chat/sessions/' + executiveSessionId + '/council/active'
+    );
+    if (!activeResponse.ok) {
+      throw new Error('active council lookup failed: ' + activeResponse.status);
+    }
+    const active = await activeResponse.json();
+    if (!active.round_id) return;
+    if (active.round_id !== activeCouncilRoundId) {
+      councilLastSequence = 0;
+    }
+    activeCouncilRoundId = active.round_id;
+    activeCouncilRevision = Number(active.prompt_revision || 1);
+    $('#send-btn').textContent = 'Add thought';
+    $('#stop-btn').style.display = '';
+    const responseDiv = document.createElement('div');
+    responseDiv.className = 'msg-taey';
+    const thinkingDiv = document.createElement('div');
+    thinkingDiv.className = 'thinking';
+    thinkingDiv.textContent =
+      `Council revision ${activeCouncilRevision} is working...`;
+    const contentDiv = document.createElement('div');
+    responseDiv.appendChild(thinkingDiv);
+    responseDiv.appendChild(contentDiv);
+    $('#chat-log').appendChild(responseDiv);
+    currentController = new AbortController();
+    const stream = await fetch(
+      '/api/chat/sessions/' + executiveSessionId + '/council/rounds/' +
+        activeCouncilRoundId + '/events/stream?after_sequence=' +
+        councilLastSequence,
+      {signal: currentController.signal}
+    );
+    if (!stream.ok) {
+      throw new Error(stream.status + ' ' + (await stream.text()).slice(0, 200));
+    }
+    const reader = stream.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let content = '';
+    while (true) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      buffer += decoder.decode(chunk.value, {stream: true});
+      const lines = buffer.split('\n');
+      buffer = lines.pop();
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const raw = line.slice(6).trim();
+        if (!raw || raw === '[DONE]') continue;
+        let event;
+        try { event = JSON.parse(raw); } catch (_) { continue; }
+        if (event.type === 'council_event') {
+          renderCouncilEvent(event.event || {});
+          thinkingDiv.textContent = activeCouncilRoundId ?
+            `Council revision ${activeCouncilRevision} is working...` : '';
+        } else if (event.type === 'content') {
+          content += event.text || '';
+          contentDiv.textContent = 'Taey: ' + content;
+        } else if (event.type === 'error') {
+          contentDiv.textContent = 'Taey: ERROR — ' + (event.text || 'unknown');
+        }
+      }
+    }
+    if (content) chatHistory.push({role:'assistant', content:content});
+    syncHistory();
+  } catch (error) {
+    if (error.name !== 'AbortError') {
+      $('#status-line').textContent = 'council stream recovery failed: ' + error;
+    }
+  } finally {
+    currentController = null;
+    $('#send-btn').textContent = activeCouncilRoundId ? 'Add thought' : 'Send';
+    $('#stop-btn').style.display = 'none';
+    if (activeCouncilRoundId) {
+      setTimeout(restoreActiveCouncil, 3000);
+    }
+  }
+}
+
 function autoResize(el) {
   el.style.height = 'auto';
   el.style.height = Math.min(el.scrollHeight, 120) + 'px';
@@ -453,33 +908,72 @@ async function sendChat() {
   const input = $('#chat-input');
   const msg = input.value.trim();
   if (!msg) return;
+  const promptCouncilOptOut = /^\s*(?:\/no-council(?=$|[\s:;,—-])|\[council:off\](?=$|[\s:;,—-])|(?:please\s+)?(?:do\s+not|don't)\s+use\s+(?:the\s+)?(?:council|dcm)\b)[\s:;,—-]*/i.test(msg);
   input.value = ''; autoResize(input);
-  chatHistory.push({role:'user', content:msg});
 
-  // Clear prediction state on send
   clearGhost();
   dismissInterrupt();
 
-  // Consume pre-fetched ISMA tiles for faster primary response
   const tiles = prefetchedTiles;
   prefetchedTiles = null;
 
   const log = $('#chat-log');
-  const userDiv = document.createElement('div');
-  userDiv.className = 'msg-user';
-  userDiv.textContent = 'You: ' + msg;
-  log.appendChild(userDiv);
+  const councilToggleEnabled = $('#use-council').checked;
+  if (activeCouncilRoundId &&
+      (promptCouncilOptOut || !councilToggleEnabled)) {
+    input.value = msg;
+    autoResize(input);
+    $('#status-line').textContent =
+      'A council round is already open; add an amendment or wait before opting out.';
+    return;
+  }
+  if (activeCouncilRoundId) {
+    try {
+      const amendment = await fetch(
+        '/api/chat/sessions/' + executiveSessionId + '/council/rounds/' +
+          activeCouncilRoundId + '/amendments',
+        {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({message: msg})
+        }
+      );
+      if (!amendment.ok) {
+        throw new Error(
+          amendment.status + ' ' + (await amendment.text()).slice(0, 200)
+        );
+      }
+      const accepted = await amendment.json();
+      activeCouncilRevision = Number(accepted.prompt_revision || activeCouncilRevision);
+      appendUserMessage(msg);
+      log.scrollTop = log.scrollHeight;
+      syncHistory();
+      return;
+    } catch (error) {
+      input.value = msg;
+      autoResize(input);
+      $('#status-line').textContent = 'amendment failed: ' + error;
+      return;
+    }
+  }
+
+  appendUserMessage(msg);
 
   const responseDiv = document.createElement('div');
   responseDiv.className = 'msg-taey';
-  responseDiv.innerHTML = '<span class="thinking">Taey is thinking...</span>';
+  const useCouncil = councilToggleEnabled && !promptCouncilOptOut;
+  responseDiv.innerHTML = useCouncil ?
+    '<span class="thinking">Council is opening...</span>' :
+    '<span class="thinking">Taey is thinking...</span>';
   log.appendChild(responseDiv);
   log.scrollTop = log.scrollHeight;
 
-  $('#send-btn').style.display = 'none';
+  $('#send-btn').style.display = useCouncil ? '' : 'none';
+  $('#send-btn').textContent = useCouncil ? 'Add thought' : 'Send';
   $('#stop-btn').style.display = '';
 
-  const useProxy = $('#use-proxy').checked && !$('#raw-mode').checked;
+  const useProxy = useCouncil ||
+    ($('#use-proxy').checked && !$('#raw-mode').checked);
   currentController = new AbortController();
 
   try {
@@ -488,11 +982,27 @@ async function sendChat() {
       {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({message: msg, use_proxy: useProxy, isma_tiles: tiles}),
+      body: JSON.stringify({
+        message: msg,
+        use_proxy: useProxy,
+        use_council: useCouncil,
+        council_opt_out: promptCouncilOptOut,
+        isma_tiles: tiles
+      }),
       signal: currentController.signal
     });
     if (!r.ok) {
       throw new Error(r.status + ' ' + (await r.text()).slice(0, 200));
+    }
+    const openedRoundId = r.headers.get('X-Taey-Council-Round-Id') || '';
+    if (openedRoundId) {
+      if (openedRoundId !== activeCouncilRoundId) {
+        councilLastSequence = 0;
+      }
+      activeCouncilRoundId = openedRoundId;
+      activeCouncilRevision = Number(
+        r.headers.get('X-Taey-Council-Prompt-Revision') || 1
+      );
     }
 
     responseDiv.innerHTML = '';
@@ -522,9 +1032,15 @@ async function sendChat() {
         if (event.type === 'thinking') {
           thinking += event.text || '';
           thinkingDiv.textContent = thinking;
+        } else if (event.type === 'council_event') {
+          renderCouncilEvent(event.event || {});
+          thinkingDiv.textContent = activeCouncilRoundId ?
+            `Council revision ${activeCouncilRevision} is working...` : '';
         } else if (event.type === 'content') {
           content += event.text || '';
           contentDiv.textContent = 'Taey: ' + content;
+        } else if (event.type === 'council_skipped') {
+          thinkingDiv.textContent = 'Council skipped by your choice.';
         } else if (event.type === 'error') {
           contentDiv.textContent = 'Taey: ERROR — ' + (event.text || 'unknown');
         }
@@ -535,20 +1051,32 @@ async function sendChat() {
     syncHistory();
   } catch(e) {
     if (e.name === 'AbortError') {
-      responseDiv.innerHTML += ' <span class="thinking">[stopped]</span>';
+      responseDiv.innerHTML += activeCouncilRoundId ?
+        ' <span class="thinking">[ledger detached; council continues]</span>' :
+        ' <span class="thinking">[stopped]</span>';
     } else {
       responseDiv.textContent = 'Taey: ERROR — ' + e;
     }
   }
   currentController = null;
   $('#send-btn').style.display = '';
+  $('#send-btn').textContent = activeCouncilRoundId ? 'Add thought' : 'Send';
   $('#stop-btn').style.display = 'none';
   log.scrollTop = log.scrollHeight;
-  refreshSoma(); // get latest stats after response
+  refreshSoma();
+  if (activeCouncilRoundId) {
+    setTimeout(restoreActiveCouncil, 3000);
+  }
 }
 
 function stopChat() {
-  if (currentController) currentController.abort();
+  if (currentController) {
+    currentController.abort();
+    if (activeCouncilRoundId) {
+      $('#status-line').textContent =
+        'ledger detached; council round continues durably';
+    }
+  }
 }
 
 $('#chat-input').addEventListener('keydown', e => {
@@ -556,8 +1084,19 @@ $('#chat-input').addEventListener('keydown', e => {
   if (e.key === 'Escape') dismissInterrupt();
 });
 $('#chat-input').addEventListener('input', e => { autoResize(e.target); debouncedPredict(); });
-$('#raw-mode').addEventListener('change', e => { if(e.target.checked) $('#use-proxy').checked=false; });
+$('#raw-mode').addEventListener('change', e => {
+  if(e.target.checked) {
+    $('#use-proxy').checked=false;
+    $('#use-council').checked=false;
+  }
+});
 $('#use-proxy').addEventListener('change', e => { if(e.target.checked) $('#raw-mode').checked=false; });
+$('#use-council').addEventListener('change', e => {
+  if(e.target.checked) {
+    $('#use-proxy').checked=true;
+    $('#raw-mode').checked=false;
+  }
+});
 
 // ── Prediction WebSocket ──
 let ws = null;
@@ -725,7 +1264,7 @@ function dismissInterrupt() {
 }
 
 connectWS();
-restoreExecutiveSession();
+restoreExecutiveSession().then(restoreActiveCouncil);
 refreshSoma();
 refreshServices();
 setInterval(refreshSoma, 2618);
@@ -1032,13 +1571,200 @@ async def chat_session_append(session_id: str, request: Request):
     return {"ok": True, "event_id": event_id}
 
 
+@app.get("/api/chat/sessions/{session_id}/council/active")
+async def chat_session_active_council(session_id: str):
+    _session_file(session_id)
+    try:
+        active = _native_council.active_round(session_id)
+    except CouncilTransportFailure as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    if active is None:
+        return {
+            "conversation_id": session_id,
+            "round_id": None,
+            "status": "idle",
+        }
+    return active
+
+
+@app.get(
+    "/api/chat/sessions/{session_id}/council/rounds/"
+    "{round_id}/events/stream"
+)
+async def chat_session_council_events(
+    session_id: str,
+    round_id: str,
+    after_sequence: int = 0,
+):
+    try:
+        ledger = _native_council.ledger(session_id, round_id)
+        ledger.opened_event()
+    except CouncilTransportFailure as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return StreamingResponse(
+        _stream_native_council(
+            session_id,
+            round_id,
+            after_sequence=max(0, after_sequence),
+        ),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Taey-Council-Round-Id": round_id,
+        },
+    )
+
+
+@app.post(
+    "/api/chat/sessions/{session_id}/council/rounds/"
+    "{round_id}/amendments"
+)
+async def chat_session_council_amendment(
+    session_id: str,
+    round_id: str,
+    request: Request,
+):
+    body = await request.json()
+    message = str(body.get("message") or "").strip()
+    if not message:
+        raise HTTPException(status_code=400, detail="amendment message is required")
+    try:
+        amendment = _native_council.amend(
+            session_id,
+            round_id,
+            message,
+        )
+    except CouncilTransportFailure as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    try:
+        _append_session_event(
+            session_id,
+            {
+                "event_type": "executive_ingress",
+                "event_id": amendment["revision_id"],
+                "correlation_id": round_id,
+                "round_id": round_id,
+                "prompt_revision": amendment["prompt_revision"],
+                "revision_id": amendment["revision_id"],
+                "source": "ui",
+                "source_id": amendment["revision_id"],
+                "kind": "user_amendment",
+                "role": "user",
+                "content": message,
+                "council_protocol": "taey-native-dcm/v1",
+            },
+        )
+    except Exception as exc:
+        _native_council.ledger(session_id, round_id).append(
+            "amendment_projection_failed",
+            prompt_revision=amendment["prompt_revision"],
+            revision_id=amendment["revision_id"],
+            error=f"{type(exc).__name__}: {exc}",
+        )
+        raise
+    return {
+        "ok": True,
+        "round_id": round_id,
+        "prompt_revision": amendment["prompt_revision"],
+        "revision_id": amendment["revision_id"],
+    }
+
+
 @app.post("/api/chat/sessions/{session_id}/messages/stream")
 async def chat_session_stream(session_id: str, request: Request):
     body = await request.json()
     message = str(body.get("message") or "")
     if not message.strip():
         raise HTTPException(status_code=400, detail="message is required")
+    prompt_opt_out, model_message = _council_prompt_opt_out(message)
+    ui_opt_out = not bool(body.get("use_council", True)) or bool(
+        body.get("council_opt_out", False)
+    )
+    use_council = not prompt_opt_out and not ui_opt_out
+    council_opt_out_source = (
+        "prompt"
+        if prompt_opt_out
+        else "ui"
+        if ui_opt_out
+        else None
+    )
     use_proxy = bool(body.get("use_proxy", True))
+    try:
+        active_council = _native_council.active_round(session_id)
+    except CouncilTransportFailure as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    if active_council is not None and not use_council:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "a council round is already open; submit an amendment "
+                "or wait before opting out"
+            ),
+        )
+    if active_council is not None:
+        amendment = None
+        try:
+            amendment = _native_council.amend(
+                session_id,
+                active_council["round_id"],
+                message,
+            )
+            _append_session_event(
+                session_id,
+                {
+                    "event_type": "executive_ingress",
+                    "event_id": amendment["revision_id"],
+                    "correlation_id": active_council["round_id"],
+                    "round_id": active_council["round_id"],
+                    "prompt_revision": amendment["prompt_revision"],
+                    "revision_id": amendment["revision_id"],
+                    "source": "ui",
+                    "source_id": amendment["revision_id"],
+                    "kind": "user_amendment",
+                    "role": "user",
+                    "content": message.strip(),
+                    "council_protocol": "taey-native-dcm/v1",
+                },
+            )
+        except CouncilTransportFailure as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except Exception as exc:
+            if amendment is not None:
+                _native_council.ledger(
+                    session_id,
+                    active_council["round_id"],
+                ).append(
+                    "amendment_projection_failed",
+                    prompt_revision=amendment["prompt_revision"],
+                    revision_id=amendment["revision_id"],
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+            raise
+        return StreamingResponse(
+            _stream_native_council(
+                session_id,
+                active_council["round_id"],
+                after_sequence=int(active_council["last_sequence"]),
+            ),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Taey-Council-Round-Id": active_council["round_id"],
+                "X-Taey-Council-Prompt-Revision": str(
+                    amendment["prompt_revision"]
+                ),
+            },
+        )
+
+    executive_context = [
+        {
+            "role": event["role"],
+            "content": str(event["content"]),
+        }
+        for event in _read_session_events(session_id)
+        if event.get("role") in {"user", "assistant"}
+        and event.get("content")
+    ][-(TAEY_SESSION_MAX_TURNS * 2):]
     event_id = uuid.uuid4().hex
     correlation_id = event_id
     _append_session_event(
@@ -1051,10 +1777,56 @@ async def chat_session_stream(session_id: str, request: Request):
             "source_id": event_id,
             "kind": "user_prompt",
             "role": "user",
-            "content": message,
-            "mode": "proxy" if use_proxy else "raw",
+            "content": message.strip(),
+            "mode": (
+                "taey-native-dcm"
+                if use_council
+                else "proxy"
+                if use_proxy
+                else "raw"
+            ),
+            "council_enabled": use_council,
+            "council_skipped_by_user": not use_council,
+            "council_opt_out_source": council_opt_out_source,
         },
     )
+    if use_council:
+        try:
+            ledger = await _native_council.start_round(
+                session_id,
+                message,
+                executive_event_id=event_id,
+                executive_context=executive_context,
+                synthesize=_synthesize_native_council,
+                record_terminal=_record_native_council_terminal,
+            )
+        except Exception as exc:
+            _append_session_event(
+                session_id,
+                {
+                    "event_type": "turn_outcome",
+                    "event_id": event_id,
+                    "correlation_id": event_id,
+                    "source": "taey-native-dcm",
+                    "source_id": event_id,
+                    "kind": "council_round_failure",
+                    "ok": False,
+                    "error": f"{type(exc).__name__}: {exc}",
+                },
+            )
+            status_code = (
+                409 if isinstance(exc, CouncilTransportFailure) else 500
+            )
+            raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+        return StreamingResponse(
+            _stream_native_council(session_id, ledger.round_id),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Taey-Council-Round-Id": ledger.round_id,
+                "X-Taey-Council-Prompt-Revision": "1",
+            },
+        )
 
     history = [
         {
@@ -1064,11 +1836,22 @@ async def chat_session_stream(session_id: str, request: Request):
         for event in _read_session_events(session_id)
         if event.get("role") in {"user", "assistant"} and event.get("content")
     ][-(TAEY_SESSION_MAX_TURNS * 2):]
+    if (
+        prompt_opt_out
+        and history
+        and history[-1].get("role") == "user"
+        and history[-1].get("content") == message.strip()
+    ):
+        history[-1] = {
+            "role": "user",
+            "content": model_message.strip(),
+        }
     upstream = THOR_PROXY if use_proxy else THOR_RAW
     payload = {
         "model": MODEL or "ep3",
         "messages": history,
         "stream": True,
+        "tools": [],
     }
     isma_tiles = body.get("isma_tiles")
     if isma_tiles:
@@ -1084,6 +1867,20 @@ async def chat_session_stream(session_id: str, request: Request):
         content_parts = []
         terminal_recorded = False
         proxy_turn_id = ""
+        yield (
+            "data: "
+            + json.dumps(
+                {
+                    "type": "council_skipped",
+                    "reason": (
+                        "prompt_choice"
+                        if prompt_opt_out
+                        else "ui_choice"
+                    ),
+                }
+            )
+            + "\n\n"
+        )
         try:
             async with _http.stream(
                 "POST",
@@ -1161,6 +1958,8 @@ async def chat_session_stream(session_id: str, request: Request):
                 "role": "assistant",
                 "content": content,
                 "ok": True,
+                "council_skipped_by_user": True,
+                "council_opt_out_source": council_opt_out_source,
             }
             if thinking_parts:
                 outcome["thinking"] = "".join(thinking_parts)

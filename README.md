@@ -70,6 +70,23 @@ FastAPI dashboard renders all of it.
   logs, and role prompts while sharing one configured proxy/model/tool path.
   The launcher does not make a deployment claim; production registration and
   concurrent-inference acceptance remain separate gates.
+- **Taey-native council transport** — `dashboard/native_council.py` opens one
+  durable round for a Main UI prompt, dispatches an independent wave to all
+  seven local seats through the fleet-notify Redis inbox contract, reveals the
+  completed packet only after that wave, requests a critique wave, and gives
+  the evidence-bearing packet to Main Taey for synthesis. The UI defaults this
+  path on and retains an explicit Council toggle for per-prompt opt-out. A
+  leading `/no-council`, `[council:off]`, or “do not use the council/DCM”
+  directive also opts out for that prompt without changing the toggle.
+  Append-only 0600 JSONL is the round source of truth; Redis holds only active
+  routing and idempotent dispatch projections. Production acceptance remains a
+  separate gate.
+- **Live, UI-safe council ledger** — open rounds stream seat-started, status,
+  evidence, hypothesis, contribution, dissent, failure, revision, and synthesis
+  events. These are structured work products and provenance, not hidden
+  token-level chain-of-thought. A message submitted while the round is open is
+  durably recorded as a revisioned `user_amendment`; stale work is marked and
+  the affected independent/critique cycle reruns before final synthesis.
 
 **Not built — do not expect it:**
 
@@ -85,6 +102,9 @@ FastAPI dashboard renders all of it.
   read-back (intra-host first) is the planned next step. Neo4j is fully optional
   in the meantime; without it the presence worker runs Redis-only. (The bigger
   cross-instance/cross-host story is further out and is **not** claimed.)
+- **The existing CLI-backed DCM is not bundled here.** The Taey-native transport
+  implements the public local-seat boundary and does not invoke, replace, or
+  modify external Claude, Codex, Gemini, or Grok transports.
 
 ## Architecture
 
@@ -126,6 +146,20 @@ fleet-notify ──claim──► taey_seat.py┘          │
                            └──HTTP──► soma_proxy.py ──► vLLM
 ```
 
+The optional Taey-native council path extends the same boundaries:
+
+```
+Main UI prompt ──► durable round ledger ──► seven fleet-notify inboxes
+                         │                           │
+                         │                  private seat JSONL outcomes
+                         │                           │
+                         └── independent reveal ◄───┘
+                                      │
+                                critique wave
+                                      │
+                         Main-only synthesis ──► main.jsonl + UI
+```
+
 ### Redis keys (the contract)
 
 | Key | Writer | Meaning |
@@ -147,13 +181,18 @@ fleet-notify ──claim──► taey_seat.py┘          │
 | `taey:<seat>:idle`, `:turns_open`, `:turn_started`, `:last_activity` | soma proxy | compatibility projections derived atomically from open-turn membership |
 | `taey:<seat>:seat_registration` | `taey_council_seat.py` | latest supporting-seat process generation, immutable role identity, private transcript, prompt-contract hash, and startup timestamp |
 | `taey:soma:active_turns`, `taey:soma:gpu_busy` | soma proxy | global leased open-turn membership and its boolean projection |
+| `taey:dcm:native:conversation:<conversation>:active_round` | native council transport | the one open durable round projected for a UI conversation |
+| `taey:dcm:native:round:<round>:dispatched` | native council transport | idempotent seat/revision/phase dispatch tokens; expires after terminal projection |
 
 ### Dashboard endpoints
 
 `GET /` and `/v2` (UI) · `GET /api/soma` · `GET /api/health` · `GET /api/fleet`
-· `POST /api/chat`, `/api/chat/stream`, `/api/chat/hybrid` · `WS /ws` · `POST
-/api/predict/push` · `GET /api/predict/state` · `GET /api/isma/search` · `GET
-/api/self/overview`.
+· `POST /api/chat`, `/api/chat/stream`, `/api/chat/hybrid` · `GET
+/api/chat/sessions/{session}/council/active` · `GET
+/api/chat/sessions/{session}/council/rounds/{round}/events/stream` · `POST
+/api/chat/sessions/{session}/council/rounds/{round}/amendments` · `WS /ws` ·
+`POST /api/predict/push` · `GET /api/predict/state` · `GET /api/isma/search` ·
+`GET /api/self/overview`.
 
 ## Requirements
 
@@ -207,6 +246,8 @@ presence/dcm_presence.py        FACE + MEMORY + THINKER workers, the async coord
 presence/prediction_worker.py   Standalone ghost-text predictor + state classifier.
 soma/mira_soma.py               Somatic telemetry daemon → taey:soma:vprop.
 dashboard/app.py                FastAPI app: UI, chat, SSE/WS, prediction push, soma/self APIs.
+dashboard/native_council.py     Durable local-seat DCM round, revision, ledger, reveal,
+                                critique, failure, and synthesis transport.
 dashboard/static/               index.html (v2 UI), console.html, hmm.html.
 serving/vllm_serve.sh           Serve a model on Jetson Thor via the pinned NVIDIA vLLM image.
 serving/soma_proxy.py           OpenAI-compatible proxy: persona injection + soma + tools.
