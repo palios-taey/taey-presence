@@ -115,6 +115,13 @@ history. Supporting outcomes carry the seat, role, event, request, correlation,
 round, and prompt-revision lineage available in the inbound envelope and remain
 `conversation_visible=false`; Main Taey is the only UI answerer.
 
+Each inference request also carries a runtime-issued `evidence_registry` containing
+the fixed role-contract hash, attributable current fleet-message IDs, and the IDs of
+prior successful outcomes in that seat's durable history. The strict response schema
+and the post-generation validator both restrict `evidence_refs` to those exact
+identifiers. An unregistered reference fails the turn, requeues its claimed mail, and
+is never acknowledged as a successful contribution.
+
 The launcher starts `taey_council_seat.py`; it does not branch Main's
 `taey_seat.py` runtime. At startup, a supporting seat atomically publishes
 `idle=1` only when its attributable
