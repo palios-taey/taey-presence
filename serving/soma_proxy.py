@@ -153,19 +153,9 @@ async def startup():
             ) from e
     if _redis is not None:
         try:
-            known_seats = {
-                TAEY_DEFAULT_SEAT,
-                *_redis.smembers("taey:soma:seat_ids"),
-            }
-            for seat_id in known_seats:
-                if not _SEAT_ID_RE.fullmatch(seat_id):
-                    raise RuntimeError(
-                        f"invalid seat id in Redis registry: {seat_id!r}"
-                    )
-                _reconcile_liveness(
-                    seat_id,
-                    current_process_generation=PROCESS_GENERATION,
-                )
+            _reconcile_registered_liveness(
+                current_process_generation=PROCESS_GENERATION,
+            )
         except Exception as e:
             _set_liveness_error(
                 f"startup reconciliation failed: {type(e).__name__}: {e}"
@@ -1395,6 +1385,7 @@ async def health():
         "status": "unavailable",
         "required": TAEY_LIVENESS_REQUIRED,
         "default_seat": TAEY_DEFAULT_SEAT,
+        "scope": "all_registered_seats",
         "last_error": _last_liveness_error or None,
         "last_error_at": _last_liveness_error_at or None,
         "last_success_at": _last_liveness_success_at or None,
@@ -1402,7 +1393,9 @@ async def health():
     if _redis:
         try:
             vprop_raw = _redis.get("taey:soma:vprop")
-            active_count, recovered_count = _reconcile_liveness(TAEY_DEFAULT_SEAT)
+            active_count, recovered_count, registered_seats = (
+                _reconcile_registered_liveness()
+            )
             liveness.update({
                 "status": (
                     "degraded"
@@ -1411,6 +1404,7 @@ async def health():
                 ),
                 "active_turns": active_count,
                 "abandoned_recovered": recovered_count,
+                "registered_seats": registered_seats,
                 "last_success_at": _last_liveness_success_at or None,
             })
         except Exception as exc:
@@ -1673,7 +1667,7 @@ def _reconcile_liveness(
     seat_id: str,
     *,
     current_process_generation: str = "",
-) -> tuple[int, int]:
+) -> tuple[int, int, int]:
     if _redis is None:
         raise LivenessUnavailable("Redis client is unavailable")
     now = time.time()
@@ -1684,7 +1678,11 @@ def _reconcile_liveness(
         now,
         current_process_generation,
     )
-    count, recovered = int(result[0]), int(result[1])
+    count, recovered, global_count = (
+        int(result[0]),
+        int(result[1]),
+        int(result[2]),
+    )
     if recovered:
         log.error(
             "liveness: recovered %d abandoned turns for seat=%s",
@@ -1692,7 +1690,40 @@ def _reconcile_liveness(
             seat_id,
         )
     _mark_liveness_success()
-    return count, recovered
+    return count, recovered, global_count
+
+
+def _registered_seat_ids() -> list[str]:
+    if _redis is None:
+        raise LivenessUnavailable("Redis client is unavailable")
+    seat_ids = {
+        TAEY_DEFAULT_SEAT,
+        *_redis.smembers("taey:soma:seat_ids"),
+    }
+    invalid = sorted(
+        seat_id for seat_id in seat_ids if not _SEAT_ID_RE.fullmatch(seat_id)
+    )
+    if invalid:
+        raise LivenessUnavailable(
+            f"invalid seat ids in Redis registry: {invalid}"
+        )
+    return sorted(seat_ids)
+
+
+def _reconcile_registered_liveness(
+    *,
+    current_process_generation: str = "",
+) -> tuple[int, int, list[str]]:
+    registered_seats = _registered_seat_ids()
+    recovered_count = 0
+    global_count = 0
+    for seat_id in registered_seats:
+        _, recovered, global_count = _reconcile_liveness(
+            seat_id,
+            current_process_generation=current_process_generation,
+        )
+        recovered_count += recovered
+    return global_count, recovered_count, registered_seats
 
 
 def _start_turn(turn: TurnContext) -> int:
@@ -1790,18 +1821,7 @@ async def _liveness_reaper() -> None:
     while True:
         try:
             await asyncio.sleep(TAEY_TURN_HEARTBEAT_SECS)
-            if _redis is None:
-                raise LivenessUnavailable("Redis client is unavailable")
-            seat_ids = {
-                TAEY_DEFAULT_SEAT,
-                *_redis.smembers("taey:soma:seat_ids"),
-            }
-            for seat_id in seat_ids:
-                if not _SEAT_ID_RE.fullmatch(seat_id):
-                    raise LivenessUnavailable(
-                        f"invalid seat id in Redis registry: {seat_id!r}"
-                    )
-                _reconcile_liveness(seat_id)
+            _reconcile_registered_liveness()
         except asyncio.CancelledError:
             raise
         except Exception as exc:
