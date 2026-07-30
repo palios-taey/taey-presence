@@ -367,21 +367,21 @@ async def _stream_native_council(
     ledger = _native_council.ledger(conversation_id, round_id)
     sequence = max(0, after_sequence)
     while True:
+        terminal = ledger.terminal_event()
+        terminal_payload = _native_council_terminal_payload(terminal)
+        if (
+            terminal_payload is not None
+            and int(terminal.get("sequence") or 0) <= sequence
+        ):
+            yield (
+                "data: "
+                + json.dumps(terminal_payload, ensure_ascii=False)
+                + "\n\n"
+            )
+            yield "data: [DONE]\n\n"
+            return
         events = ledger.events(sequence)
         if not events:
-            terminal = ledger.terminal_event()
-            terminal_payload = _native_council_terminal_payload(terminal)
-            if (
-                terminal_payload is not None
-                and int(terminal.get("sequence") or 0) <= sequence
-            ):
-                yield (
-                    "data: "
-                    + json.dumps(terminal_payload, ensure_ascii=False)
-                    + "\n\n"
-                )
-                yield "data: [DONE]\n\n"
-                return
             await asyncio.sleep(TAEY_COUNCIL_POLL_INTERVAL)
             continue
         for event in events:
