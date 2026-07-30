@@ -689,7 +689,7 @@ TOOLS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "command": {"type": "string", "description": "The shell command, e.g. 'git -C /home/mira/infra-soul status --short' or 'taey-task list'."},
+                    "command": {"type": "string", "description": "The shell command, e.g. 'git status --short' or 'taey-task list'."},
                     "cwd": {"type": "string", "description": "Absolute working directory. Defaults to the home directory."},
                     "timeout_seconds": {"type": "integer", "description": "Max seconds to wait (default 120, cap 900). A long build or training run should be started in the background rather than waited on."},
                 },
@@ -1005,7 +1005,11 @@ def execute_tool_call(name: str, arguments: dict) -> str:
 # are readable. Default is empty: the file-read tools are OFF until you opt in by setting
 # TAEY_READ_ALLOWED_PREFIXES (colon-separated absolute prefixes) to the corpus/doc dirs you
 # want the model to be able to read. Keep this tight -- it is the read sandbox boundary.
-_DEFAULT_READ_ALLOWED_PREFIXES = ("/home/mira", "/home/jetson", "/home/thor", "/tmp")
+# The default is genuinely EMPTY, matching the comment above. It previously listed one operator's
+# three home directories, so the sandbox failed OPEN to hardcoded paths while documenting itself as
+# fail-closed — and a fresh install inherited another machine's layout as its read boundary. Both
+# production proxies set TAEY_READ_ALLOWED_PREFIXES explicitly, so nothing running changes.
+_DEFAULT_READ_ALLOWED_PREFIXES: tuple[str, ...] = ()
 _env_allow = os.environ.get("TAEY_READ_ALLOWED_PREFIXES", "").strip()
 READ_ALLOWED_PREFIXES = tuple(_env_allow.split(":")) if _env_allow else _DEFAULT_READ_ALLOWED_PREFIXES
 
@@ -1066,7 +1070,9 @@ def _do_read_file(path: str, max_chars: int = 30000) -> str:
 # TAEY_TOOL_AUDIT so there is a durable record of what Taey did and when. That is a
 # cannot-lie requirement, not a limit on capability — the fleet holds every seat to it.
 # ---------------------------------------------------------------------------
-TOOL_AUDIT_PATH = os.environ.get("TAEY_TOOL_AUDIT", "/home/mira/taey_tool_audit.jsonl")
+TOOL_AUDIT_PATH = os.environ.get(
+    "TAEY_TOOL_AUDIT", os.path.join(os.path.expanduser("~"), "taey_tool_audit.jsonl")
+)
 
 
 def _audit(tool: str, detail: dict) -> None:

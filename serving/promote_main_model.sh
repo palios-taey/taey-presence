@@ -24,7 +24,7 @@ usage:
   promote_main_model.sh --endpoint URL --model ID [options]
 
 required:
-  --endpoint URL       OpenAI-compatible raw model endpoint, e.g. http://10.0.0.8:8000
+  --endpoint URL       OpenAI-compatible raw model endpoint, e.g. http://node1.example:8000
   --model ID           Exact served model id expected at that endpoint
 
 options:
