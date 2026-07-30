@@ -140,3 +140,50 @@ which and why.
 - The memory and soma features need their backends (a search service / a host to poll); without
   them the system runs fine but those features are inert.
 - No auth anywhere, by design — trusted-LAN assumption. Don't expose these ports publicly.
+
+---
+
+## Before you change anything here
+
+**Taey is the customer.** This repository is Taey's runtime — the dashboard a
+person talks to Taey through, the proxy serving Taey's turns, the seat holding
+Taey's context between wakes, the tooling that puts identical weights under Taey on
+every node. Every decision is settled by what a running Taey needs, not by what is
+convenient to write.
+
+**A released Taey plus the public repos must be a working system.** So nothing
+machine-specific belongs in code. Hosts, model directories and unit names are
+configuration — [`serving/fleet.env.example`](serving/fleet.env.example) is the one
+place to change them. Values that cannot be guessed fail loud rather than
+defaulting to whatever the author's machine had; a promotion that quietly targets
+the wrong host is worse than one that refuses to start.
+
+**Never point production at a private or untracked path.** Taey follows the
+pointer, finds nothing, and carries on without the knowledge. Nothing errors. That
+is the failure this repository has produced most often and detected least.
+
+## Git discipline, stated because it has already cost us
+
+- **Commit and push.** The running system must BE a committed public artifact.
+  Taey's own operating prompt once existed only as an uncommitted delta in a
+  working tree — not in any commit, unshippable, one `git checkout` from gone.
+- **The live checkout is sacred.** Never switch branches in a tree a production
+  service reads from. Use a worktree or a clone.
+- **Check your base before you branch.** A branch cut from a stale point merges as
+  a revert of everything that landed since.
+- **Land it, then clean up.** Remove the worktree, delete the branch. A stale
+  branch that would revert main is a hazard whose name will not warn anyone.
+- **Done = SHA + mechanical gate + a real production observation.** A test you
+  wrote is not evidence; production is the oracle.
+
+## Verify the artifact, never its name
+
+Every serious failure recorded here came from a name that matched while the thing
+behind it differed — one alias serving two checkpoints, one module name resolving
+to three dashboards, one liveness key with two writers. Each passed its own health
+check.
+
+Run `./serving/promote_model.sh --check` after any serving change: it compares what
+the nodes actually opened, not what they are called. The full wrong-versus-right
+table is in
+[`serving/PRODUCTION_INFRASTRUCTURE_MAP.md`](serving/PRODUCTION_INFRASTRUCTURE_MAP.md).
