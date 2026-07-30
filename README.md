@@ -17,6 +17,12 @@ FastAPI dashboard renders all of it.
 > **To launch it, read [`CLAUDE.md`](CLAUDE.md)** — the step-by-step bring-up
 > guide written for you (decision tree, verify-after-each-step, the real failure
 > modes, success criteria). It's what gets this running on a new machine.
+>
+> **Production reconciliation status:** the
+> [Taey v2 preservation gate](docs/TAEY_V2_PRESERVATION_GATE_20260730.md)
+> records the verified recovery boundary between the live supporting seats,
+> the established served UI, and the JSONL council transport that must be
+> replaced by real Neo4j-backed DCM.
 
 ## What it actually does (honest scope)
 
