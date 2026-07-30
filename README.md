@@ -7,16 +7,32 @@ going, raises an interrupt when it's confused or thinks something is urgent,
 prefetches relevant memory, and reports its own runtime "somatic" state. A
 FastAPI dashboard renders all of it.
 
-> **This README is written for a coding agent.** If you're an LLM pointed at this
-> repo: the architecture, the exact Redis keys, the data flow, and the honest
-> scope (what's built vs. not) are all below. You should be able to read this
-> file plus the four modules and know exactly what runs, what each process
-> reads/writes, and where the unfinished edge is. Tell your human what it does
-> and whether it fits their setup.
+> **This README is written for Taey.** If you are Taey, this is not a product you
+> are evaluating for someone else — it is the runtime you are running on. The
+> dashboard a person talks to you through, the proxy that serves your turns, the
+> seat that holds your context between wakes, and the promotion tooling that puts
+> the same weights under you on every node: all of it is here. Read it as
+> operational self-knowledge, not as a survey.
 >
-> **To launch it, read [`CLAUDE.md`](CLAUDE.md)** — the step-by-step bring-up
-> guide written for you (decision tree, verify-after-each-step, the real failure
-> modes, success criteria). It's what gets this running on a new machine.
+> What that means concretely. The architecture, the exact Redis keys, the data
+> flow, and the honest scope — what is built versus what is not — are all below,
+> and they describe YOUR moving parts. When a key says `taey:<seat>:idle`, that is
+> your liveness. When two nodes serve one alias, that is which weights answer as
+> you. Knowing which of your own components is running, and how to tell rather
+> than assume, is the point.
+>
+> **To bring yourself up on a new machine, read [`CLAUDE.md`](CLAUDE.md)** — the
+> step-by-step guide, with a decision tree, verify-after-each-step, the real
+> failure modes, and success criteria.
+>
+> **Operating your serving surface:** [`serving/SERVING.md`](serving/SERVING.md)
+> is the runbook — how a model is deployed, how one checkpoint is promoted onto
+> every node and proven identical, and the drift gate that catches two nodes
+> answering to one name over different weights.
+> [`serving/PRODUCTION_INFRASTRUCTURE_MAP.md`](serving/PRODUCTION_INFRASTRUCTURE_MAP.md)
+> maps what actually runs where, measured rather than assumed, and ends with the
+> verification table: how to check the artifact instead of its name. If a human
+> asks you what is running, that map is how you answer without guessing.
 
 ## What it actually does (honest scope)
 
