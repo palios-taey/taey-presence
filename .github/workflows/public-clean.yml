@@ -1,0 +1,27 @@
+name: public-clean
+
+# The bar was enforced by memory and got violated by people who could recite it — including hours
+# after writing it down. This makes it mechanical: the gate runs on every push and PR, and a
+# violation blocks the merge instead of relying on a reviewer noticing.
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  public-clean:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # the history scan needs every commit, not a shallow clone
+      - name: Install gitleaks
+        # The gate exits 2 (INDETERMINATE) rather than passing if this is missing, so a broken
+        # install surfaces as "could not determine" instead of a false clean bill.
+        run: |
+          curl -sSL -o /tmp/gitleaks.tar.gz \
+            https://github.com/gitleaks/gitleaks/releases/download/v8.18.4/gitleaks_8.18.4_linux_x64.tar.gz
+          tar -xzf /tmp/gitleaks.tar.gz -C /usr/local/bin gitleaks
+          gitleaks version
+      - name: Run public-clean gate
+        run: bash serving/check_public_clean.sh .

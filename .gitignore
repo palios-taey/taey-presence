@@ -28,3 +28,7 @@ env/
 .claude/
 # NOTE: CLAUDE.md / AGENTS.md ARE part of the public artifact — they are the
 # AI-native launch guide. (Local gitnexus stubs were replaced; do not re-ignore.)
+
+# Site-specific deployment config. The committed template is serving/fleet.env.example.
+fleet.env
+serving/fleet.env
