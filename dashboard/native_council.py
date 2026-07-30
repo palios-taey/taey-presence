@@ -1090,6 +1090,8 @@ class NativeCouncilTransport:
         pending = {seat.seat_id: seat for seat in COUNCIL_SEATS}
         contributions: list[dict[str, Any]] = []
         failures: list[dict[str, Any]] = []
+        retry_failures: dict[str, dict[str, Any]] = {}
+        observed_failed_outcomes: dict[str, tuple[Any, str]] = {}
         while pending and time.monotonic() < deadline:
             latest_revision = ledger.latest_revision()
             if latest_revision > prompt_revision:
@@ -1125,7 +1127,6 @@ class NativeCouncilTransport:
                 )
                 if outcome is None:
                     continue
-                pending.pop(seat_id)
                 if outcome.get("ok") is not True:
                     failure = {
                         "seat_id": seat.seat_id,
@@ -1135,14 +1136,25 @@ class NativeCouncilTransport:
                             or "seat returned a failed durable outcome"
                         ),
                     }
-                    failures.append(failure)
-                    ledger.append(
-                        "seat_failed",
-                        phase=phase,
-                        prompt_revision=prompt_revision,
-                        **failure,
+                    retry_failures[seat_id] = failure
+                    marker = (
+                        outcome.get("recorded_at") or outcome.get("ts"),
+                        failure["reason"],
                     )
+                    if observed_failed_outcomes.get(seat_id) != marker:
+                        observed_failed_outcomes[seat_id] = marker
+                        ledger.append(
+                            "seat_status",
+                            phase=phase,
+                            prompt_revision=prompt_revision,
+                            seat_id=seat.seat_id,
+                            role_id=seat.role_id,
+                            status="retrying",
+                            outcome_event_id=outcome.get("event_id"),
+                            error=failure["reason"],
+                        )
                     continue
+                pending.pop(seat_id)
                 try:
                     contribution = self._record_contribution(
                         ledger,
@@ -1169,11 +1181,15 @@ class NativeCouncilTransport:
             if pending:
                 await asyncio.sleep(self.poll_interval)
         for seat in pending.values():
+            prior_failure = retry_failures.get(seat.seat_id)
             failure = {
                 "seat_id": seat.seat_id,
                 "role_id": seat.role_id,
                 "reason": (
-                    f"no durable {phase} outcome within "
+                    f"{prior_failure['reason']}; retry deadline exceeded "
+                    f"after {self.wave_timeout:.1f}s"
+                    if prior_failure
+                    else f"no durable {phase} outcome within "
                     f"{self.wave_timeout:.1f}s"
                 ),
             }
