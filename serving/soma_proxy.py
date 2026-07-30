@@ -38,6 +38,10 @@ logging.basicConfig(
 log = logging.getLogger("soma_proxy")
 
 VLLM_BASE = os.environ.get("VLLM_BASE_URL", "http://127.0.0.1:8000")
+VLLM_REQUEST_TIMEOUT_SECS = max(
+    1.0,
+    float(os.environ.get("VLLM_REQUEST_TIMEOUT_SECS", "1800")),
+)
 REDIS_HOST = os.environ.get("REDIS_HOST", "127.0.0.1")
 REDIS_PORT = int(os.environ.get("REDIS_PORT", "6379"))
 MIRA_REDIS_HOST = os.environ.get("MIRA_REDIS_HOST", "")
@@ -132,7 +136,10 @@ async def startup():
     global _redis, _mira_redis, _http, _ecosystem_http
     global _permanent_kernel, _static_system_prefix, _system_prompt
     global _liveness_reaper_task
-    _http = httpx.AsyncClient(base_url=VLLM_BASE, timeout=300.0)
+    _http = httpx.AsyncClient(
+        base_url=VLLM_BASE,
+        timeout=VLLM_REQUEST_TIMEOUT_SECS,
+    )
     _ecosystem_http = httpx.Client(timeout=3.0)
     try:
         _redis = redis.Redis(

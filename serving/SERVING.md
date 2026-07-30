@@ -239,6 +239,7 @@ For other model families, set the parsers your model expects.
 | env | default | meaning |
 |-----|---------|---------|
 | `VLLM_BASE_URL` | `http://127.0.0.1:8000` | the raw vLLM endpoint to front |
+| `VLLM_REQUEST_TIMEOUT_SECS` | `1800` | upstream inference timeout; aligned with council-seat and wave deadlines |
 | `PROXY_PORT` | `8765` | port the proxy serves on |
 | `SYSTEM_PROMPT_PATH` | `serving/persona.example.md` | persona file injected as the system prefix |
 | `PERMANENT_KERNEL_PATH` | *(empty)* | optional file prepended ahead of the persona |
@@ -250,6 +251,14 @@ For other model families, set the parsers your model expects.
 | `TAEY_LIVENESS_REQUIRED` | `1` | refuse proxy startup/turn admission when Redis cannot provide attributable liveness |
 | `TAEY_TURN_LEASE_SECS` | `120` | active-turn lease; expiry is archived as an abandoned turn |
 | `TAEY_TURN_HEARTBEAT_SECS` | `30` | lease-renewal interval, capped at one-third of the lease |
+
+`VLLM_REQUEST_TIMEOUT_SECS`, the dashboard's `TAEY_COUNCIL_WAVE_TIMEOUT`,
+and each worker's `TAEY_SEAT_TIMEOUT` all default to 1800 seconds. Keep these
+three deadlines aligned when overriding them. When an amendment supersedes an
+active council wave, the coordinator records each old-revision contribution as
+stale and waits for every dispatched request to drain before sending the
+replacement revision. A wave that cannot drain by the common deadline fails the
+round instead of overlapping revisions on the shared model.
 
 Redis is required by default because a proxy that serves while unable to report
 concurrent open turns is unsafe for fleet wake routing. Set
