@@ -601,7 +601,7 @@ class NativeCouncilTransport:
         *,
         key_prefix: str = "taey",
         council_log_dir: Path | None = None,
-        wave_timeout: float = 600.0,
+        wave_timeout: float = 1800.0,
         poll_interval: float = 0.25,
     ):
         self.redis = redis_client
@@ -1108,31 +1108,43 @@ class NativeCouncilTransport:
         failures: list[dict[str, Any]] = []
         retry_failures: dict[str, dict[str, Any]] = {}
         observed_failed_outcomes: dict[str, tuple[Any, str]] = {}
-        while pending and time.monotonic() < deadline:
-            latest_revision = ledger.latest_revision()
-            if latest_revision > prompt_revision:
-                for contribution in contributions:
-                    ledger.append(
-                        "contribution_stale",
-                        phase=phase,
-                        prompt_revision=prompt_revision,
-                        latest_prompt_revision=latest_revision,
-                        seat_id=contribution["seat_id"],
-                        role_id=contribution["role_id"],
-                    )
+        superseded_revision: int | None = None
+        stale_seats: set[str] = set()
+
+        def observe_supersession(latest_revision: int) -> None:
+            nonlocal superseded_revision
+            if latest_revision <= prompt_revision:
+                return
+            first_observation = superseded_revision is None
+            superseded_revision = max(
+                latest_revision,
+                superseded_revision or latest_revision,
+            )
+            for contribution in contributions:
+                seat_id = str(contribution["seat_id"])
+                if seat_id in stale_seats:
+                    continue
+                ledger.append(
+                    "contribution_stale",
+                    phase=phase,
+                    prompt_revision=prompt_revision,
+                    latest_prompt_revision=superseded_revision,
+                    seat_id=seat_id,
+                    role_id=contribution["role_id"],
+                )
+                stale_seats.add(seat_id)
+            if first_observation:
                 ledger.append(
                     "wave_superseded",
                     phase=phase,
                     prompt_revision=prompt_revision,
-                    latest_prompt_revision=latest_revision,
+                    latest_prompt_revision=superseded_revision,
                     completed_seats=len(contributions),
                     pending_seats=sorted(pending),
                 )
-                return {
-                    "superseded": True,
-                    "contributions": contributions,
-                    "failures": failures,
-                }
+
+        while pending and time.monotonic() < deadline:
+            observe_supersession(ledger.latest_revision())
             for seat_id, seat in list(pending.items()):
                 request = requests[seat_id]
                 outcome = self._matching_outcome(
@@ -1194,6 +1206,17 @@ class NativeCouncilTransport:
                     )
                     continue
                 contributions.append(contribution)
+                if superseded_revision is not None:
+                    ledger.append(
+                        "contribution_stale",
+                        phase=phase,
+                        prompt_revision=prompt_revision,
+                        latest_prompt_revision=superseded_revision,
+                        seat_id=contribution["seat_id"],
+                        role_id=contribution["role_id"],
+                    )
+                    stale_seats.add(str(contribution["seat_id"]))
+            observe_supersession(ledger.latest_revision())
             if pending:
                 await asyncio.sleep(self.poll_interval)
         for seat in pending.values():
@@ -1216,6 +1239,35 @@ class NativeCouncilTransport:
                 prompt_revision=prompt_revision,
                 **failure,
             )
+        if superseded_revision is not None:
+            if pending:
+                ledger.append(
+                    "superseded_wave_drain_failed",
+                    phase=phase,
+                    prompt_revision=prompt_revision,
+                    latest_prompt_revision=superseded_revision,
+                    contribution_count=len(contributions),
+                    failure_count=len(failures),
+                    missing_seats=sorted(pending),
+                )
+                raise CouncilTransportFailure(
+                    f"superseded {phase} wave revision {prompt_revision} "
+                    f"did not drain within {self.wave_timeout:.1f}s; "
+                    f"pending seats: {', '.join(sorted(pending))}"
+                )
+            ledger.append(
+                "superseded_wave_drained",
+                phase=phase,
+                prompt_revision=prompt_revision,
+                latest_prompt_revision=superseded_revision,
+                contribution_count=len(contributions),
+                failure_count=len(failures),
+            )
+            return {
+                "superseded": True,
+                "contributions": contributions,
+                "failures": failures,
+            }
         ledger.append(
             "wave_completed",
             phase=phase,

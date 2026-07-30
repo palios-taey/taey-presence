@@ -81,7 +81,7 @@ TAEY_SESSION_MAX_TURNS = max(
 )
 TAEY_COUNCIL_WAVE_TIMEOUT = max(
     1.0,
-    float(os.environ.get("TAEY_COUNCIL_WAVE_TIMEOUT", "600")),
+    float(os.environ.get("TAEY_COUNCIL_WAVE_TIMEOUT", "1800")),
 )
 TAEY_COUNCIL_POLL_INTERVAL = max(
     0.05,
