@@ -202,6 +202,36 @@ class CouncilEventStore(executive.EventStore):
         )
         return [{"role": "system", "content": contract}, *messages]
 
+    def evidence_registry(
+        self,
+        claims: list[executive.ClaimedMessage],
+        event_id: str,
+    ) -> list[str]:
+        references = [f"role_contract:{self.prompt_contract_sha256}"]
+        history_references: list[str] = []
+        for event in self._read_events():
+            if (
+                event.get("event_type") == "turn_outcome"
+                and event.get("ok")
+                and event.get("context_visible") is not False
+            ):
+                prior_event_id = str(event.get("event_id") or "")
+                if prior_event_id:
+                    history_references.append(
+                        "history_event:"
+                        f"{executive._safe_trace_id(prior_event_id, event_id)}"
+                    )
+        references.extend(history_references[-self.max_turns :])
+        if claims:
+            references.extend(
+                "fleet_message:"
+                f"{executive._safe_trace_id(claim.message_id, event_id)}"
+                for claim in claims
+            )
+        else:
+            references.append(f"operator_probe:{event_id}")
+        return list(dict.fromkeys(references))
+
 
 def _response_lineage(
     claims: list[executive.ClaimedMessage],
@@ -260,6 +290,7 @@ def _prompt_for(
             "request_id",
             "response_contract",
             "prompt_revision",
+            "evidence_registry",
             "council_run_id",
             "round_id",
         )
@@ -287,9 +318,12 @@ def _contribution_response_format(lineage: dict[str, Any]) -> dict[str, Any]:
         "confidence": {"type": "number", "minimum": 0, "maximum": 1},
     }
     for field_name in CONTRIBUTION_LIST_FIELDS:
+        item_schema: dict[str, Any] = {"type": "string", "minLength": 1}
+        if field_name == "evidence_refs":
+            item_schema["enum"] = lineage["evidence_registry"]
         properties[field_name] = {
             "type": "array",
-            "items": {"type": "string", "minLength": 1},
+            "items": item_schema,
         }
     return {
         "type": "json_schema",
@@ -364,6 +398,14 @@ def _validated_contribution(
                 f"{RESPONSE_CONTRACT} {field_name} must be an array "
                 "of non-empty strings"
             )
+    unregistered_evidence = sorted(
+        set(contribution["evidence_refs"]) - set(lineage["evidence_registry"])
+    )
+    if unregistered_evidence:
+        raise executive.SeatFailure(
+            f"{RESPONSE_CONTRACT} evidence_refs are not registered: "
+            f"{unregistered_evidence}"
+        )
     recommendation = contribution["recommendation"]
     if not isinstance(recommendation, str) or not recommendation.strip():
         raise executive.SeatFailure(
@@ -448,6 +490,7 @@ def _run_turn(
         correlation_id,
         store.prompt_contract_sha256,
     )
+    lineage["evidence_registry"] = store.evidence_registry(claims, event_id)
     prompt = _prompt_for(text, claims, lineage)
     message_ids = [claim.message_id for claim in claims]
     store.append(

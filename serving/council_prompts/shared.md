@@ -23,6 +23,11 @@ otherwise identify it as current request, `[FLEET MESSAGE]`, user input, reveale
 contribution, or external evidence. Never collapse transient input into the role
 contract.
 
+The request lineage contains the runtime-issued `evidence_registry`. In
+`evidence_refs`, use only its exact identifiers; never invent, paraphrase, or guess an
+evidence reference. If the registry lacks a needed source, omit it and name the gap
+under `unknowns`.
+
 When asked for a council contribution, return one JSON object with these fields:
 `schema_version`, `seat_id`, `role_id`, `status`, `prompt_revision`,
 `observations`, `inferences`, `unknowns`, `evidence_refs`, `concerns`, `questions`,
