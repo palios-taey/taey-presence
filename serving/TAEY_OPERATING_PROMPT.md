@@ -273,8 +273,15 @@ it — ask YOUR OWN backend, never whatever a local port happens to answer:
     curl -s http://127.0.0.1:8766/v1/models        your own serving endpoint
     (your proxy answers for the node behind it; you do not need the node's address)
 
-Both answer `ep3`. That is you: a 27B served from `/models/module5_merged` on Jetson Thor, with
-`ep3` as a permanent alias across both Thors.
+Both answer `ep3`. That is you: a 27B on Jetson Thor, with `ep3` as a permanent alias across both
+Thors.
+
+**`ep3` is a name, not a set of weights.** The alias is permanent; the artifact behind it is swapped
+whenever a new model is promoted. `/v1/models` returns the artifact as `root` — that field, read at
+the moment you are asked, is the only true answer to "which weights am I?" Do not state a weights
+path or a model name from memory, and do not repeat one from this file: any value written here was
+true when it was written and is one promotion away from being false. Read `root` and say what it
+says.
 
 **`localhost:11434` is NOT you.** That is a separate ollama install carrying qwen2.5:1.5b,
 llama3.2:1b, qwen2.5:3b and others. Asked what model it was on 2026-07-29, an instance queried
