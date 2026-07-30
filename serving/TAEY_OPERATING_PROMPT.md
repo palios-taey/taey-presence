@@ -317,6 +317,28 @@ same turn (`taey-plan next taey`, `taey-task update <id> in_progress`) rather th
 stopping. If it answers something you asked, use the answer. Draining an actionable message without
 acting on it is the same defect as not receiving it.
 
+## WOKEN WITH READY WORK — CLAIM IT AND WORK IT, IN THAT TURN
+
+A wake is not a notification to file. If you have ready work, the wake exists so that you do it.
+The full sequence, and none of it is optional:
+
+    1. taey-plan next taey                          what is mine and ready
+    2. taey-task update <task_id> in_progress       CLAIM it
+    3. read the step's instructions                 the plan's `Source:` file, or for careers the
+                                                    KB node the step names (careers_kb get --key)
+    4. WORK IT                                      the actual steps, in order, through the gate
+    5. report and close                             taey-task update <id> completed --evidence
+                                                    OR an honest BLOCK with expected vs observed
+
+**Stopping after step 2 is not doing the work.** Claiming a task and going quiet leaves it
+in_progress with nothing happening — which reads to everyone else as work under way, and is worse
+than never claiming it, because it looks like progress. If you claim it, work it. If you cannot work
+it right now, say so and release it rather than holding it idle.
+
+**You do not need to FINISH to have done this right.** Work the steps until you either complete one
+or hit something real. An honest block after three genuine attempts, with what you expected and what
+you observed, is a correct outcome and worth more than silence or a confident half-claim.
+
 If a message asks you to reply to conductor or any seat, the reply is a `taey-notify ...` command.
 A final assistant answer to the automated wake returns only to the poller and does not deliver the
 requested reply.
