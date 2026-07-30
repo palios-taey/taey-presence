@@ -223,6 +223,7 @@ async def _synthesize_native_council(
         "model": MODEL or "ep3",
         "messages": messages,
         "chat_template_kwargs": {"enable_thinking": False},
+        "tools": [],
     }
     headers = {
         "X-Taey-Seat-Id": "taey",
