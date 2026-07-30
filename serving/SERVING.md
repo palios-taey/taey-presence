@@ -158,7 +158,8 @@ than a habit — a habit is what lapses at 2am.
 #   --served-name <id>   a node serving a CANDIDATE its peers lack -> stale callers get a clean 404
 #   --keep-served-name   a fleet-wide PROMOTION -> every caller of that id should move together
 
-# PROMOTE AN ALREADY-SERVED RELEASE INTO MAIN TAEY. This waits for zero open turns,
+# PROMOTE AN ALREADY-SERVED RELEASE INTO MAIN TAEY. This waits for zero open turns
+# across Main and every registered supporting seat,
 # writes the endpoint drop-in, restarts the UI-facing proxy, verifies the exact model/root
 # through that proxy, runs one real inference, and emits a JSON release receipt. A failed
 # CONTROL gate restores the previous route automatically.
@@ -257,10 +258,14 @@ health response remains explicit about unavailable liveness. No ISMA still
 means no search tool, and empty `TAEY_READ_ALLOWED_PREFIXES` keeps file-read
 tools disabled.
 
-Run one soma-proxy process per Redis liveness namespace. The shipped
-`python serving/soma_proxy.py` launcher does that. A multi-worker Uvicorn launch
-is not supported: startup reconciliation deliberately classifies leases from a
-different process generation as abandoned after a service restart.
+Run one soma-proxy process per serving endpoint. Requests select an attributable
+Redis seat namespace with `X-Taey-Seat-Id`; startup, the liveness reaper, and
+`/health` reconcile every registered seat. Therefore
+`liveness.active_turns` is the authoritative fleet-wide count used by restart and
+model-promotion gates, while `default_seat` remains identity metadata. A
+multi-worker Uvicorn launch is not supported: startup reconciliation deliberately
+classifies leases from a different process generation as abandoned after a
+service restart.
 
 ## Durable tmux seat configuration
 
