@@ -66,7 +66,10 @@ def build_receipt(cap: dict, compiled_at_commit: str, section: str) -> dict:
             "probe_cmd": cap["liveness"]["probe_cmd"],
             "expect": cap["liveness"]["expect"],
         },
-        "index_entry_ref": f"sections.{section}.capabilities[{cap['id']}]",
+        # v2.4.1 canonical: sections.<section>.capabilities.<surface_id> — dot-separated,
+        # no brackets, no prefix. The format was previously UNDEFINED, so this compiler and
+        # the checker each invented a dialect and mismatched on every honest receipt.
+        "index_entry_ref": f"sections.{section}.capabilities.{cap['id']}",
         # The head THIS compiler read. v2.4: NOT the index's generated_at_commit —
         # R2 requires only ancestor-or-equal to pinned_sha.
         "compiled_at_commit": compiled_at_commit,
