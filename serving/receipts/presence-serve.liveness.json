@@ -1,7 +1,7 @@
 {
   "artifact_commit_sha": "34823a643428b5a0c93086ecd2c9231b4b1eac28",
   "artifact_manifest_sha256": "8acbd68c973a601d4e9657554ce99ac5e6081807b85e27e0367bf3c3dda579d4",
-  "compiled_at_commit": "34823a643428b5a0c93086ecd2c9231b4b1eac28",
+  "compiled_at_commit": "6d7abcd2ec540b1f27d9ae00080fb1de02acd139",
   "gates_manifest_ref": "serving/gates_manifest.json",
   "index_entry_ref": "sections.presence.capabilities[presence-serve]",
   "liveness": {

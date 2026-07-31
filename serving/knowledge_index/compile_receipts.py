@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -35,7 +36,20 @@ def canonical_bytes(obj) -> bytes:
                       ensure_ascii=False).encode("utf-8")
 
 
-def build_receipt(cap: dict, generated_at_commit: str, section: str) -> dict:
+def head_commit() -> str:
+    """The head THIS COMPILER read (spec v2.4 §3).
+
+    Not the index's generated_at_commit. v2.4 dropped that equality after it was proven
+    unsatisfiable: receipts must be fetchable at pinned_sha, so they are committed BEFORE
+    the index build head exists, so they cannot contain that head's sha. R2 now requires
+    only that this value be an ancestor of (or equal to) pinned_sha — which the compile-
+    then-commit-then-build order satisfies in a single pass.
+    """
+    return subprocess.run(["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"],
+                          capture_output=True, text=True, timeout=30).stdout.strip()
+
+
+def build_receipt(cap: dict, compiled_at_commit: str, section: str) -> dict:
     """Every field is DERIVED from the index entry. Nothing here is authored."""
     return {
         "receipt_version": 2,
@@ -54,7 +68,7 @@ def build_receipt(cap: dict, generated_at_commit: str, section: str) -> dict:
         },
         "index_entry_ref": f"sections.{section}.capabilities[{cap['id']}]",
         # MUST equal the index's top-level generated_at_commit (spec §3).
-        "compiled_at_commit": generated_at_commit,
+        "compiled_at_commit": compiled_at_commit,
     }
 
 
@@ -68,9 +82,9 @@ def main() -> int:
         print("FAIL: index.json not built", file=sys.stderr)
         return 1
     doc = json.loads(INDEX.read_text())
-    gen = doc.get("generated_at_commit") or ""
+    gen = head_commit()
     if not gen:
-        print("FAIL: index has no generated_at_commit", file=sys.stderr)
+        print("FAIL: cannot read HEAD", file=sys.stderr)
         return 1
 
     if not (REPO_ROOT / GATES_MANIFEST).is_file():
