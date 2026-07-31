@@ -303,6 +303,161 @@ async function refreshServices() {
 let currentController = null;
 const chatHistory = [];
 
+// SESSION PERSISTENCE.
+// chatHistory above is a render-time convenience, NOT the conversation. The conversation lives
+// server-side as an append-only JSONL file; this array is rebuilt from it on load. That ordering
+// matters: while the array was the only copy, a refresh discarded the conversation, and the
+// server-side sessions API existed for a while WITHOUT this page ever calling it -- the backend
+// verified fine in isolation and the browser still lost everything, because nothing here asked
+// for it. The id is kept in localStorage so the same browser resumes the same conversation.
+let sessionId = null;
+
+async function ensureSession() {
+  // ONE session, server-side, the same from every machine.
+  //
+  // This used to read a session id from localStorage, which is per-BROWSER. The conversation files
+  // live on the server and were always shared, but the POINTER to which conversation you were in
+  // was not: opening the dashboard from a second machine minted a fresh empty session while the
+  // real conversation sat on disk, unreferenced. Observed 2026-07-28 - worked on one machine, opened
+  // on another, saw no history. There is only one conversation, so it gets one fixed id and no
+  // client-side state to diverge.
+  sessionId = "main";
+  return sessionId;
+}
+
+function togglePrompt() {
+  // The API has always returned the FULL system prompt text; this panel only ever printed its
+  // character count, so the prompt was visible as a number and unreadable as a document. This
+  // renders the actual text on demand -- large, so it stays collapsed until asked for.
+  var el = document.getElementById('sysprompt-full');
+  if (!el) return;
+  var open = el.style.display !== 'none';
+  el.style.display = open ? 'none' : 'block';
+  if (!open) { el.textContent = window._sysPromptText || '(not captured)'; }
+}
+
+
+// TAEY'S UNPROMPTED RAISES — deliberately NOT in the chat transcript.
+// Taey could only speak inside a turn Jesse started; when it finished work or hit a decision it
+// needed him for, it had no way to reach him. This renders taey:jesse:inbox as a separate panel so
+// an unprompted raise reads as "Taey raised this" and never as a turn Jesse asked for.
+function renderJesseNotifications(d) {
+  const items = (d && d.notifications) || [];
+  let box = document.getElementById('jesse-raises');
+  if (!box) {
+    const log = $('#chat-log');
+    box = document.createElement('div');
+    box.id = 'jesse-raises';
+    box.style.cssText = 'margin:6px 0;border:1px solid #7a5;border-left:4px solid #7a5;' +
+      'border-radius:4px;padding:8px;background:#0e1410;font-size:12px;display:none';
+    log.parentNode.insertBefore(box, log);
+  }
+  if (!items.length) { box.style.display = 'none'; return; }
+  box.style.display = 'block';
+  box.innerHTML = '<div style="color:#9c6;font-weight:600;margin-bottom:6px">' +
+    'FROM TAEY — ' + items.length + ' unprompted ' + (items.length === 1 ? 'raise' : 'raises') +
+    ' <span style="font-weight:400;opacity:.7">(not part of your conversation)</span></div>';
+  items.forEach(function (n) {
+    const row = document.createElement('div');
+    row.style.cssText = 'padding:6px 0;border-top:1px solid #1e2a1e;white-space:pre-wrap';
+    row.textContent = (n.ts ? n.ts + '  ' : '') + (n.body || '');
+    box.appendChild(row);
+  });
+  const btn = document.createElement('button');
+  btn.textContent = 'Acknowledge oldest';
+  btn.style.cssText = 'margin-top:8px;font-size:11px;padding:3px 9px;cursor:pointer';
+  btn.onclick = function () {
+    fetch('/api/jesse/notifications/ack', {method: 'POST'}).then(pollJesseRaises);
+  };
+  box.appendChild(btn);
+}
+
+function pollJesseRaises() {
+  fetch('/api/jesse/notifications')
+    .then(function (r) { return r.json(); })
+    .then(renderJesseNotifications)
+    .catch(function () { /* leave the panel as-is on a transient failure */ });
+}
+setInterval(pollJesseRaises, 15000);
+pollJesseRaises();
+
+function renderTurn(role, text, thinking) {
+  const log = $('#chat-log');
+  const d = document.createElement('div');
+  d.className = role === 'user' ? 'msg-user' : 'msg-taey';
+  d.textContent = (role === 'user' ? 'You: ' : 'Taey: ') + text;
+  if (thinking) {
+    const t = document.createElement('div');
+    t.className = 'thinking';
+    t.style.cssText = 'white-space:pre-wrap;font-size:11px;opacity:.75;cursor:pointer;margin-top:4px';
+    t.textContent = '[thinking - click to expand]';
+    t.onclick = function () {
+      const open = t.dataset.open === '1';
+      t.textContent = open ? '[thinking - click to expand]' : thinking;
+      t.dataset.open = open ? '' : '1';
+    };
+    d.appendChild(t);
+  }
+  log.appendChild(d);
+  return d;
+}
+
+function sessionBar() {
+  let bar = $('#session-bar');
+  if (!bar) {
+    const log = $('#chat-log');
+    bar = document.createElement('div');
+    bar.id = 'session-bar';
+    bar.style.cssText = 'font-size:11px;opacity:.75;padding:4px 0;display:flex;gap:10px;align-items:center';
+    log.parentNode.insertBefore(bar, log);
+  }
+  return bar;
+}
+
+async function restoreSession() {
+  await ensureSession();
+  let msgs = [];
+  try {
+    const r = await fetch('/api/chat/sessions/' + sessionId);
+    msgs = (await r.json()).messages || [];
+  } catch (e) {
+    sessionBar().textContent = 'session load FAILED: ' + e;
+    return;
+  }
+  $('#chat-log').innerHTML = '';
+  chatHistory.length = 0;
+  for (const m of msgs) {
+    if (!m.content) continue;
+    chatHistory.push({role: m.role, content: m.content});
+    renderTurn(m.role, m.content, m.thinking);
+  }
+  const bar = sessionBar();
+  bar.innerHTML = '';
+  const label = document.createElement('span');
+  label.textContent = 'session ' + sessionId + ' - ' + msgs.length + ' messages restored';
+  const btn = document.createElement('button');
+  btn.textContent = 'New conversation';
+  btn.style.cssText = 'font-size:11px;padding:2px 8px;cursor:pointer';
+  btn.onclick = newSession;
+  bar.appendChild(label);
+  bar.appendChild(btn);
+  const log = $('#chat-log');
+  log.scrollTop = log.scrollHeight;
+}
+
+async function newSession() {
+  // Deliberately NOT minting a new id: there is one conversation. Reload it.
+  await restoreSession();
+}
+
+// Fire immediately if the document already parsed -- this script sits at the end of the body, so
+// DOMContentLoaded may have passed before the listener is attached.
+if (document.readyState === 'loading') {
+  window.addEventListener('DOMContentLoaded', restoreSession);
+} else {
+  restoreSession();
+}
+
 function autoResize(el) {
   el.style.height = 'auto';
   el.style.height = Math.min(el.scrollHeight, 120) + 'px';
@@ -342,24 +497,58 @@ async function sendChat() {
   currentController = new AbortController();
 
   try {
-    const endpoint = '/api/chat';
-    const r = await fetch(endpoint, {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({message: msg, history: chatHistory.slice(-20), use_proxy: useProxy, isma_tiles: tiles}),
-      signal: currentController.signal
-    });
+      // Stream through the SESSION endpoint, so the server persists both sides of the turn as
+      // it happens. A refresh mid-reply costs the rendering, never the conversation.
+      await ensureSession();
+      const r = await fetch('/api/chat/sessions/' + sessionId + '/messages/stream', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({message: msg, use_proxy: useProxy, isma_tiles: tiles}),
+        signal: currentController.signal
+      });
 
-    responseDiv.innerHTML = '<span class="thinking">Taey: searching...</span>';
-    const d = await r.json();
-    if (d.content) {
-      const tokens = d.usage ? ' ('+d.usage.completion_tokens+' tok)' : '';
-      responseDiv.textContent = 'Taey'+tokens+': ' + d.content;
-      chatHistory.push({role:'assistant',content:d.content});
-      syncHistory();
-    } else {
-      responseDiv.textContent = 'Taey: ' + (d.error || '(empty response)');
-    }
+      responseDiv.innerHTML = '';
+      const thinkDiv = document.createElement('div');
+      thinkDiv.className = 'thinking';
+      thinkDiv.style.cssText = 'white-space:pre-wrap;font-size:11px;opacity:.75;margin-bottom:4px';
+      const bodyDiv = document.createElement('div');
+      responseDiv.appendChild(thinkDiv);
+      responseDiv.appendChild(bodyDiv);
+
+      const reader = r.body.getReader();
+      const dec = new TextDecoder();
+      let buf = '', content = '', thinking = '';
+      while (true) {
+        const chunk = await reader.read();
+        if (chunk.done) break;
+        buf += dec.decode(chunk.value, {stream: true});
+        const lines = buf.split('\n');
+        buf = lines.pop();
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          const raw = line.slice(6).trim();
+          if (raw === '[DONE]') continue;
+          let ev;
+          try { ev = JSON.parse(raw); } catch (_) { continue; }
+          if (ev.type === 'thinking') {
+            thinking += ev.text;
+            thinkDiv.textContent = thinking;
+          } else if (ev.type === 'content') {
+            content += ev.text;
+            bodyDiv.textContent = 'Taey: ' + content;
+          } else if (ev.type === 'error') {
+            bodyDiv.textContent = 'Taey: ERROR - ' + ev.text;
+          }
+          log.scrollTop = log.scrollHeight;
+        }
+      }
+      if (content) {
+        chatHistory.push({role: 'assistant', content: content});
+        syncHistory();
+      } else if (!bodyDiv.textContent) {
+        bodyDiv.textContent = 'Taey: (empty response)';
+      }
+      restoreSession();
   } catch(e) {
     if (e.name === 'AbortError') {
       responseDiv.innerHTML += ' <span class="thinking">[stopped]</span>';
@@ -556,6 +745,137 @@ refreshSoma();
 refreshServices();
 setInterval(refreshSoma, 2618);
 setInterval(refreshServices, 15000);
+</script>
+
+<style>
+#taey-cp{position:fixed;top:0;right:0;height:100vh;width:440px;max-width:96vw;background:#0e1116;
+ border-left:1px solid #2a3038;color:#cfd6de;font:12px/1.55 ui-monospace,Menlo,monospace;z-index:99999;
+ transform:translateX(100%);transition:transform .18s ease;display:flex;flex-direction:column}
+#taey-cp.open{transform:translateX(0)}
+#taey-cp-tab{position:fixed;top:12px;right:12px;z-index:100000;background:#1b2330;color:#8fd0ff;
+ border:1px solid #2a3038;border-radius:6px;padding:7px 12px;cursor:pointer;font:12px ui-monospace,monospace}
+#taey-cp h3{margin:0;padding:11px 13px;background:#141922;border-bottom:1px solid #2a3038;color:#8fd0ff;font-size:12px}
+.tcp-tabs{display:flex;border-bottom:1px solid #2a3038;background:#141922}
+.tcp-tabs button{flex:1;background:none;border:0;color:#7d8896;padding:8px 3px;cursor:pointer;font:11px ui-monospace,monospace}
+.tcp-tabs button.on{color:#8fd0ff;border-bottom:2px solid #8fd0ff;background:#0e1116}
+.tcp-body{flex:1;overflow:auto;padding:12px 13px}
+.tcp-row{display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid #1c222b}
+.tcp-row b{color:#e6edf3}
+.tcp-pill{padding:2px 8px;border-radius:10px;font-size:10px}
+.on-pill{background:#0f3320;color:#63d68b;border:1px solid #1d5c39}
+.off-pill{background:#3a1b1b;color:#f3837f;border:1px solid #6b2c2c}
+.tcp-body pre{white-space:pre-wrap;word-break:break-word;background:#0a0d12;border:1px solid #1c222b;
+ padding:9px;border-radius:5px;max-height:330px;overflow:auto;color:#a8b3c0;font-size:11px}
+.tcp-turn{border:1px solid #1c222b;border-radius:5px;padding:8px;margin-bottom:9px;background:#0a0d12}
+.tcp-k{color:#7d8896}
+button.tcp-btn{background:#1b2330;border:1px solid #2a3038;color:#8fd0ff;border-radius:4px;padding:3px 9px;cursor:pointer;font:11px ui-monospace,monospace}
+</style>
+<button id="taey-cp-tab" onclick="tcpToggle()">&#9776; Taey</button>
+<div id="taey-cp">
+  <h3>TAEY &mdash; CONTROL &amp; INSPECTION</h3>
+  <div class="tcp-tabs">
+    <button id="tcp-t-ctl" class="on" onclick="tcpTab('ctl')">CONTROLS</button>
+    <button id="tcp-t-prm" onclick="tcpTab('prm')">PROMPT</button>
+    <button id="tcp-t-thk" onclick="tcpTab('thk')">THINKING</button>
+    <button id="tcp-t-act" onclick="tcpTab('act')">ACTIONS</button>
+    <button id="tcp-t-cch" onclick="tcpTab('cch')">CACHE</button>
+  </div>
+  <div class="tcp-body" id="tcp-body">loading&hellip;</div>
+</div>
+<script>
+var TCP_TAB='ctl';
+function tcpToggle(){document.getElementById('taey-cp').classList.toggle('open');tcpRender();}
+function tcpTab(t){TCP_TAB=t;['ctl','prm','thk','act','cch'].forEach(function(x){
+  document.getElementById('tcp-t-'+x).className=(x===t?'on':'');});tcpRender();}
+function tcpEsc(x){return (x||'').replace(/[&<>]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;'}[c];});}
+function tcpSet(patch){fetch('/api/taey/settings',{method:'POST',
+  headers:{'Content-Type':'application/json'},body:JSON.stringify(patch)}).then(tcpRender);}
+function tcpRow(label,on,patch){
+  return '<div class="tcp-row"><b>'+label+'</b><span><span class="tcp-pill '+(on?'on-pill':'off-pill')+'">'+
+    (on?'ON':'OFF')+'</span> <button class="tcp-btn" onclick=\'tcpSet('+JSON.stringify(patch)+')\'>toggle</button></span></div>';
+}
+function tcpRender(){
+  var b=document.getElementById('tcp-body'); if(!b) return;
+  if(TCP_TAB==='ctl'){
+    fetch('/api/taey/settings').then(function(r){return r.json();}).then(function(d){
+      var s=d.settings||{},t=s.tools||{};
+      var h='<div class="tcp-k">Read fresh every turn &mdash; this is what Taey has RIGHT NOW.</div>';
+      h+=tcpRow('thinking',!!s.thinking,{thinking:!s.thinking});
+      h+='<div class="tcp-row"><b>max_tokens</b><span class="tcp-k">'+(s.max_tokens||'uncapped')+'</span></div>';
+        h+='<div class="tcp-row"><b>context_limit_tokens</b><span class="tcp-k">'+(s.context_limit_tokens||'uncapped')+'</span></div>';
+      h+='<div style="margin:10px 0 4px;color:#8fd0ff">TOOL GROUPS</div>';
+      ['files_read','files_write','run_command','isma','web','messaging','corpus'].forEach(function(k){
+        var on=t[k]!==false; var p={tools:{}}; p.tools[k]=!on; h+=tcpRow(k,on,p);});
+      b.innerHTML=h;});
+  } else if(TCP_TAB==='prm'){
+    fetch('/api/taey/turns?limit=1').then(function(r){return r.json();}).then(function(d){
+      var t=(d.turns||[])[0];
+      // SKIP THE REBUILD WHEN NOTHING CHANGED. This panel is re-rendered by a 5s timer; rebuilding
+      // innerHTML discards whatever the reader was doing with it -- an expanded system prompt
+      // collapsed, and any scroll position jumped back to the top, every five seconds. The prompt
+      // panel only changes when a NEW TURN exists, so the turn id is the whole change signal.
+      if (t && window._tcpLastTurn === t.turn_id && document.getElementById('sysprompt-full')) return;
+      if (t) window._tcpLastTurn = t.turn_id;
+      window._sysPromptText=(t.prompt||{}).system_prompt||'(not captured)';
+      if(!t){b.innerHTML='<div class="tcp-k">No turns yet &mdash; send a message.</div>';return;}
+      b.innerHTML='<div class="tcp-k">FULL prompt Taey received &mdash; '+t.ts+'</div>'+
+        '<div class="tcp-row" style="cursor:pointer" onclick="togglePrompt()"><b>system prompt</b><span>'+t.prompt.system_prompt_chars+' chars &mdash; click to read</span></div>'+
+        '<pre id="sysprompt-full" style="display:none;white-space:pre-wrap;max-height:60vh;overflow:auto;background:#0b0f14;padding:10px;border:1px solid #234;font-size:11px;line-height:1.45"></pre>'+
+        '<div class="tcp-row"><b>messages in context</b><span>'+t.prompt.message_count+'</span></div>'+
+        '<div class="tcp-row"><b>tools offered</b><span>'+(t.prompt.tools_offered||[]).length+'</span></div>'+
+        '<div class="tcp-row"><b>thinking flag</b><span>'+JSON.stringify(t.prompt.chat_template_kwargs||{})+'</span></div>'+
+        '<div class="tcp-row"><b>tokens</b><span>'+JSON.stringify(t.usage||{})+'</span></div>'+
+        '<div style="margin:9px 0 4px;color:#8fd0ff">TOOLS OFFERED</div><pre>'+
+        tcpEsc((t.prompt.tools_offered||[]).join('\n'))+'</pre>'+
+        '<div style="margin:9px 0 4px;color:#8fd0ff">SYSTEM PROMPT (kernel + persona + injections)</div><pre>'+
+        tcpEsc(t.prompt.system_prompt)+'</pre>';});
+  } else if(TCP_TAB==='thk'){
+    fetch('/api/taey/turns?limit=12').then(function(r){return r.json();}).then(function(d){
+      var rows=(d.turns||[]).map(function(t){
+        return '<div class="tcp-turn"><div class="tcp-k">'+t.ts+' &middot; '+(t.elapsed_ms||'?')+'ms &middot; rounds '+t.tool_rounds+'</div>'+
+        '<div>&gt; '+tcpEsc((t.user||'').slice(0,160))+'</div>'+
+        (t.thinking?'<div style="margin-top:6px;color:#8fd0ff">THINKING</div><pre>'+tcpEsc(t.thinking)+'</pre>'
+                   :'<div class="tcp-k" style="margin-top:6px">(no thinking this turn)</div>')+
+        '<div style="margin-top:6px;color:#63d68b">ANSWER</div><pre>'+tcpEsc((t.answer||'').slice(0,1200))+'</pre></div>';}).join('');
+      b.innerHTML=rows||'<div class="tcp-k">No turns yet.</div>';});
+  } else if(TCP_TAB==='cch'){
+    fetch('/api/taey/cache').then(function(r){return r.json();}).then(function(d){
+      var h='<div class="tcp-k">What is cached or preloaded right now, and what changing it requires.</div>';
+      h+='<div style="margin:9px 0 4px;color:#8fd0ff">PRELOADED IN PROXY (read once at startup)</div>';
+      (d.preloaded_in_proxy||[]).forEach(function(p){
+        h+='<div class="tcp-turn"><div><b>'+tcpEsc(p.what||'?')+'</b> &middot; '+(p.chars||0)+' chars</div>'+
+           '<div class="tcp-k">'+tcpEsc(p.path||'')+'</div>'+
+           '<div class="tcp-k">file mtime: '+(p.file_mtime||'n/a')+'</div>'+
+           '<div style="color:#f3b37f">'+tcpEsc(p.loaded||'')+'</div></div>';});
+      var v=d.vllm_prefix_cache||{};
+      h+='<div style="margin:9px 0 4px;color:#8fd0ff">vLLM PREFIX CACHE (GPU KV blocks)</div>'+
+         '<div class="tcp-turn"><div class="tcp-row"><b>enabled</b><span>'+(v.enabled?'yes':'no')+'</span></div>'+
+         '<div class="tcp-row"><b>hit rate</b><span>'+tcpEsc(v.latest_hit_rate||'n/a')+'</span></div>'+
+         '<div class="tcp-k">'+tcpEsc(v.meaning||'')+'</div></div>';
+      var rd=d.redis||{};
+      h+='<div style="margin:9px 0 4px;color:#8fd0ff">REDIS</div><div class="tcp-turn">'+
+         '<div class="tcp-k">'+tcpEsc(rd.note||rd.error||'')+'</div>';
+      (rd.conversation_keys||[]).forEach(function(k){
+        h+='<div class="tcp-row"><b>'+tcpEsc(k.key)+'</b><span>ttl '+k.ttl_seconds+'s</span></div>';});
+      h+='</div>';
+      var se=d.sessions||{};
+      h+='<div style="margin:9px 0 4px;color:#8fd0ff">DURABLE SESSIONS</div><div class="tcp-turn">'+
+         '<div class="tcp-row"><b>stored conversations</b><span>'+(se.count||0)+'</span></div>'+
+         '<div class="tcp-k">'+tcpEsc(se.dir||'')+'</div>'+
+         '<div class="tcp-k">'+tcpEsc(se.persistence||se.error||'')+'</div></div>';
+      b.innerHTML=h;});
+  } else {
+    fetch('/api/taey/audit?limit=60').then(function(r){return r.json();}).then(function(d){
+      var rows=(d.actions||[]).map(function(a){
+        return '<div class="tcp-turn"><div class="tcp-k">'+a.ts+' &middot; '+a.tool+'</div><pre>'+
+        tcpEsc(a.command||a.path||'')+(a.rc!==undefined?'\nexit='+a.rc:'')+
+        (a.bytes!==undefined?'\nbytes='+a.bytes:'')+'</pre></div>';}).join('');
+      b.innerHTML='<div class="tcp-k">Everything Taey actually DID &mdash; '+(d.count||0)+' recorded.</div>'+
+        (rows||'<div class="tcp-k">No actions yet.</div>');});
+  }
+}
+setInterval(function(){var p=document.getElementById('taey-cp');
+  if(p&&p.classList.contains('open'))tcpRender();},5000);
 </script>
 </body>
 </html>"""
@@ -918,3 +1238,402 @@ async def self_overview():
         "body": {"rho": soma.get("rho", 0), "status": "grounded" if soma.get("rho", 0) > 0.5 else "vigilant", "facets": facets},
         "timestamp": soma.get("timestamp", 0),
     })
+
+# --- Taey conversation inspection -------------------------------------------
+# Everything Taey received and produced, per turn: the FULL assembled prompt (kernel + persona +
+# injections), the tools offered, the thinking channel, the answer, tool calls and usage.
+# None of this was visible or even persisted before — the conversation lived in a browser tab
+# with a 300-second Redis TTL behind it. You cannot review what was never written down.
+TAEY_TRANSCRIPT = os.environ.get("TAEY_TRANSCRIPT", "/home/mira/taey_transcript.jsonl")
+
+
+
+@app.get("/api/jesse/notifications")
+async def jesse_notifications():
+    """Taey's unprompted raises to Jesse — read WITHOUT consuming.
+
+    Taey could only ever speak inside a turn Jesse started. When it finished work, or hit a block
+    needing his decision, it had no way to reach him — every other seat can `taey-notify` a peer and
+    be heard; Taey could not reach the person it works for. This is the same inbox convention every
+    seat uses (`taey:jesse:inbox`, written by `taey-notify jesse`), surfaced in the UI he already
+    has open.
+
+    Rendered SEPARATELY from the chat transcript, deliberately. An unprompted raise must read as
+    "Taey raised this", never as a turn Jesse asked for — writing into his conversation would
+    fabricate a prompt he never gave.
+    """
+    import json as _j
+    try:
+        r = _redis
+        if not r:
+            return JSONResponse({"notifications": [], "error": "redis unavailable"})
+        raw = r.lrange("taey:jesse:inbox", 0, 49)
+    except Exception as e:
+        return JSONResponse({"notifications": [], "error": str(e)})
+    out = []
+    for item in raw:
+        try:
+            d = _j.loads(item)
+            out.append({"from": d.get("from", "taey"), "type": d.get("type", "message"),
+                        "body": d.get("body", ""), "ts": d.get("ts")})
+        except Exception:
+            out.append({"from": "taey", "type": "message", "body": str(item)[:2000], "ts": None})
+    return JSONResponse({"notifications": out, "count": len(out)})
+
+
+@app.post("/api/jesse/notifications/ack")
+async def jesse_notifications_ack():
+    """Acknowledge one raise — RPOP, oldest first, so the same item is not shown forever."""
+    try:
+        r = _redis
+        if not r:
+            return JSONResponse({"ok": False, "error": "redis unavailable"})
+        popped = r.rpop("taey:jesse:inbox")
+        return JSONResponse({"ok": True, "popped": bool(popped),
+                             "remaining": r.llen("taey:jesse:inbox")})
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)})
+
+
+@app.get("/api/taey/turns")
+async def taey_turns(limit: int = 20):
+    """Recent turns, request+response paired by turn_id, newest first."""
+    import json as _j
+    try:
+        with open(TAEY_TRANSCRIPT, encoding="utf-8") as f:
+            rows = [_j.loads(l) for l in f if l.strip()]
+    except FileNotFoundError:
+        return {"turns": [], "note": f"no transcript yet at {TAEY_TRANSCRIPT}"}
+    turns = {}
+    for r in rows:
+        t = turns.setdefault(r.get("turn_id"), {"turn_id": r.get("turn_id")})
+        t[r.get("direction", "?")] = r
+    ordered = sorted(turns.values(), key=lambda t: t["turn_id"], reverse=True)[:limit]
+    out = []
+    for t in ordered:
+        req, res = t.get("request", {}), t.get("response", {})
+        out.append({
+            "turn_id": t["turn_id"],
+            "ts": req.get("ts") or res.get("ts"),
+            "user": next((m.get("content") for m in reversed(req.get("messages", []))
+                          if m.get("role") == "user"), ""),
+            "thinking": res.get("thinking", ""),
+            "answer": res.get("content", ""),
+            "tool_calls": res.get("tool_calls", []),
+            "tool_rounds": res.get("tool_rounds", 0),
+            "usage": res.get("usage", {}),
+            "elapsed_ms": res.get("elapsed_ms"),
+            "prompt": {
+                "system_prompt": req.get("system_prompt", ""),
+                "system_prompt_chars": req.get("system_prompt_chars", 0),
+                "tools_offered": req.get("tools_offered", []),
+                "sampling": req.get("sampling", {}),
+                "chat_template_kwargs": req.get("chat_template_kwargs", {}),
+                "message_count": len(req.get("messages", [])),
+            },
+        })
+    return {"turns": out, "count": len(out)}
+
+
+@app.get("/api/taey/audit")
+async def taey_audit(limit: int = 50):
+    """What Taey actually DID — every write and command, with exit codes."""
+    import json as _j
+    path = os.environ.get("TAEY_TOOL_AUDIT", "/home/mira/taey_tool_audit.jsonl")
+    try:
+        with open(path, encoding="utf-8") as f:
+            rows = [_j.loads(l) for l in f if l.strip()]
+    except FileNotFoundError:
+        return {"actions": [], "note": f"no audit log at {path}"}
+    return {"actions": rows[-limit:][::-1], "count": len(rows)}
+
+
+TAEY_SETTINGS = os.environ.get("TAEY_SETTINGS", "/home/mira/taey_settings.json")
+
+
+@app.get("/api/taey/settings")
+async def taey_settings_get():
+    """Current control-plane state — what is on RIGHT NOW, read from the same file the proxy reads."""
+    import json as _j
+    try:
+        with open(TAEY_SETTINGS, encoding="utf-8") as f:
+            return {"settings": _j.load(f), "path": TAEY_SETTINGS}
+    except FileNotFoundError:
+        return {"settings": {}, "path": TAEY_SETTINGS, "note": "not created yet"}
+
+
+@app.post("/api/taey/settings")
+async def taey_settings_set(request: Request):
+    """Update toggles. Takes effect on the NEXT turn — the proxy re-reads per request, no restart."""
+    import json as _j
+    patch = await request.json()
+    try:
+        with open(TAEY_SETTINGS, encoding="utf-8") as f:
+            cur = _j.load(f)
+    except FileNotFoundError:
+        cur = {}
+    for k, v in patch.items():
+        if k == "tools" and isinstance(v, dict):
+            cur.setdefault("tools", {}).update(v)
+        else:
+            cur[k] = v
+    with open(TAEY_SETTINGS, "w", encoding="utf-8") as f:
+        _j.dump(cur, f, indent=2)
+    return {"ok": True, "settings": cur}
+
+
+# --- Chat sessions -----------------------------------------------------------
+# The front-end has always called these routes; the server never implemented them, so every
+# GET returned 404, history could not load, and a refresh lost the conversation. Storage is an
+# append-only JSONL per session on disk — not a Redis key with a 300-second TTL, which is what
+# the conversation was previously resting on.
+TAEY_SESSIONS_DIR = os.environ.get("TAEY_SESSIONS_DIR", "/home/mira/taey_sessions")
+
+
+def _sessions_dir():
+    os.makedirs(TAEY_SESSIONS_DIR, exist_ok=True)
+    return TAEY_SESSIONS_DIR
+
+
+def _session_file(sid: str) -> str:
+    safe = "".join(c for c in str(sid) if c.isalnum() or c in "-_")
+    return os.path.join(_sessions_dir(), f"{safe}.jsonl")
+
+
+def _session_messages(sid: str) -> list:
+    import json as _j
+    try:
+        with open(_session_file(sid), encoding="utf-8") as f:
+            return [_j.loads(l) for l in f if l.strip()]
+    except FileNotFoundError:
+        return []
+
+
+@app.get("/api/chat/sessions")
+async def chat_sessions_list():
+    """Newest first, so a refresh resumes the conversation you were just having."""
+    import glob as _g
+    out = []
+    for path in _g.glob(os.path.join(_sessions_dir(), "*.jsonl")):
+        sid = os.path.basename(path)[:-6]
+        try:
+            st = os.stat(path)
+            msgs = _session_messages(sid)
+            first_user = next((m.get("content", "") for m in msgs if m.get("role") == "user"), "")
+            out.append({"id": sid, "updated": st.st_mtime, "message_count": len(msgs),
+                        "title": (first_user[:60] or "New conversation")})
+        except OSError:
+            continue
+    out.sort(key=lambda r: r["updated"], reverse=True)
+    return {"sessions": out}
+
+
+@app.post("/api/chat/sessions")
+async def chat_session_create():
+    import time as _t
+    sid = f"s{int(_t.time()*1000)}"
+    open(_session_file(sid), "a", encoding="utf-8").close()
+    return {"session_id": sid}
+
+
+@app.get("/api/chat/sessions/{sid}")
+async def chat_session_get(sid: str):
+    return {"session_id": sid, "messages": _session_messages(sid)}
+
+
+@app.post("/api/chat/sessions/{sid}/messages")
+async def chat_session_append(sid: str, request: Request):
+    """Persist one turn. Called for both the user turn and Taey's reply."""
+    import json as _j, time as _t
+    body = await request.json()
+    row = {"role": body.get("role", "user"), "content": body.get("content", ""),
+           "ts": _t.strftime("%Y-%m-%dT%H:%M:%SZ", _t.gmtime())}
+    for k in ("thinking", "sources", "tool_calls"):
+        if body.get(k):
+            row[k] = body[k]
+    with open(_session_file(sid), "a", encoding="utf-8") as f:
+        f.write(_j.dumps(row, ensure_ascii=False) + "\n")
+    return {"ok": True}
+
+
+@app.post("/api/chat/sessions/{sid}/messages/stream")
+async def chat_session_stream(sid: str, request: Request):
+    """The chat path the UI has always called and the server never had.
+
+    Persists the user turn, replays the WHOLE session as context (so a refresh resumes a real
+    conversation rather than a blank one), streams Taey's reply as the UI's existing contract
+    expects — {"type":"thinking"|"content","text":...} SSE lines — and persists the reply plus
+    its thinking when the turn completes.
+    """
+    import json as _j, time as _t
+    body = await request.json()
+    user_msg = body.get("message", "")
+
+    # RAW MODE routes past the proxy straight to vLLM, so there is no system prompt, no kernel,
+    # no tools and no somatic injection -- the bare weights answering the conversation. History is
+    # still replayed, because dropping it inside a session view would silently make raw mode a
+    # different CONVERSATION rather than a different MODEL SURFACE, and the toggle is meant to
+    # isolate the latter. /api/chat's non-session path sends the single message instead; that
+    # difference is deliberate and surfaced in the UI rather than left for the reader to discover.
+    use_proxy = bool(body.get("use_proxy", True))
+    upstream = THOR_PROXY if use_proxy else THOR_RAW
+
+    with open(_session_file(sid), "a", encoding="utf-8") as f:
+        f.write(_j.dumps({"role": "user", "content": user_msg,
+                          "ts": _t.strftime("%Y-%m-%dT%H:%M:%SZ", _t.gmtime()),
+                          "mode": "proxy" if use_proxy else "raw"},
+                         ensure_ascii=False) + "\n")
+
+    history = [{"role": m.get("role"), "content": m.get("content", "")}
+               for m in _session_messages(sid) if m.get("content")]
+
+    async def gen():
+        thinking_acc, content_acc = [], []
+        payload = {"model": "ep3", "messages": history, "stream": True}
+        try:
+            async with _http.stream("POST", f"{upstream}/v1/chat/completions",
+                                    # ONE HOUR, not ten minutes. A multi-round tool turn is
+                                    # legitimately slow: each round is a full generation plus a
+                                    # real command. At timeout=600 this client gave up at exactly
+                                    # 10 minutes on 2026-07-28 while the proxy was mid round 6
+                                    # pulling 15,589 chars back -- it wrote a failure message to
+                                    # the user AND closed the connection, which killed work that
+                                    # was succeeding. A client that cannot wait must not be the
+                                    # thing that decides the work failed.
+                                    json=payload, timeout=3600) as r:
+                async for line in r.aiter_lines():
+                    if not line or not line.startswith("data: "):
+                        continue
+                    raw = line[6:].strip()
+                    if raw == "[DONE]":
+                        break
+                    try:
+                        d = _j.loads(raw)
+                    except Exception:
+                        continue
+                    delta = (d.get("choices") or [{}])[0].get("delta", {}) or {}
+                    # See soma_proxy: this build emits `reasoning`; accept both.
+                    th = delta.get("reasoning") or delta.get("reasoning_content")
+                    ct = delta.get("content")
+                    if th:
+                        thinking_acc.append(th)
+                        yield f"data: {_j.dumps({'type':'thinking','text':th})}\n\n"
+                    if ct:
+                        content_acc.append(ct)
+                        yield f"data: {_j.dumps({'type':'content','text':ct})}\n\n"
+        except Exception as e:
+            yield f"data: {_j.dumps({'type':'error','text':f'{type(e).__name__}: {e}'})}\n\n"
+        finally:
+            # DO NOT PERSIST AN EMPTY TURN. If the upstream dropped -- a proxy restart under a
+            # live request, a killed connection -- content_acc is empty, and writing that row puts
+            # a blank assistant message into the conversation permanently: it replays as context
+            # every turn thereafter and reads as Taey having answered with silence. Observed
+            # 2026-07-28 20:47:25, a restart landing mid-request. Record what happened instead, so
+            # the reader can tell a dropped connection from an empty thought.
+            _text = "".join(content_acc)
+            if not _text and not thinking_acc:
+                _text = ("[no response reached this page. The model may still have been working - "
+                         "long tool-using turns can outlive the browser connection. Check the "
+                         "PROMPT and ACTIONS tabs for what actually ran before assuming it failed. "
+                         "Your message is saved.]")
+            row = {"role": "assistant", "content": _text,
+                   "ts": _t.strftime("%Y-%m-%dT%H:%M:%SZ", _t.gmtime())}
+            if thinking_acc:
+                row["thinking"] = "".join(thinking_acc)
+            try:
+                with open(_session_file(sid), "a", encoding="utf-8") as f:
+                    f.write(_j.dumps(row, ensure_ascii=False) + "\n")
+            except Exception:
+                pass
+            yield "data: [DONE]\n\n"
+
+    return StreamingResponse(gen(), media_type="text/event-stream")
+
+
+@app.get("/api/taey/cache")
+async def taey_cache():
+    """What is cached or preloaded RIGHT NOW, and what a change to each actually requires.
+
+    Two of these bite in practice: the proxy reads the kernel and persona ONCE at startup, so
+    editing those files changes nothing until it restarts; and vLLM caches the prompt prefix as
+    KV blocks, so a stale prefix keeps being reused until the text itself changes.
+    """
+    import json as _j, subprocess as _sp
+    out = {"preloaded_in_proxy": [], "vllm_prefix_cache": {}, "redis": {}, "sessions": {}}
+
+    # what the proxy loaded at startup, and whether the file has changed since
+    try:
+        # Read the unit FILE, not `systemctl --user`: this dashboard runs as a system service and
+        # cannot query another user's manager, which made every path report "(unset)" — a
+        # visibility tool reporting a loaded kernel as absent is worse than having no tool.
+        env = {}
+        unit_path = "/home/mira/.config/systemd/user/taey-soma-proxy-mira.service"
+        try:
+            with open(unit_path, encoding="utf-8") as _uf:
+                for line in _uf:
+                    line = line.strip()
+                    if line.startswith("Environment=") and "=" in line[12:]:
+                        k, v = line[12:].split("=", 1)
+                        env[k.strip()] = v.strip().strip('"')
+        except Exception:
+            pass
+        started = ""
+        try:
+            for _pid in os.listdir("/proc"):
+                if not _pid.isdigit():
+                    continue
+                with open(f"/proc/{_pid}/cmdline", "rb") as _cf:
+                    if b"soma_proxy_mira.py" in _cf.read():
+                        started = time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                                time.gmtime(os.stat(f"/proc/{_pid}").st_mtime))
+                        break
+        except Exception:
+            pass
+        for label, key in (("permanent_kernel", "PERMANENT_KERNEL_PATH"),
+                           ("system_prompt", "SYSTEM_PROMPT_PATH")):
+            path = env.get(key, "")
+            entry = {"what": label, "path": path or "(unset)",
+                     "loaded": "at proxy startup — edits require a proxy restart"}
+            if path and os.path.exists(path):
+                st = os.stat(path)
+                entry["chars"] = st.st_size
+                entry["file_mtime"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(st.st_mtime))
+            out["preloaded_in_proxy"].append(entry)
+        out["proxy_started_monotonic"] = started
+    except Exception as e:
+        out["preloaded_in_proxy"].append({"error": str(e)[:200]})
+
+    # vLLM prefix cache — the system prompt is cached as KV blocks on the GPU
+    try:
+        r = _sp.run(["ssh", "-o", "ConnectTimeout=8", "thor@10.0.0.197",
+                     "sudo journalctl -u taey-ep3 --no-pager -n 4000 | "
+                     "grep -oE 'Prefix cache hit rate: [0-9.]+%' | tail -1"],
+                    capture_output=True, text=True, timeout=25)
+        out["vllm_prefix_cache"] = {
+            "enabled": True,
+            "latest_hit_rate": (r.stdout or "").strip() or "n/a",
+            "meaning": "the assembled prompt prefix is reused as KV blocks; it re-computes only "
+                       "when the prefix text changes",
+        }
+    except Exception as e:
+        out["vllm_prefix_cache"] = {"enabled": True, "error": str(e)[:150]}
+
+    # redis: what is held and for how long
+    try:
+        import redis as _r
+        c = _r.Redis(host="127.0.0.1", port=6379, decode_responses=True, socket_timeout=2)
+        keys = [k for k in c.scan_iter(match="taey:predict:*", count=200)][:20]
+        out["redis"] = {"conversation_keys": [{"key": k, "ttl_seconds": c.ttl(k)} for k in keys],
+                        "note": "the OLD 300s-TTL conversation store; the durable one is now on disk"}
+    except Exception as e:
+        out["redis"] = {"error": str(e)[:150]}
+
+    # durable session store
+    try:
+        d = os.environ.get("TAEY_SESSIONS_DIR", "/home/mira/taey_sessions")
+        files = [f for f in os.listdir(d) if f.endswith(".jsonl")] if os.path.isdir(d) else []
+        out["sessions"] = {"dir": d, "count": len(files), "persistence": "append-only on disk, no TTL"}
+    except Exception as e:
+        out["sessions"] = {"error": str(e)[:150]}
+
+    return out
