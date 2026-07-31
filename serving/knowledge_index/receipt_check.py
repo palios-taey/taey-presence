@@ -255,6 +255,32 @@ def artifact_reachable_from_default(repo: str, sha: str) -> bool:
     return compare.get("status") in {"behind", "identical"}
 
 
+def commit_ancestor_or_equal(repo: str, ancestor_sha: str, descendant_sha: str) -> bool:
+    if ancestor_sha == descendant_sha:
+        return True
+
+    root = fixture_root()
+    if root:
+        path = fixture_file(root, "ancestors", f"{repo_key(repo)}.json")
+        if not path.exists():
+            return False
+        data = json.loads(path.read_text())
+        if not isinstance(data, dict):
+            raise CheckerError(f"{path} root is not an object")
+        ancestors = data.get(descendant_sha, [])
+        if not isinstance(ancestors, list):
+            raise CheckerError(f"{path} entry for {descendant_sha} is not a list")
+        return ancestor_sha in ancestors
+
+    base = urllib.parse.quote(ancestor_sha, safe="")
+    head = urllib.parse.quote(descendant_sha, safe="")
+    try:
+        compare = fetch_json_url(f"https://api.github.com/repos/{repo}/compare/{base}...{head}")
+    except MissingRemote:
+        return False
+    return compare.get("status") in {"behind", "identical"}
+
+
 def production_entries(index: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
     present = set(index.get("sections_present") or [])
     entries: list[tuple[str, dict[str, Any]]] = []
@@ -293,7 +319,7 @@ def index_ref_matches(ref: Any, section_name: str, surface_id: str) -> bool:
 
 
 def validate_receipt_bindings(
-    index: dict[str, Any],
+    _index: dict[str, Any],
     section_name: str,
     entry: dict[str, Any],
 ) -> tuple[dict[str, Any], str]:
@@ -328,6 +354,7 @@ def validate_receipt_bindings(
     entry_manifest = entry.get("artifact_manifest") or {}
     manifest_path = entry_manifest.get("path")
     manifest_sha = entry_manifest.get("sha256")
+    compiled_at_commit = receipt.get("compiled_at_commit")
 
     checks = [
         receipt.get("surface_id") == entry.get("id"),
@@ -336,10 +363,13 @@ def validate_receipt_bindings(
         receipt.get("artifact_manifest_sha256") == manifest_sha,
         liveness.get("probe_cmd") == entry_liveness.get("probe_cmd"),
         liveness.get("expect") == entry_liveness.get("expect"),
-        receipt.get("compiled_at_commit") == index.get("generated_at_commit"),
         index_ref_matches(receipt.get("index_entry_ref"), section_name, str(entry.get("id"))),
     ]
     if not all(checks):
+        raise Refusal(REFUSE_BINDING_MISMATCH, actual_receipt_sha)
+    if not isinstance(compiled_at_commit, str) or not compiled_at_commit:
+        raise Refusal(REFUSE_BINDING_MISMATCH, actual_receipt_sha)
+    if not commit_ancestor_or_equal(repo, compiled_at_commit, pinned_sha):
         raise Refusal(REFUSE_BINDING_MISMATCH, actual_receipt_sha)
     if not isinstance(manifest_path, str) or not manifest_path or not isinstance(manifest_sha, str):
         raise Refusal(REFUSE_BINDING_MISMATCH, actual_receipt_sha)

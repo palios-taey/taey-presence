@@ -20,6 +20,7 @@ WRAPPER_RESOLVE = HERE / "taey-index-resolve"
 REPO = "palios-taey/taey-presence"
 REPO_KEY = "palios-taey__taey-presence"
 PINNED_SHA = "1111111111111111111111111111111111111111"
+COMPILED_SHA = "0000000000000000000000000000000000000000"
 ARTIFACT_SHA = "2222222222222222222222222222222222222222"
 SURFACE_ID = "fixture-surface"
 
@@ -60,6 +61,7 @@ class ReceiptFixture:
             "required_contexts": ["fixture-ci"],
             "trusted_actors": {"apps": ["github-actions"], "logins": ["trusted-bot"]},
         }
+        self.compiled_at_commit = PINNED_SHA
         self.index = {
             "index_id": "taey-knowledge-index",
             "version": 1,
@@ -119,7 +121,7 @@ class ReceiptFixture:
             "gates_manifest_ref": self.gates_manifest_ref,
             "liveness": copy.deepcopy(self.liveness),
             "index_entry_ref": SURFACE_ID,
-            "compiled_at_commit": PINNED_SHA,
+            "compiled_at_commit": self.compiled_at_commit,
         }
 
     def write_remote(self, ref: str, rel_path: str, raw: bytes) -> None:
@@ -146,6 +148,11 @@ class ReceiptFixture:
         path = self.remote / "reachable" / f"{REPO_KEY}.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(shas))
+
+    def write_ancestors(self, ancestors_by_descendant: dict[str, list[str]]) -> None:
+        path = self.remote / "ancestors" / f"{REPO_KEY}.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(ancestors_by_descendant))
 
     def rewrite_receipt_and_index(self) -> None:
         receipt_raw = json_bytes(self.receipt())
@@ -224,6 +231,24 @@ class ReceiptCheckerTests(unittest.TestCase):
             self.assertEqual(payload["verdict"], "ACCEPT")
             self.assertEqual(payload["reason"], "accepted")
             self.assertEqual(payload["receipt_sha256"], expected_sha)
+
+    def test_full_accept_fixture_allows_non_equal_compiler_ancestor(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            fixture = ReceiptFixture(Path(td))
+            fixture.compiled_at_commit = COMPILED_SHA
+            fixture.write_ancestors({PINNED_SHA: [COMPILED_SHA]})
+            fixture.rewrite_receipt_and_index()
+            payload = self.run_check(fixture, expected_rc=0)
+            self.assertEqual(payload["verdict"], "ACCEPT")
+            self.assertEqual(payload["reason"], "accepted")
+
+    def test_non_ancestor_compiler_commit_refuses_binding_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            fixture = ReceiptFixture(Path(td))
+            fixture.compiled_at_commit = COMPILED_SHA
+            fixture.rewrite_receipt_and_index()
+            payload = self.run_check(fixture)
+            self.assertEqual(payload["reason"], "binding-mismatch")
 
     def test_no_receipt_refuses_no_receipt(self) -> None:
         with tempfile.TemporaryDirectory() as td:
