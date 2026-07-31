@@ -1,0 +1,11 @@
+[Unit]
+# Start, stop and check the council as one thing.
+#
+# Without this, adopting seven seats means seven commands and seven chances to leave one
+# behind — and a council missing a lens looks like a working council, which is the failure
+# mode that is hardest to notice.
+Description=Taey council (all seats)
+After=network.target
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,41 @@
+[Unit]
+# One council seat, managed. %i is the SEAT NUMBER (1-7), not the role.
+#
+# WHY THE NUMBER AND NOT THE ROLE: the seat number is the LIVENESS NAMESPACE
+# (taey:taey-council-N:*) and claude-code-fleet-notify addresses `taey-council-1` through
+# `taey-council-7` as canonical line-reader sessions. Renaming instances to roles would
+# silently break notify delivery — the seats would run and simply stop being reachable.
+# The role is a separate axis and lives in the per-seat EnvironmentFile.
+Description=Taey council seat %i
+After=network.target
+PartOf=taey-council.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/taey-presence-production
+
+# Per-seat identity + role mapping. Committed, versioned, one file per seat.
+EnvironmentFile=%h/taey-presence-production/serving/council_seats/%i.env
+
+# Derived from the instance — never hardcoded, so this unit carries no operator path.
+Environment=PYTHONUNBUFFERED=1
+Environment=TAEY_SESSION_NAME=taey-council-%i
+Environment=TAEY_EXECUTIVE_EVENT_LOG=%h/taey_sessions/council/taey-council-%i.jsonl
+Environment=TAEY_COUNCIL_SHARED_PROMPT_PATH=serving/council_prompts/shared.md
+Environment=TAEY_SEAT_PROXY=http://127.0.0.1:8766/v1/chat/completions
+Environment=TAEY_MODEL=ep3
+Environment=TAEY_SEAT_TIMEOUT=1800
+Environment=TAEY_SEAT_MAX_TURNS=60
+Environment=REDIS_HOST=127.0.0.1
+Environment=REDIS_PORT=6379
+
+ExecStart=/usr/bin/python3 -u serving/taey_council_seat.py
+
+# A seat that dies mid-council should come back; one that cannot start should not spin.
+Restart=on-failure
+RestartSec=10
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Install]
+WantedBy=taey-council.target
