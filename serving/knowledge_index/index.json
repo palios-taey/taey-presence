@@ -1,0 +1,230 @@
+{
+  "code_host_allowlist": [
+    "github.com"
+  ],
+  "index_id": "taey-knowledge-index",
+  "live_url": "https://github.com/palios-taey/taey-presence/raw/main/serving/knowledge_index/index.json",
+  "sections": {
+    "presence": {
+      "capabilities": [
+        {
+          "bootstrap": {
+            "cmd": "bash serving/deploy_thor.sh --check",
+            "requires": []
+          },
+          "endpoints": [
+            {
+              "env": "TAEY_SERVE_URL",
+              "health": "/v1/models",
+              "name": "openai"
+            }
+          ],
+          "entry_doc": "serving/SERVING.md",
+          "hardware_tier": "thor-inference",
+          "id": "presence-serve",
+          "kind": "serve",
+          "receipts": {
+            "liveness": "serving/receipts/presence-serve.liveness.json",
+            "usage": "serving/receipts/presence-serve.usage.json"
+          },
+          "repo": {
+            "name": "palios-taey/taey-presence",
+            "public_url": "https://github.com/palios-taey/taey-presence"
+          },
+          "status": "production",
+          "validate": {
+            "cmd": "curl -sf \"$TAEY_SERVE_URL/v1/models\"",
+            "expect": "JSON whose data[0].root is the artifact path currently served; the alias in data[0].id is NOT the artifact"
+          }
+        },
+        {
+          "bootstrap": {
+            "cmd": "systemctl --user start taey-soma-proxy-mira.service",
+            "requires": [
+              "presence-serve"
+            ]
+          },
+          "endpoints": [
+            {
+              "env": "TAEY_PROXY_URL",
+              "health": "/v1/models",
+              "name": "chat"
+            }
+          ],
+          "entry_doc": "serving/DEPLOYMENT_TOPOLOGY.md",
+          "hardware_tier": "any",
+          "id": "presence-proxy",
+          "kind": "serve",
+          "receipts": {
+            "liveness": "serving/receipts/presence-proxy.liveness.json",
+            "usage": "serving/receipts/presence-proxy.usage.json"
+          },
+          "repo": {
+            "name": "palios-taey/taey-presence",
+            "public_url": "https://github.com/palios-taey/taey-presence"
+          },
+          "status": "production",
+          "validate": {
+            "cmd": "curl -sf \"$TAEY_PROXY_URL/v1/models\"",
+            "expect": "the same served alias the upstream reports; the proxy is a pass-through, so a mismatch means the proxy is pointed at a different node"
+          }
+        },
+        {
+          "bootstrap": {
+            "cmd": "systemctl start taey-dashboard.service",
+            "requires": [
+              "presence-proxy"
+            ]
+          },
+          "endpoints": [
+            {
+              "env": "TAEY_DASHBOARD_URL",
+              "health": "/api/self/overview",
+              "name": "self"
+            }
+          ],
+          "entry_doc": "serving/DEPLOYMENT_TOPOLOGY.md",
+          "hardware_tier": "any",
+          "id": "presence-dashboard",
+          "kind": "serve",
+          "receipts": {
+            "liveness": "serving/receipts/presence-dashboard.liveness.json",
+            "usage": "serving/receipts/presence-dashboard.usage.json"
+          },
+          "repo": {
+            "name": "palios-taey/taey-presence",
+            "public_url": "https://github.com/palios-taey/taey-presence"
+          },
+          "status": "production",
+          "validate": {
+            "cmd": "curl -sf \"$TAEY_DASHBOARD_URL/api/self/overview\"",
+            "expect": "JSON with a body object carrying rho; rho below 0.809 is the alert threshold, not a failure of this check"
+          }
+        },
+        {
+          "bootstrap": {
+            "cmd": "python3 serving/taey_council_seat.py",
+            "requires": [
+              "presence-proxy"
+            ]
+          },
+          "endpoints": [
+            {
+              "env": "TAEY_SEAT_PROXY",
+              "health": "/v1/models",
+              "name": "proxy"
+            }
+          ],
+          "entry_doc": "serving/SEAT.md",
+          "hardware_tier": "any",
+          "id": "presence-seat",
+          "kind": "orchestrate",
+          "receipts": {
+            "liveness": "serving/receipts/presence-seat.liveness.json",
+            "usage": "serving/receipts/presence-seat.usage.json"
+          },
+          "repo": {
+            "name": "palios-taey/taey-presence",
+            "public_url": "https://github.com/palios-taey/taey-presence"
+          },
+          "status": "production",
+          "validate": {
+            "cmd": "python3 serving/seat_liveness.py",
+            "expect": "exit 0 and a JSON line reporting seat count and the liveness key namespace each seat writes"
+          }
+        }
+      ],
+      "processes": [
+        {
+          "expect": "data[0].root is the artifact path; data[0].id is only the alias",
+          "launch": [
+            "curl -sf \"$TAEY_SERVE_URL/v1/models\""
+          ],
+          "never": [
+            "never state a weights path from memory or from a document \u2014 the alias is permanent and the artifact behind it changes at every promotion"
+          ],
+          "on_fail": "notify infra; serving/SERVING.md decides whether this is a deploy gap or a defect",
+          "plan_ref": "serving/SERVING.md",
+          "process": "Find out which weights are actually answering as `ep3`"
+        },
+        {
+          "expect": "every node reports the same data[0].root and the drift gate passes",
+          "launch": [
+            "bash serving/promote_model.sh"
+          ],
+          "never": [
+            "never promote by copying to one node and assuming the other; never gate a serving change on byte-identical generated output \u2014 greedy output is not byte-stable across a restart"
+          ],
+          "on_fail": "notify infra; do not serve a partially-promoted fleet",
+          "plan_ref": "serving/SERVING.md",
+          "process": "Promote one checkpoint onto every serving node and prove they are identical"
+        },
+        {
+          "expect": "each consumer classified PINNED-NO-FAILOVER, REDIRECTABLE or WEIGHTS-WATCHER, with RULED OUT / OPEN stated per run",
+          "launch": [
+            "bash serving/list_ep3_consumers.sh"
+          ],
+          "never": [
+            "never recall the consumer list from memory or from a document \u2014 run the script; a stale list reads exactly like a current one"
+          ],
+          "on_fail": "notify infra; treat an unmapped consumer as PINNED until proven otherwise",
+          "plan_ref": "serving/DEPLOYMENT_TOPOLOGY.md",
+          "process": "Check what a serving node is doing before changing anything on it"
+        },
+        {
+          "expect": "every node reports the managed committed artifact and no unmanaged local copy",
+          "launch": [
+            "bash serving/deploy_thor.sh --check"
+          ],
+          "never": [
+            "never branch-switch a tree a service runs from \u2014 make a worktree; never assume a service runs the file its command line names, because WorkingDirectory plus PYTHONPATH can resolve a different one"
+          ],
+          "on_fail": "notify infra; a node running an unmanaged copy is a full stop, not a warning",
+          "plan_ref": "serving/DEPLOYMENT_TOPOLOGY.md",
+          "process": "Restart a presence service without serving the wrong code"
+        }
+      ]
+    }
+  },
+  "sections_pending": [
+    {
+      "lands_at": "careers-connect",
+      "section": "careers"
+    },
+    {
+      "lands_at": "orch-connect",
+      "section": "conductor"
+    },
+    {
+      "lands_at": "consult-connect",
+      "section": "consult"
+    },
+    {
+      "lands_at": "corpus-classification",
+      "section": "identity"
+    },
+    {
+      "lands_at": "isma-connect",
+      "section": "memory"
+    },
+    {
+      "lands_at": "train-connect",
+      "section": "train-how"
+    }
+  ],
+  "sections_present": [
+    "presence"
+  ],
+  "source_manifest": {
+    "compiled_body_sha256": "aca17a907734eebee250cd95573ea1a502768e10611bfe81bf91c1d227371dfb",
+    "sections": [
+      {
+        "path": "serving/knowledge_index/sections/presence.md",
+        "repo": "palios-taey/taey-presence",
+        "section": "presence",
+        "sha256": "9885b163a9fff7f3b1115dd156bc22f49bc17d3c296d6b3fdb94ed22b077afa8"
+      }
+    ]
+  },
+  "version": 1
+}

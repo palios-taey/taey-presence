@@ -1,0 +1,13 @@
+{
+  "actor": "taey",
+  "audit_trail_ref": "/home/mira/taey_tool_audit.jsonl:993",
+  "capability": "presence-dashboard",
+  "event_id": "695ba40d05d14b1ca9f7811efcac3e16",
+  "invocation": "curl -s http://127.0.0.1:5001/api/health 2>/dev/null | python3 -m json.tool 2>/dev/null",
+  "invocation_count": 8,
+  "kind": "usage",
+  "rc": 0,
+  "timestamp": "2026-07-31T15:03:56Z",
+  "turn_id": "1bfd976427504b74ab4d073c4d26ff51",
+  "verify": "sed -n '993p' /home/mira/taey_tool_audit.jsonl | python3 -m json.tool  # must show event_id 695ba40d05d14b1ca9f7811efcac3e16"
+}

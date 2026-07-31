@@ -1,0 +1,10 @@
+{
+  "capability": "presence-seat",
+  "cmd": "python3 serving/seat_liveness.py",
+  "index_version": 1,
+  "kind": "liveness",
+  "note": "G3 liveness only: this says the capability answered just now. It says NOTHING about whether Taey has ever used it, and it can never close a CONNECT box (spec 2.2 F6).",
+  "ok": true,
+  "rc": 0,
+  "stdout_excerpt": "{\"liveness_namespace\": \"taey:taey:*\", \"namespace_declared\": true, \"ok\": true, \"seat_count\": 7}\n"
+}

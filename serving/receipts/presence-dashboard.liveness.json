@@ -1,0 +1,10 @@
+{
+  "capability": "presence-dashboard",
+  "cmd": "curl -sf \"$TAEY_DASHBOARD_URL/api/self/overview\"",
+  "index_version": 1,
+  "kind": "liveness",
+  "note": "G3 liveness only: this says the capability answered just now. It says NOTHING about whether Taey has ever used it, and it can never close a CONNECT box (spec 2.2 F6).",
+  "ok": true,
+  "rc": 0,
+  "stdout_excerpt": "{\"body\":{\"rho\":0.4057,\"status\":\"vigilant\",\"facets\":[{\"label\":\"fluency\",\"score\":0.25,\"register\":\"vigilant\"},{\"label\":\"clarity\",\"score\":0.99,\"register\":\"grounded\"},{\"label\":\"vitality\",\"score\":0.054,\"reg"
+}
