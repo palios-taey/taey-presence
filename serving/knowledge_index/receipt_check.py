@@ -515,7 +515,7 @@ def validate_liveness(entry: dict[str, Any], receipt_sha: str) -> None:
     raise CheckerError(f"unsupported liveness predicate language: {lang}")
 
 
-def check_surface(surface_id: str) -> tuple[str, str]:
+def check_surface(surface_id: str) -> str:
     index, index_raw = load_adopted_index()
 
     live_raw = fetch_live_index(index)
@@ -527,7 +527,7 @@ def check_surface(surface_id: str) -> tuple[str, str]:
     validate_reachable(entry, receipt_sha)
     validate_gates(entry, receipt, receipt_sha)
     validate_liveness(entry, receipt_sha)
-    return REFUSE_NOT_LIVE, receipt_sha
+    return receipt_sha
 
 
 def walk_strings(node: Any) -> list[str]:
@@ -593,7 +593,7 @@ def main_check(argv: list[str] | None = None) -> int:
         return EXIT_CHECKER_ERROR
     surface_id = args[0]
     try:
-        _, receipt_sha = check_surface(surface_id)
+        receipt_sha = check_surface(surface_id)
     except Refusal as exc:
         output("REFUSE", surface_id, exc.reason, exc.receipt_sha256)
         return EXIT_REFUSE
