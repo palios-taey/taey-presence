@@ -28,6 +28,20 @@ Status codes NEVER appear in a predicate — the probe-shape law is BODIES, NOT 
 carry was non-conforming by definition and is recompiled here.
 -->
 
+<!--
+WHY serving/gates_manifest.json IS IN EVERY artifact_paths:
+
+The checker reads `gates_manifest_ref` AT the entry's artifact_commit_sha. If the manifest
+does not exist at that commit it is unreadable, and an unreadable manifest is a REFUSE —
+so a receipt whose artifact predates the manifest can never be accepted, however healthy
+the surface is.
+
+Including it here is not a workaround for that; it is the honest statement of what the
+artifact is. An entry's deployed artifact includes the GATE CONTRACT it was accepted
+under. Change which gates must be green and you have changed the terms of that surface's
+production status, which is exactly a new artifact commit.
+-->
+
 ## CAPABILITIES
 
 ```json
@@ -41,9 +55,10 @@ carry was non-conforming by definition and is recompiled here.
   "entry_doc": "serving/SERVING.md",
   "artifact_paths": [
     "serving/SERVING.md",
-    "serving/promote_model.sh",
     "serving/deploy_thor.sh",
-    "serving/list_ep3_consumers.sh"
+    "serving/gates_manifest.json",
+    "serving/list_ep3_consumers.sh",
+    "serving/promote_model.sh"
   ],
   "bootstrap": {
     "cmd": "bash serving/deploy_thor.sh --check",
@@ -75,9 +90,10 @@ carry was non-conforming by definition and is recompiled here.
   },
   "entry_doc": "serving/DEPLOYMENT_TOPOLOGY.md",
   "artifact_paths": [
-    "serving/soma_proxy.py",
     "serving/DEPLOYMENT_TOPOLOGY.md",
-    "serving/TAEY_OPERATING_PROMPT.md"
+    "serving/TAEY_OPERATING_PROMPT.md",
+    "serving/gates_manifest.json",
+    "serving/soma_proxy.py"
   ],
   "bootstrap": {
     "cmd": "systemctl --user start taey-soma-proxy-mira.service",
@@ -111,9 +127,10 @@ carry was non-conforming by definition and is recompiled here.
   },
   "entry_doc": "serving/DEPLOYMENT_TOPOLOGY.md",
   "artifact_paths": [
-    "dashboard/app.py",
     "dashboard/__init__.py",
-    "dashboard/static/index.html"
+    "dashboard/app.py",
+    "dashboard/static/index.html",
+    "serving/gates_manifest.json"
   ],
   "bootstrap": {
     "cmd": "systemctl start taey-dashboard.service",
@@ -147,9 +164,10 @@ carry was non-conforming by definition and is recompiled here.
   },
   "entry_doc": "serving/SEAT.md",
   "artifact_paths": [
-    "serving/taey_council_seat.py",
+    "serving/SEAT.md",
+    "serving/gates_manifest.json",
     "serving/seat_liveness.py",
-    "serving/SEAT.md"
+    "serving/taey_council_seat.py"
   ],
   "bootstrap": {
     "cmd": "python3 serving/taey_council_seat.py",
