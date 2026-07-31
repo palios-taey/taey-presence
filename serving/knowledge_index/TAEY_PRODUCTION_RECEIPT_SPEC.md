@@ -72,7 +72,7 @@ verified downward only:
 }
 ```
 
-Binding rules (every field EQUALITY-checked against the index entry in R2). **The
+Binding rules (field equality unless this section names a different mechanical predicate). **The
 self-reference is broken by construction**: the receipt's LOCATION authority is the
 pinned fetch itself (`entry.receipts.liveness` at `entry.repo.pinned_sha` + blob-hash
 equality) — the receipt never stores the SHA of its own containing commit. What it stores
@@ -144,7 +144,7 @@ definition, no judgment involved.
 |---|---|---|
 | R0 | fetched index content hash == the ADOPTED index hash (bootstrap output, §2) | index-stale |
 | R1 | surface_id is a `status: production` entry in `sections_present` | not-in-index |
-| R2 | receipt fetched at pinned_sha; sha256 + ALL binding fields equal (§3) | binding-mismatch / no-receipt |
+| R2 | receipt fetched at pinned_sha; sha256 + equality bindings match (§3); compiled_at_commit ancestor-or-equal to pinned_sha | binding-mismatch / no-receipt |
 | R3 | `artifact_commit_sha` reachable from the repo's default branch | unreachable-sha |
 | R4 | gates per the committed manifest, exact-set, non-empty, sha-exact, actor-allowlisted (§4) | gate-not-green / untrusted-actor |
 | R5 | liveness probe passes its compiled predicate (§6) | not-live |
