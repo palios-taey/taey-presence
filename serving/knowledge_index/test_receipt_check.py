@@ -228,6 +228,17 @@ class ReceiptCheckerTests(unittest.TestCase):
             self.assertEqual(payload["reason"], "binding-mismatch")
             self.assertEqual(payload["receipt_sha256"], "")
 
+    def test_full_accept_fixture_accepts(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            fixture = ReceiptFixture(Path(td))
+            payload = self.run_check(fixture, expected_rc=0)
+            expected_sha = (
+                fixture.index["sections"]["presence"]["capabilities"][0]["receipts"]["liveness_sha256"]
+            )
+            self.assertEqual(payload["verdict"], "ACCEPT")
+            self.assertEqual(payload["reason"], "accepted")
+            self.assertEqual(payload["receipt_sha256"], expected_sha)
+
     def test_no_receipt_refuses_no_receipt(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             fixture = ReceiptFixture(Path(td))
