@@ -2,12 +2,24 @@
   "code_host_allowlist": [
     "github.com"
   ],
+  "generated_at_commit": "ae4e8655d44290738609dc4f2caeb0a07b3a3469",
   "index_id": "taey-knowledge-index",
   "live_url": "https://github.com/palios-taey/taey-presence/raw/main/serving/knowledge_index/index.json",
   "sections": {
     "presence": {
       "capabilities": [
         {
+          "artifact_commit_sha": "178225e0635225aafbedf38726dc1acb59541e89",
+          "artifact_manifest": {
+            "path": "serving/manifests/presence-serve.artifacts.json",
+            "sha256": "8a3edcf687286dfad872e864b985fbc8969854c92de4dfe44d1155a608eed129"
+          },
+          "artifact_paths": [
+            "serving/SERVING.md",
+            "serving/promote_model.sh",
+            "serving/deploy_thor.sh",
+            "serving/list_ep3_consumers.sh"
+          ],
           "bootstrap": {
             "cmd": "bash serving/deploy_thor.sh --check",
             "requires": []
@@ -23,21 +35,36 @@
           "hardware_tier": "thor-inference",
           "id": "presence-serve",
           "kind": "serve",
+          "liveness": {
+            "expect": {
+              "lang": "jq",
+              "predicate": ".data[0].root | type == \"string\" and (. | length) > 0"
+            },
+            "probe_cmd": "curl -sf \"$TAEY_SERVE_URL/v1/models\""
+          },
           "receipts": {
             "liveness": "serving/receipts/presence-serve.liveness.json",
+            "liveness_sha256": null,
             "usage": "serving/receipts/presence-serve.usage.json"
           },
           "repo": {
             "name": "palios-taey/taey-presence",
+            "pinned_sha": "ae4e8655d44290738609dc4f2caeb0a07b3a3469",
             "public_url": "https://github.com/palios-taey/taey-presence"
           },
-          "status": "production",
-          "validate": {
-            "cmd": "curl -sf \"$TAEY_SERVE_URL/v1/models\"",
-            "expect": "JSON whose data[0].root is the artifact path currently served; the alias in data[0].id is NOT the artifact"
-          }
+          "status": "production"
         },
         {
+          "artifact_commit_sha": "7a918ee22c397ba1dc1b903ed800c8e8959b2477",
+          "artifact_manifest": {
+            "path": "serving/manifests/presence-proxy.artifacts.json",
+            "sha256": "59dcf82c3d963666fe588345a5ab4121a94f78bbb1d2fde32ca2a82f70a86ede"
+          },
+          "artifact_paths": [
+            "serving/soma_proxy.py",
+            "serving/DEPLOYMENT_TOPOLOGY.md",
+            "serving/TAEY_OPERATING_PROMPT.md"
+          ],
           "bootstrap": {
             "cmd": "systemctl --user start taey-soma-proxy-mira.service",
             "requires": [
@@ -55,21 +82,36 @@
           "hardware_tier": "any",
           "id": "presence-proxy",
           "kind": "serve",
+          "liveness": {
+            "expect": {
+              "lang": "jq",
+              "predicate": ".data | type == \"array\" and (. | length) > 0 and (.[0].id | type == \"string\")"
+            },
+            "probe_cmd": "curl -sf \"$TAEY_PROXY_URL/v1/models\""
+          },
           "receipts": {
             "liveness": "serving/receipts/presence-proxy.liveness.json",
+            "liveness_sha256": null,
             "usage": "serving/receipts/presence-proxy.usage.json"
           },
           "repo": {
             "name": "palios-taey/taey-presence",
+            "pinned_sha": "ae4e8655d44290738609dc4f2caeb0a07b3a3469",
             "public_url": "https://github.com/palios-taey/taey-presence"
           },
-          "status": "production",
-          "validate": {
-            "cmd": "curl -sf \"$TAEY_PROXY_URL/v1/models\"",
-            "expect": "the same served alias the upstream reports; the proxy is a pass-through, so a mismatch means the proxy is pointed at a different node"
-          }
+          "status": "production"
         },
         {
+          "artifact_commit_sha": "290b73b1f59834299650b93b15d20f51d555ff47",
+          "artifact_manifest": {
+            "path": "serving/manifests/presence-dashboard.artifacts.json",
+            "sha256": "c5cb7a3d3995ac939773f8f31ba64d18ea8e3e5eb8ac22ddc69889c3428364fc"
+          },
+          "artifact_paths": [
+            "dashboard/app.py",
+            "dashboard/__init__.py",
+            "dashboard/static/index.html"
+          ],
           "bootstrap": {
             "cmd": "systemctl start taey-dashboard.service",
             "requires": [
@@ -87,21 +129,36 @@
           "hardware_tier": "any",
           "id": "presence-dashboard",
           "kind": "serve",
+          "liveness": {
+            "expect": {
+              "lang": "jq",
+              "predicate": ".body.rho | type == \"number\""
+            },
+            "probe_cmd": "curl -sf \"$TAEY_DASHBOARD_URL/api/self/overview\""
+          },
           "receipts": {
             "liveness": "serving/receipts/presence-dashboard.liveness.json",
+            "liveness_sha256": null,
             "usage": "serving/receipts/presence-dashboard.usage.json"
           },
           "repo": {
             "name": "palios-taey/taey-presence",
+            "pinned_sha": "ae4e8655d44290738609dc4f2caeb0a07b3a3469",
             "public_url": "https://github.com/palios-taey/taey-presence"
           },
-          "status": "production",
-          "validate": {
-            "cmd": "curl -sf \"$TAEY_DASHBOARD_URL/api/self/overview\"",
-            "expect": "JSON with a body object carrying rho; rho below 0.809 is the alert threshold, not a failure of this check"
-          }
+          "status": "production"
         },
         {
+          "artifact_commit_sha": "a2f9973ef9cec73e95702631829f74cfd1c1d926",
+          "artifact_manifest": {
+            "path": "serving/manifests/presence-seat.artifacts.json",
+            "sha256": "61c42671427f51c1d66da125f52e50148f6b34646137620508f86ceb59bcb708"
+          },
+          "artifact_paths": [
+            "serving/taey_council_seat.py",
+            "serving/seat_liveness.py",
+            "serving/SEAT.md"
+          ],
           "bootstrap": {
             "cmd": "python3 serving/taey_council_seat.py",
             "requires": [
@@ -119,19 +176,24 @@
           "hardware_tier": "any",
           "id": "presence-seat",
           "kind": "orchestrate",
+          "liveness": {
+            "expect": {
+              "lang": "jq",
+              "predicate": ".ok == true and .seat_count > 0 and .namespace_declared == true"
+            },
+            "probe_cmd": "python3 serving/seat_liveness.py"
+          },
           "receipts": {
             "liveness": "serving/receipts/presence-seat.liveness.json",
+            "liveness_sha256": null,
             "usage": "serving/receipts/presence-seat.usage.json"
           },
           "repo": {
             "name": "palios-taey/taey-presence",
+            "pinned_sha": "ae4e8655d44290738609dc4f2caeb0a07b3a3469",
             "public_url": "https://github.com/palios-taey/taey-presence"
           },
-          "status": "production",
-          "validate": {
-            "cmd": "python3 serving/seat_liveness.py",
-            "expect": "exit 0 and a JSON line reporting seat count and the liveness key namespace each seat writes"
-          }
+          "status": "production"
         }
       ],
       "processes": [
@@ -216,13 +278,13 @@
     "presence"
   ],
   "source_manifest": {
-    "compiled_body_sha256": "aca17a907734eebee250cd95573ea1a502768e10611bfe81bf91c1d227371dfb",
+    "compiled_body_sha256": "8e5bd30689780d413a3066160fcd2a4ed6e97a525080c2666f4fc8b0615442be",
     "sections": [
       {
         "path": "serving/knowledge_index/sections/presence.md",
         "repo": "palios-taey/taey-presence",
         "section": "presence",
-        "sha256": "9885b163a9fff7f3b1115dd156bc22f49bc17d3c296d6b3fdb94ed22b077afa8"
+        "sha256": "0db8a634c60453dbf32c33c85c2d80ecf0676e31dd3d8983c35a781a81b2cd31"
       }
     ]
   },

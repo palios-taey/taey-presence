@@ -21,10 +21,13 @@ import argparse
 import hashlib
 import json
 import re
+import subprocess
 import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+REPO_ROOT = HERE.parent.parent
+MANIFEST_DIR = HERE.parent / "manifests"
 SECTIONS_DIR = HERE / "sections"
 OUT = HERE / "index.json"
 
@@ -51,6 +54,43 @@ PROCESS_FIELDS = ("PROCESS", "PLAN", "LAUNCH", "EXPECT", "ON FAIL", "NEVER")
 
 def sha256_bytes(b: bytes) -> str:
     return hashlib.sha256(b).hexdigest()
+
+
+def canonical_bytes(obj) -> bytes:
+    """Canonical JSON per receipt spec §2: sorted keys, no insignificant whitespace, UTF-8.
+
+    The hash is taken over THESE bytes. Any other serialisation of the same object hashes
+    differently, so the canonicalisation is part of the contract rather than a detail.
+    """
+    return json.dumps(obj, sort_keys=True, separators=(",", ":"),
+                      ensure_ascii=False).encode("utf-8")
+
+
+def git(*args: str) -> str:
+    return subprocess.run(["git", "-C", str(REPO_ROOT), *args],
+                          capture_output=True, text=True, timeout=30).stdout.strip()
+
+
+def head_commit() -> str:
+    """The SOURCE commit the build reads.
+
+    Receipt spec: `generated_at_commit` is a PARENT of the commit that will contain the
+    built index — never that commit itself. HEAD at build time is exactly that: the commit
+    the sources were read at, which the build's own commit will descend from. The
+    self-reference is broken by construction, not by convention.
+    """
+    return git("rev-parse", "HEAD")
+
+
+def last_commit_touching(paths: list) -> str:
+    """The commit of the DEPLOYED ARTIFACT, not the commit carrying the index.
+
+    Same self-reference discipline: an entry attests an artifact that already exists at an
+    earlier commit, so this is committable by normal git.
+    """
+    if not paths:
+        return ""
+    return git("log", "-1", "--format=%H", "--", *paths)
 
 
 def parse_capabilities(text: str) -> list[dict]:
@@ -98,6 +138,63 @@ def parse_processes(text: str) -> list[dict]:
     return out
 
 
+def _conforming_receipt_sha(rel: str | None):
+    """sha256 of the receipt blob — but ONLY if it is a conforming v2 receipt.
+
+    The receipt spec declares old-format liveness receipts (stdout_excerpt/rc) NON-CONFORMING
+    by definition; they are recompiled at rollout step 4. Hashing one now would bind the
+    index to a receipt that can never pass its own check — a binding that looks complete and
+    is guaranteed wrong. Null says "not yet compiled", which is true and is distinguishable
+    from a mismatch.
+    """
+    if not rel:
+        return None
+    f = REPO_ROOT / rel
+    if not f.is_file():
+        return None
+    raw = f.read_bytes()
+    try:
+        if json.loads(raw).get("receipt_version") != 2:
+            return None
+    except json.JSONDecodeError:
+        return None
+    return sha256_bytes(raw)
+
+
+def enrich_capability(cap: dict, src_commit: str) -> None:
+    """Fill the receipt-spec binding fields that are DERIVED, never authored.
+
+    Every one of these is read from git or computed from file bytes. A hand-written value
+    here would be a claim about a commit instead of a reading of one — and the receipt
+    chain's whole guarantee is that each hash is computed from the content it attests.
+    """
+    cap.setdefault("repo", {})["pinned_sha"] = src_commit
+
+    paths = cap.get("artifact_paths") or []
+    cap["artifact_commit_sha"] = last_commit_touching(paths)
+
+    # Canonical-JSON manifest of the entry's deployed artifacts: {path, sha256} each.
+    entries = []
+    for rel in sorted(paths):
+        f = REPO_ROOT / rel
+        if not f.is_file():
+            raise SystemExit(f"{cap['id']}: artifact_paths names a missing file: {rel}")
+        entries.append({"path": rel, "sha256": sha256_bytes(f.read_bytes())})
+    blob = canonical_bytes({"surface_id": cap["id"], "artifacts": entries})
+    mf = MANIFEST_DIR / f"{cap['id']}.artifacts.json"
+    mf.write_bytes(blob)
+    cap["artifact_manifest"] = {
+        "path": str(mf.relative_to(REPO_ROOT)),
+        "sha256": sha256_bytes(blob),
+    }
+
+    # The receipt blob's own hash. Rollout step 2 lands the FIELD; step 4 compiles the
+    # receipts. Null means "not yet compiled" and is distinguishable from a wrong hash —
+    # an empty string would silently equal a missing file's digest in a sloppy comparison.
+    rc = cap.setdefault("receipts", {})
+    rc["liveness_sha256"] = _conforming_receipt_sha(rc.get("liveness"))
+
+
 def build() -> dict:
     if not SECTIONS_DIR.is_dir():
         raise SystemExit(f"no sections directory at {SECTIONS_DIR}")
@@ -105,13 +202,19 @@ def build() -> dict:
     if not section_files:
         raise SystemExit("no section sources found — the index cannot be empty")
 
+    src_commit = head_commit()
+    MANIFEST_DIR.mkdir(parents=True, exist_ok=True)
+
     manifest, sections, present = [], {}, []
     for path in section_files:
         raw = path.read_bytes()
         text = raw.decode()
         name = path.stem
+        caps = parse_capabilities(text)
+        for cap in caps:
+            enrich_capability(cap, src_commit)
         sections[name] = {
-            "capabilities": parse_capabilities(text),
+            "capabilities": caps,
             "processes": parse_processes(text),
         }
         present.append(name)
@@ -131,6 +234,9 @@ def build() -> dict:
     body = {
         "index_id": INDEX_ID,
         "version": INDEX_VERSION,
+        # The SOURCE commit this build read — a parent of the commit that will contain
+        # this file, never that commit itself (receipt spec §3 self-reference audit).
+        "generated_at_commit": src_commit,
         "live_url": LIVE_URL,
         "code_host_allowlist": sorted({
             entry["repo"]["public_url"].split("/")[2]

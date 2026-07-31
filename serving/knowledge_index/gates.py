@@ -162,8 +162,12 @@ def g2_pointer_crawl(doc: dict) -> Failure:
     return f
 
 
-CAP_REQUIRED = ["id", "kind", "repo", "entry_doc", "bootstrap", "validate",
-                "endpoints", "hardware_tier", "receipts", "status"]
+CAP_REQUIRED = ["id", "kind", "repo", "entry_doc", "bootstrap", "liveness",
+                "endpoints", "hardware_tier", "receipts", "status",
+                # receipt-spec binding fields (rollout step 2) — all land together,
+                # because a receipt cannot sequence before the fields that bind it.
+                "artifact_paths", "artifact_commit_sha", "artifact_manifest"]
+VALID_LANGS = {"jq", "text"}
 PROC_REQUIRED = ["process", "plan_ref", "launch", "expect", "on_fail", "never"]
 VALID_KINDS = {"memory", "serve", "orchestrate", "notify", "consult", "train-how"}
 VALID_STATUS = {"production", "deprecated"}
@@ -187,6 +191,43 @@ def g1_schema(doc: dict) -> Failure:
             for r in ("liveness", "usage"):
                 if r not in (cap.get("receipts") or {}):
                     f.add(where, r, "capability must declare both liveness and usage receipt paths")
+            if "liveness_sha256" not in (cap.get("receipts") or {}):
+                f.add(where, "receipts.liveness_sha256",
+                      "binding field missing (may be null until receipts compile, but the key must exist)")
+            if not (cap.get("repo") or {}).get("pinned_sha"):
+                f.add(where, "repo.pinned_sha", "binding field missing or empty")
+            if not cap.get("artifact_commit_sha"):
+                f.add(where, "artifact_commit_sha", "binding field missing or empty")
+            am = cap.get("artifact_manifest") or {}
+            if not am.get("path") or not am.get("sha256"):
+                f.add(where, "artifact_manifest", "must carry both path and sha256")
+            # Liveness must be an EXECUTABLE predicate, never prose (receipt spec §6).
+            lv = cap.get("liveness") or {}
+            if not lv.get("probe_cmd"):
+                f.add(where, "liveness.probe_cmd", "missing")
+            exp = lv.get("expect") or {}
+            if exp.get("lang") not in VALID_LANGS:
+                f.add(where, str(exp.get("lang")),
+                      f"liveness.expect.lang must be one of {sorted(VALID_LANGS)} — "
+                      "prose expectations are non-conforming by definition")
+            if not exp.get("predicate"):
+                f.add(where, "liveness.expect.predicate", "missing")
+            else:
+                pred = exp["predicate"]
+                if exp.get("lang") == "jq":
+                    r = subprocess.run(["jq", "-e", pred], input="{}", capture_output=True,
+                                       text=True, timeout=10)
+                    if r.returncode > 1:
+                        f.add(where, pred, f"invalid jq predicate: {r.stderr.strip()[:90]}")
+                elif exp.get("lang") == "text":
+                    r = subprocess.run(["grep", "-qE", pred], input="", capture_output=True,
+                                       text=True, timeout=10)
+                    if r.returncode > 1:
+                        f.add(where, pred, "invalid POSIX ERE")
+                if re.search(r"\bstatus_code\b|\bhttp_code\b|^\s*2\d\d\s*$", pred):
+                    f.add(where, pred, "predicate references a status code — the probe-shape "
+                                       "law is BODIES, NOT CODES: a 200 carrying an error "
+                                       "object is not liveness")
         for proc in sec.get("processes", []):
             where = f"sections.{name}.processes[{proc.get('process','?')[:40]}]"
             for k in PROC_REQUIRED:
@@ -206,9 +247,10 @@ def g3_liveness(doc: dict, write: bool = False) -> tuple[Failure, list[dict]]:
         for cap in sec.get("capabilities", []):
             if cap.get("status") != "production":
                 continue
-            cmd = (cap.get("validate") or {}).get("cmd")
+            lv = cap.get("liveness") or {}
+            cmd = lv.get("probe_cmd")
             if not cmd:
-                f.add(cap.get("id", "?"), "", "production capability has no validate.cmd")
+                f.add(cap.get("id", "?"), "", "production capability has no liveness.probe_cmd")
                 continue
             missing = [m.strip("${}") for m in ENVREF_RE.findall(cmd)
                        if not os.environ.get(m.strip("${}"))]
@@ -221,11 +263,37 @@ def g3_liveness(doc: dict, write: bool = False) -> tuple[Failure, list[dict]]:
             # the gate's own directory made a correct command look like a broken
             # capability, which is the worst kind of gate failure: it blames the thing
             # being measured for a defect in the measurement.
-            proc = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True,
-                                  timeout=30, cwd=HERE.parent.parent)
+            # Execution contract (receipt spec §6): 30s timeout, stdin closed, stderr
+            # discarded for the predicate. Non-zero exit, timeout, parse failure, or a
+            # failed predicate are ALL not-live — no partial credit.
+            try:
+                proc = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True,
+                                      timeout=30, cwd=HERE.parent.parent, stdin=subprocess.DEVNULL)
+            except subprocess.TimeoutExpired:
+                f.add(cap["id"], cmd, "probe timed out (30s) — not-live")
+                continue
             ok = proc.returncode == 0
             if not ok:
-                f.add(cap["id"], cmd, f"validate.cmd exited {proc.returncode}: {proc.stderr[:120]}")
+                f.add(cap["id"], cmd, f"probe exited {proc.returncode}: {proc.stderr[:120]}")
+
+            # THE PREDICATE IS THE VERDICT, not the exit status. A probe can exit 0 and
+            # return an error body; that is not liveness.
+            exp = lv.get("expect") or {}
+            lang, pred = exp.get("lang"), exp.get("predicate")
+            if ok and pred:
+                if lang == "jq":
+                    pr = subprocess.run(["jq", "-e", pred], input=proc.stdout,
+                                        capture_output=True, text=True, timeout=10)
+                    if pr.returncode != 0:
+                        ok = False
+                        f.add(cap["id"], pred, "probe answered but the liveness predicate "
+                                               "FAILED — exit 0 is not liveness")
+                elif lang == "text":
+                    pr = subprocess.run(["grep", "-qE", pred], input=proc.stdout,
+                                        capture_output=True, text=True, timeout=10)
+                    if pr.returncode != 0:
+                        ok = False
+                        f.add(cap["id"], pred, "stdout did not match the anchored ERE")
             receipt = {
                 "capability": cap["id"], "kind": "liveness", "ok": ok,
                 "cmd": cmd, "rc": proc.returncode,

@@ -1,0 +1,1 @@
+{"artifacts":[{"path":"dashboard/__init__.py","sha256":"489f33675a7633372265a5d2178adea39f676a438b7493299a7750042f96ccf3"},{"path":"dashboard/app.py","sha256":"8b0b9030b87b58628a670d66bb8c4e6242112953854965a8c3c8c0a121e0de53"},{"path":"dashboard/static/index.html","sha256":"e82139d8e05a19a87bf60708f990f0ebbdb44d28a005d90278abfa8cb9d498b0"}],"surface_id":"presence-dashboard"}
