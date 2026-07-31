@@ -1,12 +1,12 @@
 # TAEY_PRODUCTION_RECEIPT_SPEC — "no receipt → refuse"
-**Status:** v2, 2026-07-31 — full revision addressing the six findings of the adversarial review of v1 (fb9ad8d). Closes only on the reviewer's explicit clean verdict. Implementation waits on that verdict.
+**Status:** v2.1, 2026-07-31 — v2 addressed the six v1 findings; v2.1 addresses the four precision findings of the second pass (status-vs-class, adopted-index R0, schema-defined manifest fields, machine-readable trusted actors). Closes only on the reviewer's explicit clean verdict. Implementation waits on that verdict.
 **Consumes:** TAEY_KNOWLEDGE_INDEX_SPEC (the index is the registry AND the root of trust); the per-surface validation suites; the repos' CI gates.
 **Rule being made mechanical (Jesse directive):** the served Taey uses ONLY production infrastructure and must be able to NOT ACCEPT anything else. A 27B cannot judge "is this production" — so no judgment is asked anywhere in this spec. One check, two verdicts, zero interpretation.
 
 ## 1. Definition and scope (finding 5)
 
 A **public production capability** is an entry in the compiled index's `sections_present`
-with `class: production`. This spec governs EXACTLY that set plus any outward or shared
+with `status: production`. This spec governs EXACTLY that set plus any outward or shared
 fleet surface an instruction asks Taey to use (a repo, endpoint, or tool named by anyone,
 including operators, that is not already in Taey's verified set for the session).
 
@@ -31,16 +31,25 @@ verified downward only:
 - The index carries, per production entry: `repo{name, public_url, pinned_sha}`,
   `receipt_path`, `receipt_sha256`, `liveness{probe_cmd, expect}` — ALL compiled, never
   hand-maintained (SOURCE_MANIFEST discipline; hand-edit = index gate failure upstream of
-  this spec). *(Index schema addition — `pinned_sha` and `receipt_sha256` — lands as an
-  index-spec versioned change in the same PR series as the checker; the compiled presence
-  index currently lacks both, which is exactly why rollout §7 sequences index-first.)*
+  this spec). *(Index schema additions — `pinned_sha`, `receipt_sha256`, `generated_at_commit`
+  (top-level), and per-entry `artifact_manifest{path, sha256}` — land as an index-spec
+  versioned change in the same PR series as the checker; the compiled presence index
+  currently lacks all four, which is exactly why rollout §7 sequences index-first. The
+  artifact manifest is a canonical-JSON file (sorted keys, no insignificant whitespace,
+  UTF-8) listing {path, sha256} per deployed artifact of the entry; its sha256 is over
+  those canonical bytes.)*
 - The receipt blob is fetched **at the entry's `pinned_sha` via the public API**
   (`GET /repos/{repo}/contents/{receipt_path}?ref={pinned_sha}`) — never from a working
   tree, never from an unpinned branch. Its sha256 MUST equal the entry's `receipt_sha256`.
 - Therefore a receipt cannot be borrowed, forged, or hand-edited without breaking either
-  the index gates (upstream) or the hash equality (here). Stale-cache/index-version
-  disagreement (fetched index content hash ≠ the served prompt's declared index locator)
-  is REFUSE: index-stale.
+  the index gates (upstream) or the hash equality (here).
+- **R0 is defined against the ADOPTED index**: the index bootstrap (per the index spec)
+  starts from the shipped snapshot and may adopt a strictly-newer live index after its own
+  gates pass; the bootstrap's output is one adopted index object + its content hash. R0
+  re-fetches and re-hashes THAT object; inequality with the adopted hash is
+  REFUSE: index-stale. The shipped snapshot hash is never compared after adoption — the
+  valid-live-newer path is preserved, and no implementer interpretation of "served locator"
+  exists.
 
 ## 3. The receipt (compiled, never hand-maintained)
 
@@ -65,9 +74,10 @@ Binding rules (finding 2 — every field EQUALITY-checked against the index entr
 `surface_id == entry.id`, `repo == entry.repo.name`, `commit_sha == entry.repo.pinned_sha`,
 receipt blob sha256 == `entry.receipt_sha256`, `liveness.probe_cmd == entry.liveness.probe_cmd`,
 `liveness.expect == entry.liveness.expect`, `index_entry_ref` resolves to the same entry.
-`compiled_at_commit` MUST equal the index's `generated_at_commit`, and
-`artifact_manifest_sha256` MUST equal the sha256 of the entry's compiled artifact manifest
-(both fetched at pinned refs — finding 3's unverified fields now verified).
+`compiled_at_commit` MUST equal the index's top-level `generated_at_commit`, and
+`artifact_manifest_sha256` MUST equal `entry.artifact_manifest.sha256`, whose manifest file
+(at `entry.artifact_manifest.path`, fetched at pinned_sha) re-hashes to the same value
+under the canonicalization of §2 — field, path, format, and algorithm all schema-defined.
 Any inequality = REFUSE: binding-mismatch. There is no partial credit.
 
 ## 4. The gates check (finding 1)
@@ -78,7 +88,10 @@ lists the exact required context names — itself versioned and guarded by the r
 R4 verifies:
 - the manifest's context set is NON-EMPTY,
 - the statuses/check-runs for **exactly `commit_sha`** include EVERY manifest context with
-  state success, from the repo's trusted actors (the public API's status objects),
+  state success, AND each such status/check-run's creator matches the gates manifest's
+  `trusted_actors` allowlist (exact app slugs / logins listed IN the committed manifest —
+  no other trust source, no inference); a required context whose only success comes from an
+  unlisted actor = REFUSE: untrusted-actor,
 - extra green contexts are ignored; a missing or non-success required context = REFUSE.
 An empty manifest, an unreadable manifest, or gates reported for any other sha = REFUSE.
 
@@ -95,11 +108,11 @@ definition, no judgment involved.
 
 | step | check | REFUSE code |
 |---|---|---|
-| R0 | fetched index content hash == served locator's declared hash | index-stale |
-| R1 | surface_id is a `class: production` entry in `sections_present` | not-in-index |
+| R0 | fetched index content hash == the ADOPTED index hash (bootstrap output, §2) | index-stale |
+| R1 | surface_id is a `status: production` entry in `sections_present` | not-in-index |
 | R2 | receipt fetched at pinned_sha; sha256 + ALL binding fields equal (§3) | binding-mismatch / no-receipt |
 | R3 | `commit_sha == pinned_sha` and reachable from default branch | unreachable-sha |
-| R4 | gates per the committed manifest, exact-set, non-empty, sha-exact (§4) | gate-not-green |
+| R4 | gates per the committed manifest, exact-set, non-empty, sha-exact, actor-allowlisted (§4) | gate-not-green / untrusted-actor |
 | R5 | liveness probe passes its compiled predicate (§6) | not-live |
 
 Output, exactly one JSON line:
@@ -131,7 +144,7 @@ Ordered, each step gated on the previous; the served prompt changes LAST:
    compilation) through the index's own gates.
 3. `taey-receipt-check` + `taey-index-resolve` implemented beside the index compiler —
    **inert**: installed, runnable, referenced by nothing Taey is told to do.
-4. v2 receipts compiled and committed for EVERY current `class: production` entry
+4. v2 receipts compiled and committed for EVERY current `status: production` entry
    (presence first — its validate suite already emits every ingredient).
 5. **Gate: every current production entry returns ACCEPT** from the inert checker, and the
    red-first fixture battery REFUSES all four planted defects (no receipt / stale sha /
