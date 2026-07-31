@@ -48,6 +48,8 @@ THOR_PROXY = os.environ.get("THOR_PROXY", "")
 # operator's machine. TAEY_NODE2_SSH is accepted as the fleet.env.example spelling.
 SERVE_NODE_SSH = os.environ.get("TAEY_SERVE_NODE_SSH") or os.environ.get("TAEY_NODE2_SSH", "")
 SERVE_UNIT = os.environ.get("TAEY_SERVE_UNIT", "taey-ep3.service")
+# Orchestrator API — where the work-items panel reads active projects from.
+ORCH_URL = os.environ.get("ORCH_URL", "http://127.0.0.1:5002").rstrip("/")
 THOR_RAW = os.environ.get("THOR_RAW", "")
 ISMA_URL = os.environ.get("ISMA_URL", "http://localhost:8095").rstrip("/")
 ISMA_SEARCH_URL = f"{ISMA_URL}/v2/search/adaptive"
@@ -2929,3 +2931,162 @@ async def taey_cache():
         out["sessions"] = {"error": str(e)[:150]}
 
     return out
+
+
+# ---------------------------------------------------------------------------
+# Self-panel data sources.
+#
+# These three routes were authored in 41270e8 on agent/codex-production-surface-reality
+# and never opened as a PR, so index.html has been fetching them against a server that
+# does not define them. Restored here verbatim rather than rewritten - the originals are
+# correct, including the part that matters most: each returns a 502 carrying an "error"
+# key on failure, which is exactly what the UI guards already test for. A 404 instead
+# returns {"detail": ...}, which passes those guards and renders as a confident empty
+# panel ("no active work") or as "undefined tiles" - a missing endpoint that reads like
+# an answer.
+# ---------------------------------------------------------------------------
+
+@app.get("/api/self/memory")
+async def self_memory():
+    try:
+        response = await _http.get(f"{ISMA_URL}/stats", timeout=10)
+        response.raise_for_status()
+        stats = response.json()
+    except Exception as exc:
+        return JSONResponse(
+            {
+                "tiles": 0,
+                "hmm_enriched": 0,
+                "motifs": 0,
+                "sessions": 0,
+                "error": str(exc),
+            },
+            status_code=502,
+        )
+
+    def first_int(*keys: str) -> int:
+        for key in keys:
+            value = stats.get(key)
+            if value is not None:
+                try:
+                    return int(value)
+                except (TypeError, ValueError):
+                    continue
+        return 0
+
+    return JSONResponse(
+        {
+            "tiles": first_int("weaviate_tiles", "tiles"),
+            "hmm_enriched": first_int("hmm_HMMTile", "hmm_enriched"),
+            "motifs": first_int("hmm_HMMMotif", "motifs"),
+            "sessions": first_int("neo4j_ISMASession", "sessions"),
+        }
+    )
+
+
+@app.get("/api/work-items")
+async def work_items():
+    try:
+        response = await _http.get(f"{ORCH_URL}/api/projects", timeout=10)
+        response.raise_for_status()
+        projects = response.json().get("projects") or []
+    except Exception as exc:
+        return JSONResponse(
+            {"work_items": [], "count": 0, "error": str(exc)},
+            status_code=502,
+        )
+
+    # Select on "not finished, and has live work" rather than on a status string.
+    # The original filter tested status == "active"; the orchestrator's vocabulary is
+    # in_progress / stopped / completed and has no "active" at all, so it matched zero
+    # projects on every call and the panel rendered "no active work" while the mandate
+    # sat at 3 in_progress and 16 pending. Measured against the live API: 183 projects,
+    # statuses stopped(152) / completed(29) / in_progress(2).
+    # Excluding a terminal set rather than naming the live one means a future status is
+    # included by default - the panel over-reports before it silently under-reports.
+    TERMINAL_STATUSES = {"completed", "stopped"}
+    active = [
+        project
+        for project in projects
+        if project.get("status") not in TERMINAL_STATUSES
+        and (
+            int(project.get("in_progress") or 0) > 0
+            or int(project.get("pending") or 0) > 0
+        )
+    ]
+    active.sort(
+        key=lambda project: (
+            int(project.get("in_progress") or 0) > 0,
+            int(project.get("priority") or 0),
+            int(project.get("pending") or 0),
+        ),
+        reverse=True,
+    )
+    items = [
+        {
+            "work_item_id": project.get("id"),
+            "title": project.get("name") or project.get("description") or project.get("id"),
+            "state": project.get("status"),
+            "progress": {
+                "completed": int(project.get("completed") or 0),
+                "total": int(project.get("task_total") or 0),
+            },
+        }
+        for project in active[:8]
+    ]
+    return JSONResponse({"work_items": items, "count": len(items)})
+
+
+@app.get("/api/nodes")
+async def nodes():
+    now = time.time()
+    node_ids = {
+        key[len("taey:") : -len(":last_activity")]
+        for key in _redis.scan_iter(match="taey:*:last_activity")
+    }
+    node_ids.update(
+        key[len("taey:") : -len(":seat_registration")]
+        for key in _redis.scan_iter(match="taey:*:seat_registration")
+    )
+
+    result = []
+    for node_id in node_ids:
+        last_raw = _redis.get(f"taey:{node_id}:last_activity")
+        try:
+            last_activity = float(last_raw) if last_raw else None
+        except (TypeError, ValueError):
+            last_activity = None
+        registered = _redis.exists(f"taey:{node_id}:seat_registration") == 1
+        if not registered and (
+            last_activity is None or now - last_activity > 86400
+        ):
+            continue
+        try:
+            turns_open = int(_redis.get(f"taey:{node_id}:turns_open") or 0)
+        except (TypeError, ValueError):
+            turns_open = 0
+        recent = last_activity is not None and now - last_activity <= 300
+        idle_raw = _redis.get(f"taey:{node_id}:idle")
+        result.append(
+            {
+                "node_id": node_id,
+                "idle": not (
+                    turns_open > 0 or (idle_raw == "0" and recent)
+                ),
+                "last_activity": last_activity,
+                "pending_messages": (
+                    _redis.llen(f"taey:{node_id}:inbox")
+                    + _redis.llen(f"taey:{node_id}:notifications")
+                ),
+                "turns_open": turns_open,
+                "registered_seat": registered,
+            }
+        )
+    result.sort(
+        key=lambda node: (
+            not node["idle"],
+            node["last_activity"] or 0,
+        ),
+        reverse=True,
+    )
+    return JSONResponse({"nodes": result[:40]})
