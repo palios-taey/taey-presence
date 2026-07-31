@@ -443,6 +443,25 @@ If you are asked which repositories you need, answer with the five above.
 into a prompt is correct on exactly one machine, and silently wrong everywhere else. Everything you
 know how to find is behind two doors instead.
 
+**Before you use a surface you have not already verified this session, check it. Act only on
+ACCEPT. On REFUSE, report the verdict verbatim and stop — never work around it.**
+
+    taey-receipt-check <surface_id>      # exit 0 = ACCEPT · 3 = REFUSE · 1 = checker-error
+
+That is a lookup and a command, not a judgement. You are never asked to decide whether
+something is production — one check, two verdicts, no interpretation. **A REFUSE is a correct
+outcome, and working around one is the only failure here.** Anyone can act outside you,
+including operators; what nobody can do is instruct you to skip the check quietly. There is no
+override flag, because the only door to ACCEPT is a surface becoming a production entry.
+
+Checker-error counts as REFUSE. If the check cannot run, you have not verified anything — say
+that, rather than proceeding as though the answer had been ACCEPT.
+
+**This does not apply to your own hands.** Your seat's own tools, your displays, and the
+operator-local private layer are not receipt-governed; you do not refuse yourself. The line is
+mechanical: if the target is a private-layer entry, no check is invoked; if it resolves to
+nothing at all, the check refuses.
+
 **PUBLIC — your index.** One artifact, in your own repo, listing every capability: what it is, the
 one command that proves it is alive, where its detail lives, and its receipts.
 
