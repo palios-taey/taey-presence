@@ -195,7 +195,7 @@ def g1_schema(doc: dict) -> Failure:
     return f
 
 
-def g3_liveness(doc: dict) -> tuple[Failure, list[dict]]:
+def g3_liveness(doc: dict, write: bool = False) -> tuple[Failure, list[dict]]:
     """Execute every production capability's validate.cmd against the live deployment.
 
     Produces liveness receipts ONLY. A green G3 says the capability is up right now; it
@@ -237,7 +237,7 @@ def g3_liveness(doc: dict) -> tuple[Failure, list[dict]]:
             }
             receipts.append(receipt)
             dest = HERE.parent.parent / (cap.get("receipts") or {}).get("liveness", "")
-            if dest.name:
+            if write and dest.name:
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 dest.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
     return f, receipts
@@ -258,6 +258,9 @@ def main() -> int:
     ap.add_argument("--g1", action="store_true")
     ap.add_argument("--g2", action="store_true")
     ap.add_argument("--g3", action="store_true")
+    ap.add_argument("--write-receipts", action="store_true",
+                    help="persist liveness receipts; OFF by default so measuring never "
+                         "mutates the tree being measured")
     a = ap.parse_args()
     if not (a.g1 or a.g2 or a.g3):
         a.g1 = a.g2 = True
@@ -274,7 +277,7 @@ def main() -> int:
     if a.g2:
         ok &= report("G2 pointer-crawler (closed-world)", g2_pointer_crawl(doc))
     if a.g3:
-        f, receipts = g3_liveness(doc)
+        f, receipts = g3_liveness(doc, write=a.write_receipts)
         ok &= report("G3 capability liveness", f)
         for r in receipts:
             print(f"         {'green' if r['ok'] else 'RED  '} {r['capability']}: {r['stdout_excerpt'][:90]}")
