@@ -111,6 +111,59 @@ else
   bad "gitleaks: findings in the WORKING TREE — gitleaks detect --source $ROOT --no-git --redact"
 fi
 
+hdr "low-entropy credentials (what gitleaks structurally cannot catch)"
+# gitleaks scores by ENTROPY. A weak human-chosen password trips no built-in rule, so a repo can be
+# gitleaks-green while carrying a credential a person would recognise in a second. That is a
+# STRUCTURAL property of entropy scoring, not a bug and not a tuning problem: the whole class of
+# memorable passwords sits below the threshold by definition. A gate that runs only gitleaks is
+# therefore blind to exactly the credentials humans actually choose.
+#
+# THIS COMMENT ONCE CITED A SPECIFIC INCIDENT AND THE CITATION WAS WRONG. It claimed a real fleet
+# password sat in another repo's history across most of its commits. That was inferred from a scrub
+# commit's WORDING, never from a credential — it had already been refuted, and the database in
+# question runs with auth disabled. It was retracted the same day, after nearly triggering a
+# fleet-wide rotation. The rationale above needs no incident to stand, so it no longer borrows one.
+#
+# It also NAMED A REAL CREDENTIAL as an illustration, in a file bound for a public repo, in the very
+# block that warns against exactly that. Removed. Examples of weak passwords are not worth one real
+# one, and a gate that leaks while explaining leaks is the worst possible advertisement for itself.
+#
+# NOTE ON WHY NO LITERAL APPEARS BELOW: a deny-list of known passwords committed to a PUBLIC repo
+# publishes those passwords. The mechanism ships here; the values stay operator-local in
+# serving/credential-denylist.txt (gitignored, one literal per line, '#' comments ignored).
+_cred_pat='(password|passwd|pwd|secret|token|api_key|apikey|auth)[[:space:]]*[:=][[:space:]]*["'"'"'][^"'"'"'$<{][^"'"'"']{3,60}["'"'"']'
+_cred_skip='example|placeholder|CHANGEME|REDACTED|your-|<|\$\{|os\.environ|getenv|process\.env|None|null'
+
+# pipefail is on (line 30) and BOTH greps exit 1 on no-match, so a CLEAN repo would kill the
+# script mid-gate and read as a violation. Disable pipefail for these pipelines only.
+_cred_hits=$(set +o pipefail
+  git -C "$ROOT" grep -InIE "$_cred_pat" $(git -C "$ROOT" rev-list --all 2>/dev/null) 2>/dev/null \
+    | grep -viE "$_cred_skip" | wc -l)
+if [ "${_cred_hits:-0}" -eq 0 ]; then
+  ok "no hardcoded credential literals in any commit reachable from any ref"
+else
+  bad "$_cred_hits hardcoded credential literal(s) in HISTORY — git grep -InIE '<pattern>' \$(git rev-list --all)"
+fi
+
+_deny="$ROOT/serving/credential-denylist.txt"
+if [ -f "$_deny" ]; then
+  _deny_hits=0
+  while IFS= read -r _lit; do
+    case "$_lit" in ''|'#'*) continue ;; esac
+    _n=$(set +o pipefail
+      git -C "$ROOT" grep -cIF "$_lit" $(git -C "$ROOT" rev-list --all 2>/dev/null) 2>/dev/null | wc -l)
+    [ "${_n:-0}" -gt 0 ] && _deny_hits=$((_deny_hits + 1))
+  done < "$_deny"
+  if [ "$_deny_hits" -eq 0 ]; then
+    ok "none of the operator deny-list literals appear in any ref"
+  else
+    bad "$_deny_hits deny-list literal(s) present in HISTORY — rotate the credential FIRST, then scrub or fresh-init"
+  fi
+else
+  # Absent list is not a pass. Say so, rather than let silence read as clean.
+  printf '  NOTE        serving/credential-denylist.txt absent — known-literal check did NOT run\n'
+fi
+
 hdr "file paths"
 ok "NOT CHECKED, deliberately — sharing directory structure is fine and must not be flagged"
 

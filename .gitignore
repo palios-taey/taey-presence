@@ -32,3 +32,6 @@ env/
 # Site-specific deployment config. The committed template is serving/fleet.env.example.
 fleet.env
 serving/fleet.env
+
+# Operator-local known-credential deny-list for check_public_clean.sh (never commit real values)
+serving/credential-denylist.txt
