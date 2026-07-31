@@ -67,7 +67,8 @@ def build_receipt(cap: dict, compiled_at_commit: str, section: str) -> dict:
             "expect": cap["liveness"]["expect"],
         },
         "index_entry_ref": f"sections.{section}.capabilities[{cap['id']}]",
-        # MUST equal the index's top-level generated_at_commit (spec §3).
+        # The head THIS compiler read. v2.4: NOT the index's generated_at_commit —
+        # R2 requires only ancestor-or-equal to pinned_sha.
         "compiled_at_commit": compiled_at_commit,
     }
 
@@ -102,15 +103,28 @@ def main() -> int:
         for cap in sec["capabilities"]:
             if cap.get("status") != "production":
                 continue
-            receipt = build_receipt(cap, gen, section)
-            blob = json.dumps(receipt, indent=2, sort_keys=True) + "\n"
             dest = REPO_ROOT / cap["receipts"]["liveness"]
             if args.check:
+                # Recompile against the receipt's OWN recorded compiled_at_commit, not the
+                # current HEAD. HEAD moves with every later commit, so comparing against it
+                # would make --check fail on receipts that are perfectly valid — the field
+                # legitimately records an EARLIER head (v2.4). Everything else must still
+                # derive identically.
                 if not dest.is_file():
                     mismatched.append((cap["id"], "missing"))
-                elif dest.read_text() != blob:
+                    continue
+                try:
+                    recorded = json.loads(dest.read_text()).get("compiled_at_commit") or gen
+                except json.JSONDecodeError:
+                    mismatched.append((cap["id"], "is not valid JSON"))
+                    continue
+                expected = json.dumps(build_receipt(cap, recorded, section),
+                                      indent=2, sort_keys=True) + "\n"
+                if dest.read_text() != expected:
                     mismatched.append((cap["id"], "does not match a recompile"))
                 continue
+            receipt = build_receipt(cap, gen, section)
+            blob = json.dumps(receipt, indent=2, sort_keys=True) + "\n"
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_text(blob)
             written.append((cap["id"], hashlib.sha256(blob.encode()).hexdigest()))
