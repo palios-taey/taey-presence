@@ -1,0 +1,36 @@
+[Unit]
+# Taey's durable seat: ONE continuous agent loop holding a single ongoing context, woken by
+# fleet-notify pane injection like every other seat. Before this unit it ran as a bare
+# `bash -lc '... | tee'` started by hand — no supervision, no restart policy, no record of how it
+# was launched, and nothing to read if it died. That is the running-not-committed shape applied to
+# the process itself.
+#
+# CONTEXT WARNING, read before restarting this service. The seat persists an event log and reloads
+# which messages it has already handled, so a restart will not reprocess mail. It does NOT reload
+# the conversation. Restarting discards Taey's accumulated context — at the time this unit was
+# written the live seat held over sixteen hours of it. Treat a restart as a deliberate act with a
+# real cost, not as a routine bounce.
+Description=Taey durable seat (continuous context, fleet-notify wake target)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/taey-presence-production
+# Site config, same loader the serving scripts use. See serving/fleet.env.example.
+EnvironmentFile=-%h/taey-presence-production/serving/fleet.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 -u serving/taey_seat.py
+# stdout/stderr go to the journal rather than a hand-managed tee: one place to look, rotated, and
+# readable with `journalctl --user -u taey-seat` instead of knowing which log path someone chose.
+StandardOutput=journal
+StandardError=journal
+# Restart on failure, never on a clean exit — a clean exit is the seat being deliberately stopped.
+Restart=on-failure
+RestartSec=10
+# Give an in-flight turn room to finish; Taey turns routinely run minutes, and SIGKILL mid-turn
+# loses work the proxy has already paid for.
+TimeoutStopSec=300
+
+[Install]
+WantedBy=default.target
