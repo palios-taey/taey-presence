@@ -15,6 +15,7 @@ on:
     paths:
       - 'serving/knowledge_index/**'
       - 'serving/manifests/**'
+      - 'serving/receipts/**'
       - 'serving/validate_presence.sh'
       - '.github/workflows/knowledge-index.yml'
   push:
@@ -22,6 +23,7 @@ on:
     paths:
       - 'serving/knowledge_index/**'
       - 'serving/manifests/**'
+      - 'serving/receipts/**'
       - 'serving/validate_presence.sh'
 
 jobs:
@@ -85,3 +87,7 @@ jobs:
             echo "      should be unverifiable — a skip here means the check is not running."
             exit 1
           fi
+
+      - name: Receipt checker red-fixture battery
+        run: |
+          python3 serving/knowledge_index/test_receipt_check.py

@@ -1,0 +1,4 @@
+#!/usr/bin/env python3
+from receipt_check import main_check
+
+raise SystemExit(main_check())
