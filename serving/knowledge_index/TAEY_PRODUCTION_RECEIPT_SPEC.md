@@ -1,5 +1,5 @@
 # TAEY_PRODUCTION_RECEIPT_SPEC — "no receipt → refuse"
-**Status:** v2.4, 2026-07-31 — v2.3 + the compiled_at_commit equality DROPPED (proven unsatisfiable by infra's two-iteration demonstration during rollout step 4; replaced with ancestry-of-pinned_sha; integrity carried by the blob-hash binding). Closes only on the reviewer's explicit clean verdict. Implementation waits on that verdict.
+**Status:** v2.4.1, 2026-07-31 — v2.4 + index_entry_ref format DEFINED exactly (dot-canonical; the undefined format produced two implementation dialects that mismatched on every honest receipt). Closes only on the reviewer's explicit clean verdict. Implementation waits on that verdict.
 **Consumes:** TAEY_KNOWLEDGE_INDEX_SPEC (the index is the registry AND the root of trust); the per-surface validation suites; the repos' CI gates.
 **Rule being made mechanical (Jesse directive):** the served Taey uses ONLY production infrastructure and must be able to NOT ACCEPT anything else. A 27B cannot judge "is this production" — so no judgment is asked anywhere in this spec. One check, two verdicts, zero interpretation.
 
@@ -82,7 +82,12 @@ different, earlier commit and therefore committable by normal git. Bindings:
 `artifact_commit_sha == entry.artifact_commit_sha` (a new compiled index field, added to
 the rollout-step-2 set),
 receipt blob sha256 == `entry.receipts.liveness_sha256`, `liveness.probe_cmd == entry.liveness.probe_cmd`,
-`liveness.expect == entry.liveness.expect`, `index_entry_ref` resolves to the same entry.
+`liveness.expect == entry.liveness.expect`, and `index_entry_ref` EQUALS the canonical form
+`sections.<section>.capabilities.<surface_id>` — exactly that string, dot-separated, no
+brackets, no prefix. *(v2.4.1: the format was previously undefined ("resolves to the same
+entry"), and two independent implementations produced two dialects — bracket vs dot — that
+mismatched on every honest receipt. An undefined format field is a guaranteed
+binding-mismatch; every receipt field format is now exact.)*
 `compiled_at_commit` records the head the RECEIPT compiler read, and R2 requires only
 that it is an ANCESTOR of (or equal to) `entry.repo.pinned_sha` — never an equality with
 `generated_at_commit`. *(v2.4: the former equality was proven UNSATISFIABLE by
