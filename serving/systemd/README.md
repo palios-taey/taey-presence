@@ -1,0 +1,39 @@
+# Canonical serving units — deploy a Thor FROM this public repo
+
+These are the **single-source** systemd units for the Taey serving stack. There is ONE
+implementation; do not fork these into another repo or hand-edit them on a node.
+
+| unit | role | port |
+|---|---|---|
+| `taey-ep3.service` | vLLM serve of ep3 (docker, digest-pinned via `vllm_serve.sh`) | 8000 |
+| `taey-soma-proxy.service` | persona injection + latency feedback + tool surface | 8765 |
+
+(The INFRA=SOUL embodiment daemon `taey-soma` is owned by the infra-soul repo, not here — a
+different concern from serving.)
+
+## Install-time substitution (de-umbilical — no operator paths committed)
+
+The units carry placeholders, substituted at install for the target node. Never commit a
+resolved operator path back into these files.
+
+| placeholder | meaning | example |
+|---|---|---|
+| `@TAEY_ROOT@` | the checkout of this repo on the node | `$HOME/palios-taey` |
+| `@TAEY_HOME@` | the run user's home | `$HOME` |
+| `@TAEY_USER@` | the non-root run user (soma-proxy) | `$USER` |
+| `@TAEY_VENV@` | the python venv | `$HOME/venvs/taey` |
+| `@TAEY_MODEL_PATH@` | the served HF model dir | `$HOME/serve-models/ep3-hf` |
+
+Install (per node), e.g.:
+```
+sed -e "s#@TAEY_ROOT@#$ROOT#g" -e "s#@TAEY_HOME@#$HOME#g" -e "s#@TAEY_USER@#$USER#g" \
+    -e "s#@TAEY_VENV@#$VENV#g" -e "s#@TAEY_MODEL_PATH@#$MODEL#g" \
+    taey-ep3.service | sudo tee /etc/systemd/system/taey-ep3.service >/dev/null
+sudo systemctl daemon-reload && sudo systemctl enable --now taey-ep3
+```
+Private config (endpoints, keys) lives only in `@TAEY_ROOT@/.env` (referenced via
+`EnvironmentFile`), which is gitignored — it is never committed here.
+
+**Status:** units captured from the verified-running fleet config 2026-07-22. The install
+substitution above is documented, not yet run from this repo end-to-end — that gets verified
+on the next real Thor stand-up (production is the oracle), then this note is updated.

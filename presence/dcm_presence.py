@@ -30,6 +30,14 @@ from typing import Optional
 import httpx
 import redis
 
+try:
+    from dotenv import load_dotenv
+except ImportError:  # optional dependency for documented `.env` launches
+    load_dotenv = None
+
+if load_dotenv is not None:
+    load_dotenv()
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [DCM-%(name)s] %(message)s")
 
 REDIS_HOST = os.environ.get("REDIS_HOST", "127.0.0.1")

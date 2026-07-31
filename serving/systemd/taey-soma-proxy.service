@@ -1,0 +1,27 @@
+# Canonical Taey soma-proxy unit (persona injection + latency feedback + tool surface on :8765).
+# Placeholders substituted at install by serving/deploy_thor.sh. Private config (endpoints,
+# paths) lives in @TAEY_ROOT@/.env (EnvironmentFile) — never inline secrets in this unit.
+[Unit]
+Description=Taey Soma Proxy (preamble injection + latency feedback + tools)
+After=redis-server.service taey-ep3.service
+Wants=redis-server.service taey-ep3.service
+
+[Service]
+Type=exec
+User=@TAEY_USER@
+Group=@TAEY_USER@
+WorkingDirectory=@TAEY_HOME@
+EnvironmentFile=@TAEY_ROOT@/.env
+ExecStartPre=/bin/sh -c "fuser -k 8765/tcp || true"
+ExecStart=@TAEY_VENV@/bin/python3 @TAEY_ROOT@/serving/soma_proxy.py
+Environment="PYTHONUNBUFFERED=1"
+Restart=on-failure
+RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=taey-soma-proxy
+
+[Install]
+WantedBy=multi-user.target

@@ -3,7 +3,18 @@ fastapi>=0.110
 uvicorn[standard]>=0.27
 httpx>=0.26
 redis>=5.0
+python-dotenv>=1.0
 
 # Optional: DCM inter-worker state in Neo4j. Without it, the presence worker
 # runs Redis-only (peer-state writes are skipped, everything else works).
 neo4j>=5.0
+
+# Required by the soma_proxy `fetch_url` tool (serving/soma_proxy.py:1248) —
+# trafilatura extracts article text from HTML, pypdf from PDFs. The imports are
+# function-local and try/except-guarded, so without these the proxy still starts
+# and every other tool works; `fetch_url` alone returns the string
+# "fetch_url error: missing dependency (...)" instead of page text. That is the
+# state production ran in until 2026-07-30 — the failure is a returned string,
+# not a crash, so it never surfaced as an error.
+trafilatura>=2.0
+pypdf>=6.0

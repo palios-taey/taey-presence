@@ -1,0 +1,50 @@
+# Canonical Taey ep3 vLLM serve unit. ONE implementation — deploy from THIS repo.
+# Placeholders (@TAEY_ROOT@, @TAEY_MODEL_PATH@) are substituted at install time by
+# serving/deploy_thor.sh — never hardcode an operator path here. The env block below is
+# the production serving config (thinking-ON, no output caps; the model is never clamped).
+[Unit]
+Description=Taey ep3 production vLLM
+After=docker.service network-online.target
+Wants=docker.service network-online.target
+StartLimitIntervalSec=900
+StartLimitBurst=3
+
+[Service]
+Type=exec
+User=root
+Environment=TAEY_MODEL_PATH=@TAEY_MODEL_PATH@
+Environment=TAEY_SERVED_NAME=ep3
+Environment=TAEY_MAX_MODEL_LEN=262144
+Environment=VLLM_GPU_UTIL=0.92
+Environment=VLLM_PORT=8000
+Environment=VLLM_MAX_NUM_SEQS=128
+Environment=VLLM_MAX_CUDAGRAPH=128
+Environment=VLLM_MAX_BATCHED_TOKENS=32768
+ExecStartPre=-/usr/bin/docker stop taey-vllm
+ExecStartPre=-/usr/bin/docker rm taey-vllm
+ExecStartPre=@TAEY_ROOT@/bin/gpu-cleanup.sh 90 120
+# Pin CPU/GPU/EMC clocks to max for the life of the serve. Decode on this hardware is
+# memory-bandwidth-bound, and the EMC (memory-controller) clock IS that bandwidth — left
+# unpinned it is governed by devfreq and SAGS on an idle node: measured 2.75GHz against a
+# 4.27GHz max, i.e. 64% of peak memory bandwidth. Measured effect (Jetson AGX Thor, same
+# prompt before/after): an idle-ish node went 3.56 -> 4.64 tok/s (1.30x); an already-saturated
+# node gained only +1.3% because continuous load had already boosted its clock. So the value
+# is in preventing the sag, which matters most for BURSTY request patterns (a UI walk that
+# judges one element, observes, then judges the next) rather than for back-to-back batches.
+# Does not survive a reboot on its own, which is why it belongs here. Revert on a node with:
+#   sudo jetson_clocks --restore <stored.conf>
+ExecStartPre=-/usr/bin/jetson_clocks
+ExecStart=/usr/bin/bash @TAEY_ROOT@/serving/vllm_serve.sh
+ExecStopPost=/bin/sh -c "sync && echo 3 > /proc/sys/vm/drop_caches"
+ExecStopPost=-/usr/bin/docker rm -f taey-vllm
+TimeoutStartSec=660
+TimeoutStopSec=90
+Restart=always
+RestartSec=30
+KillMode=process
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=taey-ep3
+
+[Install]
+WantedBy=multi-user.target
