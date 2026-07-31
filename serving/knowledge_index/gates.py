@@ -178,7 +178,7 @@ def _git(*args: str) -> str:
                           capture_output=True, text=True, timeout=30).stdout.strip()
 
 
-def g0_commit_fields(doc: dict) -> Failure:
+def g0_commit_fields(doc: dict, pre_commit: bool = False) -> tuple:
     """The commit fields must attest an EARLIER commit than the one carrying this index.
 
     This is the structural half of the self-reference audit. Without it, a build that
@@ -191,20 +191,39 @@ def g0_commit_fields(doc: dict) -> Failure:
     gen = doc.get("generated_at_commit") or ""
     if not gen:
         f.add("$.generated_at_commit", "", "missing")
-        return f
+        return f, False
 
     # The commit that contains the committed index file. Empty while it is uncommitted,
     # which is a legitimate pre-commit state and not a violation.
     rel = str(INDEX.relative_to(HERE.parent.parent))
-    # If index.json has UNCOMMITTED changes, the commit that will contain this version does
-    # not exist yet — `git log -1` would return the PREVIOUS one and the comparison would be
-    # off by a commit, flagging an honest build. A pre-commit tree is a legitimate state,
-    # not a violation; the gate re-runs in CI against the committed object.
+
+    # A DIRTY index.json CANNOT BE VERIFIED, and the safe path is the DEFAULT.
+    #
+    # The commit that will contain an uncommitted index does not exist yet, so `git log -1`
+    # returns the PREVIOUS commit and the ancestry comparison is off by one. Skipping
+    # silently was the defect codex found: it printed an ordinary `ok`, indistinguishable
+    # from a real verification, so a perpetually-dirty tree would green forever and nothing
+    # in the merge path enforced the committed-object check.
+    #
+    # This is the SKIP-NEVER-COUNTS-AS-A-PASS law from our own validate suite, applied to
+    # our own gate. Unverifiable is now FAIL by default; --pre-commit is the only skip
+    # path, it must be asked for, and it announces itself in the summary.
     if _git("status", "--porcelain", "--", rel):
-        return f
+        if pre_commit:
+            return f, True
+        f.add("$.generated_at_commit", "(index.json is dirty)",
+              "commit ancestry CANNOT BE VERIFIED against an uncommitted index — the "
+              "containing commit does not exist yet. Commit the index and re-run, or pass "
+              "--pre-commit to skip this gate VISIBLY. A silent skip here would let a "
+              "self-referential commit field reach main unchecked.")
+        return f, False
+
     containing = _git("log", "-1", "--format=%H", "--", rel)
     if not containing:
-        return f  # not yet committed; nothing to compare against
+        f.add("$.generated_at_commit", "(index.json is not committed)",
+              "no containing commit exists to verify ancestry against; commit it or pass "
+              "--pre-commit")
+        return f, False
 
     def check(field: str, val: str) -> None:
         if not val:
@@ -227,7 +246,7 @@ def g0_commit_fields(doc: dict) -> Failure:
                   (cap.get("repo") or {}).get("pinned_sha", ""))
             check(f"sections.{name}.{cap.get('id')}.artifact_commit_sha",
                   cap.get("artifact_commit_sha", ""))
-    return f
+    return f, False
 
 
 def g1_schema(doc: dict) -> Failure:
@@ -383,6 +402,9 @@ def main() -> int:
     ap.add_argument("--g1", action="store_true")
     ap.add_argument("--g2", action="store_true")
     ap.add_argument("--g3", action="store_true")
+    ap.add_argument("--pre-commit", action="store_true",
+                    help="the ONLY way to skip G0 ancestry on a dirty index; the skip is "
+                         "printed and the summary reports PASS-WITH-SKIP, never bare PASS")
     ap.add_argument("--write-receipts", action="store_true",
                     help="persist liveness receipts; OFF by default so measuring never "
                          "mutates the tree being measured")
@@ -397,8 +419,15 @@ def main() -> int:
     ok = True
 
     print("KNOWLEDGE-INDEX GATES")
+    skipped = 0
     if a.g1:
-        ok &= report("G0 commit-field ancestry (self-reference audit)", g0_commit_fields(doc))
+        g0f, g0_skipped = g0_commit_fields(doc, pre_commit=a.pre_commit)
+        if g0_skipped:
+            print("  SKIP G0 commit-field ancestry: SKIPPED (pre-commit mode) — the index is "
+                  "dirty, so ancestry was NOT verified")
+            skipped += 1
+        else:
+            ok &= report("G0 commit-field ancestry (self-reference audit)", g0f)
         ok &= report("G1 schema-lint", g1_schema(doc))
     if a.g2:
         ok &= report("G2 pointer-crawler (closed-world)", g2_pointer_crawl(doc))
@@ -408,7 +437,12 @@ def main() -> int:
         for r in receipts:
             print(f"         {'green' if r['ok'] else 'RED  '} {r['capability']}: {r['stdout_excerpt'][:90]}")
 
-    print("GATES: PASS" if ok else "GATES: FAIL")
+    if not ok:
+        print("GATES: FAIL")
+    elif skipped:
+        print(f"GATES: PASS-WITH-SKIP ({skipped} gate(s) not run — a SKIP is not a PASS)")
+    else:
+        print("GATES: PASS")
     return 0 if ok else 1
 
 
