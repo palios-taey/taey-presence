@@ -1990,6 +1990,25 @@ async def _chat_completions_for_turn(
     body = inject_preamble(body)
     is_stream = body.get("stream", False)
 
+    # BOUND HERE BECAUSE THE STREAMING CLOSURE READS THEM UNCONDITIONALLY.
+    #
+    # These used to be initialised inside `if is_stream and body.get("tools")` below, while
+    # the closure that consumes them is gated on `is_stream` ALONE. Any streaming request
+    # carrying no tools therefore reached the closure with the names unbound and died with
+    # `NameError: cannot access free variable 'resolved_answer'` — 200 OK, zero tokens, an
+    # empty reply.
+    #
+    # `tools: []` is falsy, so a caller that sends an EMPTY tool list takes that path: the
+    # key is present, so the auto-add above is skipped, and the value is falsy, so the
+    # resolve block is skipped too. The dashboard sends exactly that on its stream payload,
+    # which is why every UI chat turn returned nothing while direct curl calls worked.
+    #
+    # The fix is the domain, not a guard: a name consumed under `is_stream` is bound under
+    # `is_stream`. Adding a hasattr/locals() check at the read site would have left the two
+    # domains mismatched and hidden the next instance of the same shape.
+    resolved_answer = ""
+    resolved_thinking = ""
+
     # Council seats are advisory unless a caller supplies an explicit bounded tool grant.
     if "tools" not in body and not _COUNCIL_SEAT_RE.fullmatch(turn.seat_id):
         body["tools"] = TOOLS
@@ -2013,8 +2032,6 @@ async def _chat_completions_for_turn(
         # -- and only the FINAL answer is streamed. Streaming stops being a special case: it changes
         # how the last response is delivered, never whether tools work.
         rounds = 0
-        resolved_answer = ""
-        resolved_thinking = ""
         while rounds < MAX_TOOL_ROUNDS:
             probe = dict(body)
             probe["stream"] = False
