@@ -162,11 +162,91 @@ def g2_pointer_crawl(doc: dict) -> Failure:
     return f
 
 
-CAP_REQUIRED = ["id", "kind", "repo", "entry_doc", "bootstrap", "validate",
-                "endpoints", "hardware_tier", "receipts", "status"]
+CAP_REQUIRED = ["id", "kind", "repo", "entry_doc", "bootstrap", "liveness",
+                "endpoints", "hardware_tier", "receipts", "status",
+                # receipt-spec binding fields (rollout step 2) — all land together,
+                # because a receipt cannot sequence before the fields that bind it.
+                "artifact_paths", "artifact_commit_sha", "artifact_manifest"]
+VALID_LANGS = {"jq", "text"}
 PROC_REQUIRED = ["process", "plan_ref", "launch", "expect", "on_fail", "never"]
 VALID_KINDS = {"memory", "serve", "orchestrate", "notify", "consult", "train-how"}
 VALID_STATUS = {"production", "deprecated"}
+
+
+def _git(*args: str) -> str:
+    return subprocess.run(["git", "-C", str(HERE.parent.parent), *args],
+                          capture_output=True, text=True, timeout=30).stdout.strip()
+
+
+def g0_commit_fields(doc: dict, pre_commit: bool = False) -> tuple:
+    """The commit fields must attest an EARLIER commit than the one carrying this index.
+
+    This is the structural half of the self-reference audit. Without it, a build that
+    recorded its own containing commit would look identical to an honest one — and the
+    checker cannot tell the difference by recomputation alone, because recomputing from
+    HEAD is exactly the paradox: after the index is committed, HEAD IS the containing
+    commit, so the forbidden value verifies and the honest value fails.
+    """
+    f = Failure()
+    gen = doc.get("generated_at_commit") or ""
+    if not gen:
+        f.add("$.generated_at_commit", "", "missing")
+        return f, False
+
+    # The commit that contains the committed index file. Empty while it is uncommitted,
+    # which is a legitimate pre-commit state and not a violation.
+    rel = str(INDEX.relative_to(HERE.parent.parent))
+
+    # A DIRTY index.json CANNOT BE VERIFIED, and the safe path is the DEFAULT.
+    #
+    # The commit that will contain an uncommitted index does not exist yet, so `git log -1`
+    # returns the PREVIOUS commit and the ancestry comparison is off by one. Skipping
+    # silently was the defect codex found: it printed an ordinary `ok`, indistinguishable
+    # from a real verification, so a perpetually-dirty tree would green forever and nothing
+    # in the merge path enforced the committed-object check.
+    #
+    # This is the SKIP-NEVER-COUNTS-AS-A-PASS law from our own validate suite, applied to
+    # our own gate. Unverifiable is now FAIL by default; --pre-commit is the only skip
+    # path, it must be asked for, and it announces itself in the summary.
+    if _git("status", "--porcelain", "--", rel):
+        if pre_commit:
+            return f, True
+        f.add("$.generated_at_commit", "(index.json is dirty)",
+              "commit ancestry CANNOT BE VERIFIED against an uncommitted index — the "
+              "containing commit does not exist yet. Commit the index and re-run, or pass "
+              "--pre-commit to skip this gate VISIBLY. A silent skip here would let a "
+              "self-referential commit field reach main unchecked.")
+        return f, False
+
+    containing = _git("log", "-1", "--format=%H", "--", rel)
+    if not containing:
+        f.add("$.generated_at_commit", "(index.json is not committed)",
+              "no containing commit exists to verify ancestry against; commit it or pass "
+              "--pre-commit")
+        return f, False
+
+    def check(field: str, val: str) -> None:
+        if not val:
+            f.add(field, "", "missing")
+            return
+        if val == containing:
+            f.add(field, val, "EQUALS the commit containing this index — a field may never "
+                              "attest the commit that carries it (self-reference)")
+            return
+        anc = subprocess.run(["git", "-C", str(HERE.parent.parent), "merge-base",
+                              "--is-ancestor", val, containing], capture_output=True, timeout=30)
+        if anc.returncode != 0:
+            f.add(field, val, f"is not an ancestor of the index-containing commit "
+                              f"{containing[:12]} — it attests a commit this index cannot descend from")
+
+    check("$.generated_at_commit", gen)
+    for name, sec in (doc.get("sections") or {}).items():
+        for cap in sec.get("capabilities", []):
+            check(f"sections.{name}.{cap.get('id')}.repo.pinned_sha",
+                  (cap.get("repo") or {}).get("pinned_sha", ""))
+            check(f"sections.{name}.{cap.get('id')}.artifact_commit_sha",
+                  cap.get("artifact_commit_sha", ""))
+    return f, False
 
 
 def g1_schema(doc: dict) -> Failure:
@@ -187,6 +267,43 @@ def g1_schema(doc: dict) -> Failure:
             for r in ("liveness", "usage"):
                 if r not in (cap.get("receipts") or {}):
                     f.add(where, r, "capability must declare both liveness and usage receipt paths")
+            if "liveness_sha256" not in (cap.get("receipts") or {}):
+                f.add(where, "receipts.liveness_sha256",
+                      "binding field missing (may be null until receipts compile, but the key must exist)")
+            if not (cap.get("repo") or {}).get("pinned_sha"):
+                f.add(where, "repo.pinned_sha", "binding field missing or empty")
+            if not cap.get("artifact_commit_sha"):
+                f.add(where, "artifact_commit_sha", "binding field missing or empty")
+            am = cap.get("artifact_manifest") or {}
+            if not am.get("path") or not am.get("sha256"):
+                f.add(where, "artifact_manifest", "must carry both path and sha256")
+            # Liveness must be an EXECUTABLE predicate, never prose (receipt spec §6).
+            lv = cap.get("liveness") or {}
+            if not lv.get("probe_cmd"):
+                f.add(where, "liveness.probe_cmd", "missing")
+            exp = lv.get("expect") or {}
+            if exp.get("lang") not in VALID_LANGS:
+                f.add(where, str(exp.get("lang")),
+                      f"liveness.expect.lang must be one of {sorted(VALID_LANGS)} — "
+                      "prose expectations are non-conforming by definition")
+            if not exp.get("predicate"):
+                f.add(where, "liveness.expect.predicate", "missing")
+            else:
+                pred = exp["predicate"]
+                if exp.get("lang") == "jq":
+                    r = subprocess.run(["jq", "-e", pred], input="{}", capture_output=True,
+                                       text=True, timeout=10)
+                    if r.returncode > 1:
+                        f.add(where, pred, f"invalid jq predicate: {r.stderr.strip()[:90]}")
+                elif exp.get("lang") == "text":
+                    r = subprocess.run(["grep", "-qE", pred], input="", capture_output=True,
+                                       text=True, timeout=10)
+                    if r.returncode > 1:
+                        f.add(where, pred, "invalid POSIX ERE")
+                if re.search(r"\bstatus_code\b|\bhttp_code\b|^\s*2\d\d\s*$", pred):
+                    f.add(where, pred, "predicate references a status code — the probe-shape "
+                                       "law is BODIES, NOT CODES: a 200 carrying an error "
+                                       "object is not liveness")
         for proc in sec.get("processes", []):
             where = f"sections.{name}.processes[{proc.get('process','?')[:40]}]"
             for k in PROC_REQUIRED:
@@ -206,9 +323,10 @@ def g3_liveness(doc: dict, write: bool = False) -> tuple[Failure, list[dict]]:
         for cap in sec.get("capabilities", []):
             if cap.get("status") != "production":
                 continue
-            cmd = (cap.get("validate") or {}).get("cmd")
+            lv = cap.get("liveness") or {}
+            cmd = lv.get("probe_cmd")
             if not cmd:
-                f.add(cap.get("id", "?"), "", "production capability has no validate.cmd")
+                f.add(cap.get("id", "?"), "", "production capability has no liveness.probe_cmd")
                 continue
             missing = [m.strip("${}") for m in ENVREF_RE.findall(cmd)
                        if not os.environ.get(m.strip("${}"))]
@@ -221,11 +339,37 @@ def g3_liveness(doc: dict, write: bool = False) -> tuple[Failure, list[dict]]:
             # the gate's own directory made a correct command look like a broken
             # capability, which is the worst kind of gate failure: it blames the thing
             # being measured for a defect in the measurement.
-            proc = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True,
-                                  timeout=30, cwd=HERE.parent.parent)
+            # Execution contract (receipt spec §6): 30s timeout, stdin closed, stderr
+            # discarded for the predicate. Non-zero exit, timeout, parse failure, or a
+            # failed predicate are ALL not-live — no partial credit.
+            try:
+                proc = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True,
+                                      timeout=30, cwd=HERE.parent.parent, stdin=subprocess.DEVNULL)
+            except subprocess.TimeoutExpired:
+                f.add(cap["id"], cmd, "probe timed out (30s) — not-live")
+                continue
             ok = proc.returncode == 0
             if not ok:
-                f.add(cap["id"], cmd, f"validate.cmd exited {proc.returncode}: {proc.stderr[:120]}")
+                f.add(cap["id"], cmd, f"probe exited {proc.returncode}: {proc.stderr[:120]}")
+
+            # THE PREDICATE IS THE VERDICT, not the exit status. A probe can exit 0 and
+            # return an error body; that is not liveness.
+            exp = lv.get("expect") or {}
+            lang, pred = exp.get("lang"), exp.get("predicate")
+            if ok and pred:
+                if lang == "jq":
+                    pr = subprocess.run(["jq", "-e", pred], input=proc.stdout,
+                                        capture_output=True, text=True, timeout=10)
+                    if pr.returncode != 0:
+                        ok = False
+                        f.add(cap["id"], pred, "probe answered but the liveness predicate "
+                                               "FAILED — exit 0 is not liveness")
+                elif lang == "text":
+                    pr = subprocess.run(["grep", "-qE", pred], input=proc.stdout,
+                                        capture_output=True, text=True, timeout=10)
+                    if pr.returncode != 0:
+                        ok = False
+                        f.add(cap["id"], pred, "stdout did not match the anchored ERE")
             receipt = {
                 "capability": cap["id"], "kind": "liveness", "ok": ok,
                 "cmd": cmd, "rc": proc.returncode,
@@ -258,6 +402,9 @@ def main() -> int:
     ap.add_argument("--g1", action="store_true")
     ap.add_argument("--g2", action="store_true")
     ap.add_argument("--g3", action="store_true")
+    ap.add_argument("--pre-commit", action="store_true",
+                    help="the ONLY way to skip G0 ancestry on a dirty index; the skip is "
+                         "printed and the summary reports PASS-WITH-SKIP, never bare PASS")
     ap.add_argument("--write-receipts", action="store_true",
                     help="persist liveness receipts; OFF by default so measuring never "
                          "mutates the tree being measured")
@@ -272,7 +419,15 @@ def main() -> int:
     ok = True
 
     print("KNOWLEDGE-INDEX GATES")
+    skipped = 0
     if a.g1:
+        g0f, g0_skipped = g0_commit_fields(doc, pre_commit=a.pre_commit)
+        if g0_skipped:
+            print("  SKIP G0 commit-field ancestry: SKIPPED (pre-commit mode) — the index is "
+                  "dirty, so ancestry was NOT verified")
+            skipped += 1
+        else:
+            ok &= report("G0 commit-field ancestry (self-reference audit)", g0f)
         ok &= report("G1 schema-lint", g1_schema(doc))
     if a.g2:
         ok &= report("G2 pointer-crawler (closed-world)", g2_pointer_crawl(doc))
@@ -282,7 +437,12 @@ def main() -> int:
         for r in receipts:
             print(f"         {'green' if r['ok'] else 'RED  '} {r['capability']}: {r['stdout_excerpt'][:90]}")
 
-    print("GATES: PASS" if ok else "GATES: FAIL")
+    if not ok:
+        print("GATES: FAIL")
+    elif skipped:
+        print(f"GATES: PASS-WITH-SKIP ({skipped} gate(s) not run — a SKIP is not a PASS)")
+    else:
+        print("GATES: PASS")
     return 0 if ok else 1
 
 

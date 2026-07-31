@@ -1,0 +1,1 @@
+{"artifacts":[{"path":"serving/SEAT.md","sha256":"0cac5c13070e95d2d246ade8692c7c851e6bafe5c6b91d5c3de7a16629c256a4"},{"path":"serving/seat_liveness.py","sha256":"5b20be61b6429c8b0f17b1c8539138070b047f79c2c14390888b44bc8eb0a99f"},{"path":"serving/taey_council_seat.py","sha256":"080e9888db3c3d5a8015cfb87470ed1cad41f0e3e34ee70090995ed8aa0939df"}],"surface_id":"presence-seat"}
