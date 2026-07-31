@@ -112,11 +112,21 @@ else
 fi
 
 hdr "low-entropy credentials (what gitleaks structurally cannot catch)"
-# gitleaks scores by ENTROPY. A weak human-chosen password — "hunter2", "awareness123" — trips no
-# built-in rule, so a repo can be gitleaks-green with a live credential in its history. Measured on
-# palios-taey/dcm 2026-07-31: both gitleaks scans returned exit 0 / "no leaks found" while `git grep`
-# across all refs found a real fleet Neo4j password in 48 of 72 commits. The scrub commit named it
-# outright. A gate that only runs gitleaks would have cleared that repo for publication.
+# gitleaks scores by ENTROPY. A weak human-chosen password trips no built-in rule, so a repo can be
+# gitleaks-green while carrying a credential a person would recognise in a second. That is a
+# STRUCTURAL property of entropy scoring, not a bug and not a tuning problem: the whole class of
+# memorable passwords sits below the threshold by definition. A gate that runs only gitleaks is
+# therefore blind to exactly the credentials humans actually choose.
+#
+# THIS COMMENT ONCE CITED A SPECIFIC INCIDENT AND THE CITATION WAS WRONG. It claimed a real fleet
+# password sat in another repo's history across most of its commits. That was inferred from a scrub
+# commit's WORDING, never from a credential — it had already been refuted, and the database in
+# question runs with auth disabled. It was retracted the same day, after nearly triggering a
+# fleet-wide rotation. The rationale above needs no incident to stand, so it no longer borrows one.
+#
+# It also NAMED A REAL CREDENTIAL as an illustration, in a file bound for a public repo, in the very
+# block that warns against exactly that. Removed. Examples of weak passwords are not worth one real
+# one, and a gate that leaks while explaining leaks is the worst possible advertisement for itself.
 #
 # NOTE ON WHY NO LITERAL APPEARS BELOW: a deny-list of known passwords committed to a PUBLIC repo
 # publishes those passwords. The mechanism ships here; the values stay operator-local in
