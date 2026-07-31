@@ -43,6 +43,11 @@ THOR_REDIS_PORT = int(os.environ.get("THOR_REDIS_PORT", "6379"))
 VLLM_URL = os.environ.get("VLLM_URL", "http://localhost:8000/v1/chat/completions")
 MODEL = os.environ.get("MODEL", "")
 THOR_PROXY = os.environ.get("THOR_PROXY", "")
+# Serving node this dashboard reads runtime stats off (ssh target, e.g. user@host).
+# NO routable default on purpose: an unset value must read as "unconfigured", never as some
+# operator's machine. TAEY_NODE2_SSH is accepted as the fleet.env.example spelling.
+SERVE_NODE_SSH = os.environ.get("TAEY_SERVE_NODE_SSH") or os.environ.get("TAEY_NODE2_SSH", "")
+SERVE_UNIT = os.environ.get("TAEY_SERVE_UNIT", "taey-ep3.service")
 THOR_RAW = os.environ.get("THOR_RAW", "")
 ISMA_URL = os.environ.get("ISMA_URL", "http://localhost:8095").rstrip("/")
 ISMA_SEARCH_URL = f"{ISMA_URL}/v2/search/adaptive"
@@ -2878,20 +2883,32 @@ async def taey_cache():
     except Exception as e:
         out["preloaded_in_proxy"].append({"error": str(e)[:200]})
 
-    # vLLM prefix cache — the system prompt is cached as KV blocks on the GPU
-    try:
-        r = _sp.run(["ssh", "-o", "ConnectTimeout=8", "thor@10.0.0.197",
-                     "sudo journalctl -u taey-ep3 --no-pager -n 4000 | "
-                     "grep -oE 'Prefix cache hit rate: [0-9.]+%' | tail -1"],
-                    capture_output=True, text=True, timeout=25)
+    # vLLM prefix cache — the system prompt is cached as KV blocks on the GPU.
+    # The serving node is SITE CONFIG, not a literal: this panel reads a log off whichever node
+    # serves, and hardcoding one operator's host both leaks the fleet address into a public repo
+    # and silently reports the wrong node's cache anywhere else. Unset means unconfigured, and it
+    # says so rather than claiming the feature is on.
+    if not SERVE_NODE_SSH:
         out["vllm_prefix_cache"] = {
-            "enabled": True,
-            "latest_hit_rate": (r.stdout or "").strip() or "n/a",
-            "meaning": "the assembled prompt prefix is reused as KV blocks; it re-computes only "
-                       "when the prefix text changes",
+            "enabled": None,
+            "status": "unconfigured",
+            "meaning": "set TAEY_SERVE_NODE_SSH (or TAEY_NODE2_SSH) to the serving node's ssh "
+                       "target to read its prefix-cache hit rate",
         }
-    except Exception as e:
-        out["vllm_prefix_cache"] = {"enabled": True, "error": str(e)[:150]}
+    else:
+        try:
+            r = _sp.run(["ssh", "-o", "ConnectTimeout=8", SERVE_NODE_SSH,
+                         f"sudo journalctl -u {SERVE_UNIT} --no-pager -n 4000 | "
+                         "grep -oE 'Prefix cache hit rate: [0-9.]+%' | tail -1"],
+                        capture_output=True, text=True, timeout=25)
+            out["vllm_prefix_cache"] = {
+                "enabled": True,
+                "latest_hit_rate": (r.stdout or "").strip() or "n/a",
+                "meaning": "the assembled prompt prefix is reused as KV blocks; it re-computes only "
+                           "when the prefix text changes",
+            }
+        except Exception as e:
+            out["vllm_prefix_cache"] = {"enabled": None, "error": str(e)[:150]}
 
     # redis: what is held and for how long
     try:
