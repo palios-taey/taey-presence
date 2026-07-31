@@ -10,6 +10,9 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
+
+import receipt_check
 
 
 HERE = Path(__file__).resolve().parent
@@ -22,7 +25,32 @@ REPO_KEY = "palios-taey__taey-presence"
 PINNED_SHA = "1111111111111111111111111111111111111111"
 COMPILED_SHA = "0000000000000000000000000000000000000000"
 ARTIFACT_SHA = "2222222222222222222222222222222222222222"
+LIVE_COMPILED_SHA = "6d7abcd2ec540b1f27d9ae00080fb1de02acd139"
+LIVE_PINNED_SHA = "82bfcfb11e437256a4773ea2ea37cf0d8ad100ef"
+UNRELATED_SHA = "3333333333333333333333333333333333333333"
 SURFACE_ID = "fixture-surface"
+
+RECORDED_TRUE_ANCESTOR_COMPARE = {
+    "status": "ahead",
+    "ahead_by": 1,
+    "behind_by": 0,
+    "base_commit": {"sha": LIVE_COMPILED_SHA},
+    "merge_base_commit": {"sha": LIVE_COMPILED_SHA},
+}
+RECORDED_INVERSE_COMPARE = {
+    "status": "behind",
+    "ahead_by": 0,
+    "behind_by": 1,
+    "base_commit": {"sha": LIVE_PINNED_SHA},
+    "merge_base_commit": {"sha": LIVE_COMPILED_SHA},
+}
+RECORDED_DIVERGED_COMPARE = {
+    "status": "diverged",
+    "ahead_by": 1,
+    "behind_by": 1,
+    "base_commit": {"sha": LIVE_COMPILED_SHA},
+    "merge_base_commit": {"sha": UNRELATED_SHA},
+}
 
 
 def sha256(raw: bytes) -> str:
@@ -177,6 +205,16 @@ class ReceiptFixture:
 
 
 class ReceiptCheckerTests(unittest.TestCase):
+    def mock_compare_fetch(self, responses: dict[str, dict], default_branch: str = LIVE_PINNED_SHA):
+        def fake_fetch(url: str) -> dict:
+            if url == f"https://api.github.com/repos/{REPO}":
+                return {"default_branch": default_branch}
+            if url not in responses:
+                raise AssertionError(f"unexpected URL: {url}")
+            return copy.deepcopy(responses[url])
+
+        return mock.patch.object(receipt_check, "fetch_json_url", side_effect=fake_fetch)
+
     def run_check(self, fixture: ReceiptFixture, expected_rc: int = 3):
         proc = subprocess.run(
             [sys.executable, str(CHECK), "check", SURFACE_ID],
@@ -234,6 +272,44 @@ class ReceiptCheckerTests(unittest.TestCase):
             self.assertEqual(payload["verdict"], "REFUSE")
             self.assertEqual(payload["reason"], "binding-mismatch")
             self.assertEqual(payload["receipt_sha256"], "")
+
+    def test_commit_ancestor_or_equal_api_accepts_github_ahead_status(self) -> None:
+        responses = {
+            f"https://api.github.com/repos/{REPO}/compare/{LIVE_COMPILED_SHA}...{LIVE_PINNED_SHA}":
+                RECORDED_TRUE_ANCESTOR_COMPARE,
+            f"https://api.github.com/repos/{REPO}/compare/{LIVE_PINNED_SHA}...{LIVE_COMPILED_SHA}":
+                RECORDED_INVERSE_COMPARE,
+            f"https://api.github.com/repos/{REPO}/compare/{LIVE_COMPILED_SHA}...{UNRELATED_SHA}":
+                RECORDED_DIVERGED_COMPARE,
+        }
+        with (
+            mock.patch.dict(os.environ, {receipt_check.FIXTURE_ROOT_ENV: ""}),
+            self.mock_compare_fetch(responses),
+        ):
+            self.assertTrue(receipt_check.commit_ancestor_or_equal(REPO, LIVE_COMPILED_SHA, LIVE_PINNED_SHA))
+            self.assertFalse(receipt_check.commit_ancestor_or_equal(REPO, LIVE_PINNED_SHA, LIVE_COMPILED_SHA))
+            self.assertFalse(receipt_check.commit_ancestor_or_equal(REPO, LIVE_COMPILED_SHA, UNRELATED_SHA))
+
+    def test_artifact_reachable_api_accepts_github_ahead_status(self) -> None:
+        responses = {
+            f"https://api.github.com/repos/{REPO}/compare/{LIVE_COMPILED_SHA}...{LIVE_PINNED_SHA}":
+                RECORDED_TRUE_ANCESTOR_COMPARE,
+            f"https://api.github.com/repos/{REPO}/compare/{LIVE_PINNED_SHA}...{LIVE_COMPILED_SHA}":
+                RECORDED_INVERSE_COMPARE,
+            f"https://api.github.com/repos/{REPO}/compare/{UNRELATED_SHA}...{LIVE_PINNED_SHA}":
+                RECORDED_DIVERGED_COMPARE,
+        }
+        with (
+            mock.patch.dict(os.environ, {receipt_check.FIXTURE_ROOT_ENV: ""}),
+            self.mock_compare_fetch(responses),
+        ):
+            self.assertTrue(receipt_check.artifact_reachable_from_default(REPO, LIVE_COMPILED_SHA))
+            self.assertFalse(receipt_check.artifact_reachable_from_default(REPO, UNRELATED_SHA))
+        with (
+            mock.patch.dict(os.environ, {receipt_check.FIXTURE_ROOT_ENV: ""}),
+            self.mock_compare_fetch(responses, default_branch=LIVE_COMPILED_SHA),
+        ):
+            self.assertFalse(receipt_check.artifact_reachable_from_default(REPO, LIVE_PINNED_SHA))
 
     def test_full_accept_fixture_accepts(self) -> None:
         with tempfile.TemporaryDirectory() as td:

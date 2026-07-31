@@ -246,13 +246,18 @@ def artifact_reachable_from_default(repo: str, sha: str) -> bool:
     default_branch = repo_info.get("default_branch")
     if not isinstance(default_branch, str) or not default_branch:
         raise CheckerError(f"cannot determine default branch for {repo}")
-    base = urllib.parse.quote(sha, safe="")
-    head = urllib.parse.quote(default_branch, safe="")
+    return compare_head_reaches_or_equals_base(repo, sha, default_branch)
+
+
+def compare_head_reaches_or_equals_base(repo: str, base_ref: str, head_ref: str) -> bool:
+    base = urllib.parse.quote(base_ref, safe="")
+    head = urllib.parse.quote(head_ref, safe="")
     try:
         compare = fetch_json_url(f"https://api.github.com/repos/{repo}/compare/{base}...{head}")
     except MissingRemote:
         return False
-    return compare.get("status") in {"behind", "identical"}
+    # GitHub reports HEAD relative to BASE: base...head is "ahead" when head contains base.
+    return compare.get("status") in {"ahead", "identical"}
 
 
 def commit_ancestor_or_equal(repo: str, ancestor_sha: str, descendant_sha: str) -> bool:
@@ -272,13 +277,7 @@ def commit_ancestor_or_equal(repo: str, ancestor_sha: str, descendant_sha: str) 
             raise CheckerError(f"{path} entry for {descendant_sha} is not a list")
         return ancestor_sha in ancestors
 
-    base = urllib.parse.quote(ancestor_sha, safe="")
-    head = urllib.parse.quote(descendant_sha, safe="")
-    try:
-        compare = fetch_json_url(f"https://api.github.com/repos/{repo}/compare/{base}...{head}")
-    except MissingRemote:
-        return False
-    return compare.get("status") in {"behind", "identical"}
+    return compare_head_reaches_or_equals_base(repo, ancestor_sha, descendant_sha)
 
 
 def production_entries(index: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
