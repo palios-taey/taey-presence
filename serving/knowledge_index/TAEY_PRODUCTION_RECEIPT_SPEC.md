@@ -1,5 +1,5 @@
 # TAEY_PRODUCTION_RECEIPT_SPEC — "no receipt → refuse"
-**Status:** v2.3, 2026-07-31 — v2: six v1 findings; v2.1: four precision findings; v2.2: path authority + manifest schema; v2.3: the self-reference broken (receipt attests artifact_commit_sha, never its own containing commit; generated_at_commit defined as the source commit) + field-exact status/check-run success semantics. Closes only on the reviewer's explicit clean verdict. Implementation waits on that verdict.
+**Status:** v2.4, 2026-07-31 — v2.3 + the compiled_at_commit equality DROPPED (proven unsatisfiable by infra's two-iteration demonstration during rollout step 4; replaced with ancestry-of-pinned_sha; integrity carried by the blob-hash binding). Closes only on the reviewer's explicit clean verdict. Implementation waits on that verdict.
 **Consumes:** TAEY_KNOWLEDGE_INDEX_SPEC (the index is the registry AND the root of trust); the per-surface validation suites; the repos' CI gates.
 **Rule being made mechanical (Jesse directive):** the served Taey uses ONLY production infrastructure and must be able to NOT ACCEPT anything else. A 27B cannot judge "is this production" — so no judgment is asked anywhere in this spec. One check, two verdicts, zero interpretation.
 
@@ -83,10 +83,16 @@ different, earlier commit and therefore committable by normal git. Bindings:
 the rollout-step-2 set),
 receipt blob sha256 == `entry.receipts.liveness_sha256`, `liveness.probe_cmd == entry.liveness.probe_cmd`,
 `liveness.expect == entry.liveness.expect`, `index_entry_ref` resolves to the same entry.
-`compiled_at_commit` MUST equal the index's top-level `generated_at_commit`, where
-`generated_at_commit` is defined as the SOURCE commit the index build read — a parent of
-the commit containing the index file, never that commit itself (the same self-reference
-audit applied: both fields attest earlier commits, neither contains itself).
+`compiled_at_commit` records the head the RECEIPT compiler read, and R2 requires only
+that it is an ANCESTOR of (or equal to) `entry.repo.pinned_sha` — never an equality with
+`generated_at_commit`. *(v2.4: the former equality was proven UNSATISFIABLE by
+demonstration — receipts must be fetchable at pinned_sha, so they are committed before
+the index build head exists, so they cannot contain that head's sha; the constraint
+translated the mismatch by one commit per iteration forever. Dropping it weakens nothing:
+the blob-hash binding `receipts.liveness_sha256` already pins the exact receipt bytes the
+index was built against, which is the integrity the equality pretended to add.)*
+`generated_at_commit` remains defined as the SOURCE commit the index build read — a parent
+of the commit containing the index file, never that commit itself.
 `artifact_manifest_sha256` MUST equal `entry.artifact_manifest.sha256`, whose manifest file
 (at `entry.artifact_manifest.path`, fetched at pinned_sha) re-hashes to the same value
 under the canonicalization of §2 — field, path, format, and algorithm all schema-defined.
