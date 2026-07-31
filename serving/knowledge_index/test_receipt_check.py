@@ -196,23 +196,37 @@ class ReceiptCheckerTests(unittest.TestCase):
         self.assertEqual(len(proc.stdout.strip().splitlines()), 1, proc.stdout)
         return proc.returncode, json.loads(proc.stdout)
 
-    def test_current_null_liveness_sha_refuses_r2_fail_closed(self) -> None:
-        env = os.environ.copy()
-        env["TAEY_RECEIPT_INDEX_PATH"] = str(HERE / "index.json")
-        env["TAEY_RECEIPT_LIVE_INDEX_PATH"] = str(HERE / "index.json")
-        proc = subprocess.run(
-            [sys.executable, str(CHECK), "check", "presence-serve"],
-            cwd=REPO_ROOT,
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        self.assertEqual(proc.returncode, 3, proc.stderr + proc.stdout)
-        payload = json.loads(proc.stdout)
-        self.assertEqual(payload["verdict"], "REFUSE")
-        self.assertEqual(payload["reason"], "binding-mismatch")
-        self.assertEqual(payload["receipt_sha256"], "")
+    def test_null_liveness_sha_refuses_r2_fail_closed(self) -> None:
+        # ASSERTED AGAINST A FIXTURE, NOT THE LIVE INDEX.
+        #
+        # This test used to point TAEY_RECEIPT_INDEX_PATH at the real index.json and rely
+        # on liveness_sha256 being null there. That was true only until rollout step 4
+        # compiled the receipts — which was step 4's entire purpose — so the test failed
+        # the moment the thing it was waiting for happened, and it failed as though the
+        # receipts were wrong rather than as though the fixture had gone stale.
+        #
+        # The behaviour under test is real and worth keeping: a null liveness_sha256 must
+        # fail CLOSED. So it is now asserted against a fixture this test controls, like
+        # every other case in this battery.
+        with tempfile.TemporaryDirectory() as td:
+            fixture = ReceiptFixture(Path(td))
+            fixture.index["sections"]["presence"]["capabilities"][0]["receipts"][
+                "liveness_sha256"
+            ] = None
+            fixture.rewrite_index_only()
+            proc = subprocess.run(
+                [sys.executable, str(CHECK), "check", SURFACE_ID],
+                cwd=REPO_ROOT,
+                env=fixture.env(),
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            self.assertEqual(proc.returncode, 3, proc.stderr + proc.stdout)
+            payload = json.loads(proc.stdout)
+            self.assertEqual(payload["verdict"], "REFUSE")
+            self.assertEqual(payload["reason"], "binding-mismatch")
+            self.assertEqual(payload["receipt_sha256"], "")
 
     def test_no_receipt_refuses_no_receipt(self) -> None:
         with tempfile.TemporaryDirectory() as td:
