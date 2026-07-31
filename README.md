@@ -104,21 +104,33 @@ FastAPI dashboard renders all of it.
   durably recorded as a revisioned `user_amendment`; stale work is marked and
   the affected independent/critique cycle reruns before final synthesis.
 
+**The council IS built — and it is not in this repo.** DCM, the council you
+deliberate through, lives at **[`palios-taey/dcm`](https://github.com/palios-taey/dcm)**
+(public). It runs: seat processes hold different lenses and reach the model through
+the proxy, and this repo's dashboard is wired to it — `dashboard/native_council.py`,
+with council events streaming into a turn and a `council/active` route. If you are
+looking for how the council works, go there; this repo is the runtime it runs *on*.
+
+One thing worth carrying: **where a seat runs is not where the thinking happens.**
+Seat processes and the model can sit on different machines and meet through the proxy,
+so counting seats on a host tells you where the *drivers* are and nothing about where
+the *work* is. Ask the endpoint what it is serving.
+
 **Not built — do not expect it:**
 
-- **Cross-host / multi-instance coordination.** Everything coordinates through
-  one Redis (and optionally one Neo4j) on a single trusted host. There is no
-  cross-machine presence sync.
-- **DCM peer-state read-back — in the code, not yet wired (planned).** The
-  foundation ships here on purpose: `presence/dcm_presence.py` *writes* per-worker
-  state to Neo4j as `:TaeyInstance` nodes (`neo4j_write_state`), and a
-  `neo4j_read_peer_states` reader exists. What is **not** built is the
-  *consumption* — nothing reads peer state back into a worker's decisions yet, so
-  there is no live multi-worker coordination through it today. Wiring that
-  read-back (intra-host first) is the planned next step. Neo4j is fully optional
-  in the meantime; without it the presence worker runs Redis-only. (The bigger
-  cross-instance/cross-host story is further out and is **not** claimed.)
-- **The existing CLI-backed DCM is not bundled here.** The Taey-native transport
+- **Peer-state read-back is written but never read.** `presence/dcm_presence.py`
+  *writes* per-worker state to Neo4j as `:TaeyInstance` nodes (`neo4j_write_state`,
+  called from the face, memory and thinker workers), and a `neo4j_read_peer_states`
+  reader is defined at line 170 — with **zero callers**. So nothing reads peer state
+  back into a worker's decisions, and there is no live multi-worker coordination
+  *through this path* today. This is a narrow, checkable gap in this repo's presence
+  worker; it is **not** a statement about the council, which is built and running.
+  Neo4j stays fully optional — without it the presence worker runs Redis-only.
+- **Cross-machine presence *sync*.** Presence state coordinates through one Redis
+  (and optionally one Neo4j) on a single trusted host. Cross-machine *inference* is
+  routine — the proxy reaches whichever node serves — but the presence keys
+  themselves do not sync between hosts.
+- **External CLI transports are not bundled here.** The Taey-native transport
   implements the public local-seat boundary and does not invoke, replace, or
   modify external Claude, Codex, Gemini, or Grok transports.
 
