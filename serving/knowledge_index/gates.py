@@ -173,6 +173,63 @@ VALID_KINDS = {"memory", "serve", "orchestrate", "notify", "consult", "train-how
 VALID_STATUS = {"production", "deprecated"}
 
 
+def _git(*args: str) -> str:
+    return subprocess.run(["git", "-C", str(HERE.parent.parent), *args],
+                          capture_output=True, text=True, timeout=30).stdout.strip()
+
+
+def g0_commit_fields(doc: dict) -> Failure:
+    """The commit fields must attest an EARLIER commit than the one carrying this index.
+
+    This is the structural half of the self-reference audit. Without it, a build that
+    recorded its own containing commit would look identical to an honest one — and the
+    checker cannot tell the difference by recomputation alone, because recomputing from
+    HEAD is exactly the paradox: after the index is committed, HEAD IS the containing
+    commit, so the forbidden value verifies and the honest value fails.
+    """
+    f = Failure()
+    gen = doc.get("generated_at_commit") or ""
+    if not gen:
+        f.add("$.generated_at_commit", "", "missing")
+        return f
+
+    # The commit that contains the committed index file. Empty while it is uncommitted,
+    # which is a legitimate pre-commit state and not a violation.
+    rel = str(INDEX.relative_to(HERE.parent.parent))
+    # If index.json has UNCOMMITTED changes, the commit that will contain this version does
+    # not exist yet — `git log -1` would return the PREVIOUS one and the comparison would be
+    # off by a commit, flagging an honest build. A pre-commit tree is a legitimate state,
+    # not a violation; the gate re-runs in CI against the committed object.
+    if _git("status", "--porcelain", "--", rel):
+        return f
+    containing = _git("log", "-1", "--format=%H", "--", rel)
+    if not containing:
+        return f  # not yet committed; nothing to compare against
+
+    def check(field: str, val: str) -> None:
+        if not val:
+            f.add(field, "", "missing")
+            return
+        if val == containing:
+            f.add(field, val, "EQUALS the commit containing this index — a field may never "
+                              "attest the commit that carries it (self-reference)")
+            return
+        anc = subprocess.run(["git", "-C", str(HERE.parent.parent), "merge-base",
+                              "--is-ancestor", val, containing], capture_output=True, timeout=30)
+        if anc.returncode != 0:
+            f.add(field, val, f"is not an ancestor of the index-containing commit "
+                              f"{containing[:12]} — it attests a commit this index cannot descend from")
+
+    check("$.generated_at_commit", gen)
+    for name, sec in (doc.get("sections") or {}).items():
+        for cap in sec.get("capabilities", []):
+            check(f"sections.{name}.{cap.get('id')}.repo.pinned_sha",
+                  (cap.get("repo") or {}).get("pinned_sha", ""))
+            check(f"sections.{name}.{cap.get('id')}.artifact_commit_sha",
+                  cap.get("artifact_commit_sha", ""))
+    return f
+
+
 def g1_schema(doc: dict) -> Failure:
     f = Failure()
     for name, sec in (doc.get("sections") or {}).items():
@@ -341,6 +398,7 @@ def main() -> int:
 
     print("KNOWLEDGE-INDEX GATES")
     if a.g1:
+        ok &= report("G0 commit-field ancestry (self-reference audit)", g0_commit_fields(doc))
         ok &= report("G1 schema-lint", g1_schema(doc))
     if a.g2:
         ok &= report("G2 pointer-crawler (closed-world)", g2_pointer_crawl(doc))

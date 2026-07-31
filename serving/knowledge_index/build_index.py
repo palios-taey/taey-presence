@@ -23,6 +23,7 @@ import json
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -161,7 +162,35 @@ def _conforming_receipt_sha(rel: str | None):
     return sha256_bytes(raw)
 
 
-def enrich_capability(cap: dict, src_commit: str) -> None:
+ORACLE_FILE = REPO_ROOT / "serving" / "validate_presence.sh"
+
+
+def load_liveness_oracle() -> dict:
+    """Read the liveness assertions from their SINGLE AUTHORED SOURCE — the validate suite.
+
+    The index does not author predicates. It compiles the assertions the suite already
+    makes, so the thing that runs them and the thing that binds them cannot disagree.
+    """
+    if not ORACLE_FILE.is_file():
+        raise SystemExit(f"liveness oracle missing: {ORACLE_FILE}")
+    txt = ORACLE_FILE.read_text()
+    m = re.search(r"<<'ORACLE'[^\n]*\n(.*?)\nORACLE\b", txt, re.S)
+    if not m:
+        raise SystemExit("no ORACLE heredoc found in the validate suite")
+    out = {}
+    for line in m.group(1).splitlines():
+        if not line.strip():
+            continue
+        parts = line.split("\t")
+        if len(parts) != 4:
+            raise SystemExit(f"oracle line is not 4 TAB-separated fields: {line[:80]}")
+        sid, lang, probe, pred = parts
+        out[sid] = {"probe_cmd": probe, "expect": {"lang": lang, "predicate": pred}}
+    return out
+
+
+def enrich_capability(cap: dict, src_commit: str, manifest_dir: Path,
+                      oracle: dict | None = None) -> None:
     """Fill the receipt-spec binding fields that are DERIVED, never authored.
 
     Every one of these is read from git or computed from file bytes. A hand-written value
@@ -169,6 +198,14 @@ def enrich_capability(cap: dict, src_commit: str) -> None:
     chain's whole guarantee is that each hash is computed from the content it attests.
     """
     cap.setdefault("repo", {})["pinned_sha"] = src_commit
+
+    # Liveness is COMPILED from the suite, never authored in the section.
+    if oracle is not None:
+        if cap["id"] not in oracle:
+            raise SystemExit(f"{cap['id']}: no liveness assertion in the oracle "
+                             f"(serving/validate_presence.sh) — a production capability "
+                             f"cannot bind a predicate nobody authored")
+        cap["liveness"] = oracle[cap["id"]]
 
     paths = cap.get("artifact_paths") or []
     cap["artifact_commit_sha"] = last_commit_touching(paths)
@@ -181,10 +218,11 @@ def enrich_capability(cap: dict, src_commit: str) -> None:
             raise SystemExit(f"{cap['id']}: artifact_paths names a missing file: {rel}")
         entries.append({"path": rel, "sha256": sha256_bytes(f.read_bytes())})
     blob = canonical_bytes({"surface_id": cap["id"], "artifacts": entries})
-    mf = MANIFEST_DIR / f"{cap['id']}.artifacts.json"
+    mf = manifest_dir / f"{cap['id']}.artifacts.json"
     mf.write_bytes(blob)
     cap["artifact_manifest"] = {
-        "path": str(mf.relative_to(REPO_ROOT)),
+        # Always the COMMITTED location, even when building into a temp dir for --check.
+        "path": str((MANIFEST_DIR / mf.name).relative_to(REPO_ROOT)),
         "sha256": sha256_bytes(blob),
     }
 
@@ -195,15 +233,22 @@ def enrich_capability(cap: dict, src_commit: str) -> None:
     rc["liveness_sha256"] = _conforming_receipt_sha(rc.get("liveness"))
 
 
-def build() -> dict:
+def build(*, src_commit: str | None = None, manifest_dir: Path | None = None) -> dict:
     if not SECTIONS_DIR.is_dir():
         raise SystemExit(f"no sections directory at {SECTIONS_DIR}")
     section_files = sorted(SECTIONS_DIR.glob("*.md"))
     if not section_files:
         raise SystemExit("no section sources found — the index cannot be empty")
 
-    src_commit = head_commit()
-    MANIFEST_DIR.mkdir(parents=True, exist_ok=True)
+    # In CHECK mode the caller pins this to the commit the committed index RECORDED.
+    # Re-deriving it from HEAD is the self-reference paradox codex found: once the
+    # index-containing commit exists, HEAD *is* that commit, so the honest parent value
+    # would fail the check and the forbidden self-referential value would pass it. The
+    # checker must never learn the commit from the working tree.
+    src_commit = src_commit or head_commit()
+    oracle = load_liveness_oracle()
+    mdir = manifest_dir or MANIFEST_DIR
+    mdir.mkdir(parents=True, exist_ok=True)
 
     manifest, sections, present = [], {}, []
     for path in section_files:
@@ -212,7 +257,7 @@ def build() -> dict:
         name = path.stem
         caps = parse_capabilities(text)
         for cap in caps:
-            enrich_capability(cap, src_commit)
+            enrich_capability(cap, src_commit, mdir, oracle)
         sections[name] = {
             "capabilities": caps,
             "processes": parse_processes(text),
@@ -261,24 +306,58 @@ def main() -> int:
                     help="recompile and compare against the committed index.json; write nothing")
     args = ap.parse_args()
 
-    compiled = build()
-    rendered = json.dumps(compiled, indent=2, sort_keys=True) + "\n"
-
+    # DO NOT build before branching. An unconditional build() here writes manifests into
+    # the REPO, which silently repaired the very hand-edit --check exists to detect — the
+    # read-only check block below never saw the forgery because this line had already
+    # overwritten it. Check mode must reach its own pinned, temp-dir build untouched.
     if args.check:
         if not OUT.exists():
             print("FAIL: index.json is not committed", file=sys.stderr)
             return 1
-        if OUT.read_text() != rendered:
-            print("FAIL: index.json does not match a recompile of its sources.\n"
-                  "      Either a section changed without rebuilding, or index.json was\n"
-                  "      hand-edited. Run: python3 build_index.py", file=sys.stderr)
+        committed = json.loads(OUT.read_text())
+
+        # Recompile PINNED to the commit the committed index recorded — never HEAD.
+        recorded = committed.get("generated_at_commit") or ""
+        if not recorded:
+            print("FAIL: index.json has no generated_at_commit to check against", file=sys.stderr)
             return 1
-        n_caps = sum(len(s["capabilities"]) for s in compiled["sections"].values())
-        n_procs = sum(len(s["processes"]) for s in compiled["sections"].values())
-        print(f"ok   index.json matches its sources "
-              f"({len(compiled['sections_present'])} section(s), {n_caps} capabilities, {n_procs} processes)")
+
+        # Build into a THROWAWAY manifest dir. Check mode must not write into the repo:
+        # the previous version rebuilt manifests in place before comparing, so a
+        # hand-edited manifest was silently repaired and the check passed. A checker that
+        # repairs what it is meant to detect is worse than no checker.
+        with tempfile.TemporaryDirectory() as td:
+            expected = build(src_commit=recorded, manifest_dir=Path(td))
+            rendered_expected = json.dumps(expected, indent=2, sort_keys=True) + "\n"
+            if OUT.read_text() != rendered_expected:
+                print("FAIL: index.json does not match a recompile of its sources at the\n"
+                      f"      recorded generated_at_commit ({recorded[:12]}). Either a section\n"
+                      "      changed without rebuilding, or index.json was hand-edited.",
+                      file=sys.stderr)
+                return 1
+            # REHASH the COMMITTED manifests against the freshly computed ones.
+            for cap in (c for sec in expected["sections"].values() for c in sec["capabilities"]):
+                committed_mf = REPO_ROOT / cap["artifact_manifest"]["path"]
+                fresh_mf = Path(td) / Path(cap["artifact_manifest"]["path"]).name
+                if not committed_mf.is_file():
+                    print(f"FAIL: manifest missing from the repo: {cap['artifact_manifest']['path']}",
+                          file=sys.stderr)
+                    return 1
+                if sha256_bytes(committed_mf.read_bytes()) != sha256_bytes(fresh_mf.read_bytes()):
+                    print(f"FAIL: committed manifest {cap['artifact_manifest']['path']} does not\n"
+                          "      match a recompile — hand-edited, or its artifacts changed.",
+                          file=sys.stderr)
+                    return 1
+
+        n_caps = sum(len(s["capabilities"]) for s in expected["sections"].values())
+        n_procs = sum(len(s["processes"]) for s in expected["sections"].values())
+        print(f"ok   index.json + manifests match their sources at recorded commit "
+              f"{recorded[:12]} ({len(expected['sections_present'])} section(s), "
+              f"{n_caps} capabilities, {n_procs} processes)")
         return 0
 
+    compiled = build()
+    rendered = json.dumps(compiled, indent=2, sort_keys=True) + "\n"
     OUT.write_text(rendered)
     print(f"wrote {OUT.relative_to(HERE.parent.parent)}  "
           f"sections_present={compiled['sections_present']}  "

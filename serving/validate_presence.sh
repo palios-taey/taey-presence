@@ -34,6 +34,52 @@ need() {
   return 0
 }
 
+
+# ══════════════════════════════════════════════════════════════════════════════════════
+# LIVENESS ORACLE — THE SINGLE AUTHORED SOURCE
+#
+# These assertions are authored HERE, once, and COMPILED into the knowledge index by
+# build_index.py. The index carries no authored predicate prose: a predicate written in
+# two places is two predicates, and they drift silently because nothing compares them.
+#
+# This suite runs them, and the index binds them. Same bytes, one author.
+#
+# Format, TAB-separated (predicates contain '|', so a pipe delimiter would corrupt them):
+#   surface_id <TAB> lang <TAB> probe_cmd <TAB> predicate
+#
+# lang is `jq` (stdout parses as JSON, `jq -e` exits 0) or `text` (anchored POSIX ERE).
+# Status codes NEVER appear — the probe-shape law is BODIES, NOT CODES.
+#
+# NOTE ON presence-proxy: the probe compares the proxy's served alias against UPSTREAM's.
+# A weaker "the proxy returned some models" predicate would pass while the proxy pointed
+# at an entirely different node — which is precisely the failure this surface exists to
+# detect, and asserting less than production already asserts is a fidelity regression
+# regardless of what any contract permits.
+# ══════════════════════════════════════════════════════════════════════════════════════
+read -r -d '' LIVENESS_ORACLE <<'ORACLE' || true
+presence-serve	jq	curl -sf "$TAEY_SERVE_URL/v1/models"	.data[0].root | type == "string" and (. | length) > 0
+presence-proxy	jq	jq -n --arg proxy "$(curl -sf "$TAEY_PROXY_URL/v1/models" | jq -r '.data[0].id')" --arg upstream "$(curl -sf "$TAEY_SERVE_URL/v1/models" | jq -r '.data[0].id')" '{proxy:$proxy,upstream:$upstream}'	.proxy == .upstream and (.proxy | length) > 0
+presence-dashboard	jq	curl -sf "$TAEY_DASHBOARD_URL/api/self/overview"	.body.rho | type == "number"
+presence-seat	jq	python3 serving/seat_liveness.py	.ok == true and .seat_count > 0 and .namespace_declared == true
+ORACLE
+
+run_oracle() {
+  echo "[4b] LIVENESS PREDICATES (the same assertions the index binds)"
+  while IFS=$'\t' read -r sid lang probe pred; do
+    [ -z "${sid:-}" ] && continue
+    cmd "$probe"
+    out=$(cd "$REPO_ROOT" && timeout 30 bash -c "$probe" 2>/dev/null </dev/null)
+    if [ -z "$out" ]; then bad "$sid: probe produced no stdout"; continue; fi
+    if [ "$lang" = "jq" ]; then
+      if printf '%s' "$out" | jq -e "$pred" >/dev/null 2>&1; then ok "$sid: predicate holds"
+      else bad "$sid: probe answered but the predicate FAILED — exit 0 is not liveness"; fi
+    else
+      if printf '%s' "$out" | grep -qE "$pred"; then ok "$sid: predicate holds"
+      else bad "$sid: stdout did not match the anchored ERE"; fi
+    fi
+  done <<< "$LIVENESS_ORACLE"
+}
+
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$REPO_ROOT" || exit 2
 
@@ -107,6 +153,8 @@ if need TAEY_SERVE_URL && need TAEY_PROXY_URL && need TAEY_DASHBOARD_URL; then
     (cd serving/knowledge_index && python3 gates.py --g3 2>&1 | grep -E 'FAIL|RED' | sed 's/^/         /')
   fi
 fi
+
+run_oracle
 
 # ------------------------------------------------------- 5. autonomous usage
 echo

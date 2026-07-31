@@ -16,7 +16,12 @@ receipts.liveness_sha256 are DERIVED FROM GIT AND FILE CONTENT at build time. Wr
 them by hand would be a claim about a commit rather than a reading of one, and the whole
 point of the receipt chain is that every hash is computed from the bytes it attests.
 
-LIVENESS PREDICATES ARE EXECUTABLE, NOT PROSE (receipt spec §6). Two forms only: `jq`
+LIVENESS PREDICATES ARE NOT AUTHORED HERE AT ALL. They live in serving/validate_presence.sh's
+LIVENESS ORACLE block — the single authored source — and are COMPILED in by build_index.py.
+A predicate written in two places is two predicates, and they drift silently because nothing
+compares them. The suite runs them; the index binds them; same bytes, one author.
+
+The grammar itself (receipt spec §6) is two forms only: `jq`
 (stdout parses as JSON and `jq -e` exits 0) and `text` (anchored POSIX ERE over stdout).
 Status codes NEVER appear in a predicate — the probe-shape law is BODIES, NOT CODES: a
 200 carrying an error object is not liveness. Every prose expectation this file used to
@@ -43,13 +48,6 @@ carry was non-conforming by definition and is recompiled here.
   "bootstrap": {
     "cmd": "bash serving/deploy_thor.sh --check",
     "requires": []
-  },
-  "liveness": {
-    "probe_cmd": "curl -sf \"$TAEY_SERVE_URL/v1/models\"",
-    "expect": {
-      "lang": "jq",
-      "predicate": ".data[0].root | type == \"string\" and (. | length) > 0"
-    }
   },
   "endpoints": [
     {
@@ -87,13 +85,6 @@ carry was non-conforming by definition and is recompiled here.
       "presence-serve"
     ]
   },
-  "liveness": {
-    "probe_cmd": "curl -sf \"$TAEY_PROXY_URL/v1/models\"",
-    "expect": {
-      "lang": "jq",
-      "predicate": ".data | type == \"array\" and (. | length) > 0 and (.[0].id | type == \"string\")"
-    }
-  },
   "endpoints": [
     {
       "name": "chat",
@@ -130,13 +121,6 @@ carry was non-conforming by definition and is recompiled here.
       "presence-proxy"
     ]
   },
-  "liveness": {
-    "probe_cmd": "curl -sf \"$TAEY_DASHBOARD_URL/api/self/overview\"",
-    "expect": {
-      "lang": "jq",
-      "predicate": ".body.rho | type == \"number\""
-    }
-  },
   "endpoints": [
     {
       "name": "self",
@@ -172,13 +156,6 @@ carry was non-conforming by definition and is recompiled here.
     "requires": [
       "presence-proxy"
     ]
-  },
-  "liveness": {
-    "probe_cmd": "python3 serving/seat_liveness.py",
-    "expect": {
-      "lang": "jq",
-      "predicate": ".ok == true and .seat_count > 0 and .namespace_declared == true"
-    }
   },
   "endpoints": [
     {
