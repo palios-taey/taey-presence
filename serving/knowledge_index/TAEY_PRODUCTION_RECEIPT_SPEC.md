@@ -1,5 +1,5 @@
 # TAEY_PRODUCTION_RECEIPT_SPEC — "no receipt → refuse"
-**Status:** v2.2, 2026-07-31 — v2 addressed the six v1 findings; v2.1 the four second-pass precision findings; v2.2 the third pass (receipts.liveness as the single path authority, exact gates-manifest schema with field-exact actor matching, rollout step 2 enumerates every binding field). Closes only on the reviewer's explicit clean verdict. Implementation waits on that verdict.
+**Status:** v2.3, 2026-07-31 — v2: six v1 findings; v2.1: four precision findings; v2.2: path authority + manifest schema; v2.3: the self-reference broken (receipt attests artifact_commit_sha, never its own containing commit; generated_at_commit defined as the source commit) + field-exact status/check-run success semantics. Closes only on the reviewer's explicit clean verdict. Implementation waits on that verdict.
 **Consumes:** TAEY_KNOWLEDGE_INDEX_SPEC (the index is the registry AND the root of trust); the per-surface validation suites; the repos' CI gates.
 **Rule being made mechanical (Jesse directive):** the served Taey uses ONLY production infrastructure and must be able to NOT ACCEPT anything else. A 27B cannot judge "is this production" — so no judgment is asked anywhere in this spec. One check, two verdicts, zero interpretation.
 
@@ -60,9 +60,9 @@ verified downward only:
   "receipt_version": 2,
   "surface_id": "",
   "repo": "OWNER/NAME",
-  "commit_sha": "",
+  "artifact_commit_sha": "<the commit of the DEPLOYED ARTIFACT this receipt attests - never the commit containing this receipt file>",
   "artifact_manifest_sha256": "",
-  "gates_manifest_ref": "<path in repo at commit_sha listing required contexts>",
+  "gates_manifest_ref": "<path in repo at artifact_commit_sha listing required contexts>",
   "liveness": {
     "probe_cmd": "<exactly the entry's compiled probe command>",
     "expect": {"lang": "jq|text", "predicate": ""}
@@ -72,11 +72,21 @@ verified downward only:
 }
 ```
 
-Binding rules (finding 2 — every field EQUALITY-checked against the index entry in R2):
-`surface_id == entry.id`, `repo == entry.repo.name`, `commit_sha == entry.repo.pinned_sha`,
+Binding rules (every field EQUALITY-checked against the index entry in R2). **The
+self-reference is broken by construction**: the receipt's LOCATION authority is the
+pinned fetch itself (`entry.receipts.liveness` at `entry.repo.pinned_sha` + blob-hash
+equality) — the receipt never stores the SHA of its own containing commit. What it stores
+is `artifact_commit_sha`: the commit of the deployed artifact it ATTESTS, which is a
+different, earlier commit and therefore committable by normal git. Bindings:
+`surface_id == entry.id`, `repo == entry.repo.name`,
+`artifact_commit_sha == entry.artifact_commit_sha` (a new compiled index field, added to
+the rollout-step-2 set),
 receipt blob sha256 == `entry.receipts.liveness_sha256`, `liveness.probe_cmd == entry.liveness.probe_cmd`,
 `liveness.expect == entry.liveness.expect`, `index_entry_ref` resolves to the same entry.
-`compiled_at_commit` MUST equal the index's top-level `generated_at_commit`, and
+`compiled_at_commit` MUST equal the index's top-level `generated_at_commit`, where
+`generated_at_commit` is defined as the SOURCE commit the index build read — a parent of
+the commit containing the index file, never that commit itself (the same self-reference
+audit applied: both fields attest earlier commits, neither contains itself).
 `artifact_manifest_sha256` MUST equal `entry.artifact_manifest.sha256`, whose manifest file
 (at `entry.artifact_manifest.path`, fetched at pinned_sha) re-hashes to the same value
 under the canonicalization of §2 — field, path, format, and algorithm all schema-defined.
@@ -85,7 +95,7 @@ Any inequality = REFUSE: binding-mismatch. There is no partial credit.
 ## 4. The gates check (finding 1)
 
 Required contexts come from a source OUTSIDE the receipt: the repo's committed
-**gates manifest** (`gates_manifest_ref`, read at `commit_sha` via the public API),
+**gates manifest** (`gates_manifest_ref`, read at `artifact_commit_sha` via the public API),
 itself versioned and guarded by the repo's own CI. Its schema is exact:
 
 ```json
@@ -104,11 +114,14 @@ listed, = REFUSE: untrusted-actor. A manifest failing this schema = checker-erro
 (treated as REFUSE by the caller).
 R4 verifies:
 - the manifest's context set is NON-EMPTY,
-- the statuses/check-runs for **exactly `commit_sha`** include EVERY manifest context with
-  state success, actor-matched per the schema rule above (no other trust source, no
-  inference),
+- the statuses/check-runs for **exactly `artifact_commit_sha`** satisfy EVERY manifest
+  context, with field-exact success semantics: a COMMIT STATUS satisfies a context when
+  `status.context == <name>` AND `status.state == "success"`; a CHECK RUN satisfies one
+  when `check_run.name == <name>` AND `check_run.status == "completed"` AND
+  `check_run.conclusion == "success"`. No other field is consulted. Actor-matched per the
+  schema rule above (no other trust source, no inference),
 - extra green contexts are ignored; a missing or non-success required context = REFUSE.
-An empty manifest, an unreadable manifest, or gates reported for any other sha = REFUSE.
+An empty manifest, an unreadable manifest, or gates reported for any sha other than `artifact_commit_sha` = REFUSE.
 
 ## 5. The check (Taey-runnable, deterministic)
 
@@ -126,7 +139,7 @@ definition, no judgment involved.
 | R0 | fetched index content hash == the ADOPTED index hash (bootstrap output, §2) | index-stale |
 | R1 | surface_id is a `status: production` entry in `sections_present` | not-in-index |
 | R2 | receipt fetched at pinned_sha; sha256 + ALL binding fields equal (§3) | binding-mismatch / no-receipt |
-| R3 | `commit_sha == pinned_sha` and reachable from default branch | unreachable-sha |
+| R3 | `artifact_commit_sha` reachable from the repo's default branch | unreachable-sha |
 | R4 | gates per the committed manifest, exact-set, non-empty, sha-exact, actor-allowlisted (§4) | gate-not-green / untrusted-actor |
 | R5 | liveness probe passes its compiled predicate (§6) | not-live |
 
@@ -156,8 +169,9 @@ Ordered, each step gated on the previous; the served prompt changes LAST:
 
 1. This spec: adversarial review → clean verdict.
 2. Index schema change — ALL binding fields at once: `pinned_sha`,
-   `receipts.liveness_sha256`, top-level `generated_at_commit`, per-entry
-   `artifact_manifest{path, sha256}`, and per-entry liveness predicate compilation —
+   `receipts.liveness_sha256`, top-level `generated_at_commit` (the SOURCE commit the build
+   read), per-entry `artifact_commit_sha`, per-entry `artifact_manifest{path, sha256}`,
+   and per-entry liveness predicate compilation —
    through the index's own gates. Receipts cannot sequence before their binding fields.
 3. `taey-receipt-check` + `taey-index-resolve` implemented beside the index compiler —
    **inert**: installed, runnable, referenced by nothing Taey is told to do.
