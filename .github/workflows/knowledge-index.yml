@@ -34,6 +34,17 @@ jobs:
           # ancestors to walk, so the check would pass vacuously — the exact fail-open
           # shape these gates exist to kill.
           fetch-depth: 0
+          # CHECK OUT THE BRANCH HEAD, NOT THE SYNTHETIC MERGE COMMIT.
+          #
+          # On pull_request, actions/checkout defaults to refs/pull/N/merge — a commit that
+          # exists nowhere in the branch's history. The index's commit fields are DERIVED
+          # from `git log` over the artifact paths, so under that synthetic history they
+          # resolve to different SHAs than the ones recorded at build time, and --check
+          # failed against an index that was in fact correct. Found by this workflow's own
+          # first run.
+          #
+          # The index attests the branch head, so the branch head is the object to verify.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Install jq (liveness predicates are validated as real jq)
         run: |
