@@ -1,0 +1,13 @@
+{
+  "actor": "taey",
+  "audit_trail_ref": "/home/mira/taey_tool_audit.jsonl:931",
+  "capability": "presence-serve",
+  "event_id": "4437a8ad5a944fa98e0b6223f940de4c",
+  "invocation": "curl -s http://127.0.0.1:8766/v1/models",
+  "invocation_count": 1,
+  "kind": "usage",
+  "rc": 0,
+  "timestamp": "2026-07-31T00:34:04Z",
+  "turn_id": "2b3fad84b7cc458cbaf5f244efa17dee",
+  "verify": "sed -n '931p' /home/mira/taey_tool_audit.jsonl | python3 -m json.tool  # must show event_id 4437a8ad5a944fa98e0b6223f940de4c"
+}

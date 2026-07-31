@@ -1,0 +1,10 @@
+{
+  "capability": "presence-proxy",
+  "cmd": "curl -sf \"$TAEY_PROXY_URL/v1/models\"",
+  "index_version": 1,
+  "kind": "liveness",
+  "note": "G3 liveness only: this says the capability answered just now. It says NOTHING about whether Taey has ever used it, and it can never close a CONNECT box (spec 2.2 F6).",
+  "ok": true,
+  "rc": 0,
+  "stdout_excerpt": "{\"object\":\"list\",\"data\":[{\"id\":\"ep3\",\"object\":\"model\",\"created\":1785510613,\"owned_by\":\"vllm\",\"root\":\"/models/cpt_v7_eps1fix_servable\",\"parent\":null,\"max_model_len\":262144,\"permission\":[{\"id\":\"modelper"
+}

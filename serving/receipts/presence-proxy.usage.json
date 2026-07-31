@@ -1,0 +1,13 @@
+{
+  "actor": "taey",
+  "audit_trail_ref": "/home/mira/taey_tool_audit.jsonl:960",
+  "capability": "presence-proxy",
+  "event_id": "695ba40d05d14b1ca9f7811efcac3e16",
+  "invocation": "ps aux | grep -E 'uvicorn|dashboard|presence|8766|8767' | grep -v grep",
+  "invocation_count": 5,
+  "kind": "usage",
+  "rc": 0,
+  "timestamp": "2026-07-31T14:58:55Z",
+  "turn_id": "1bfd976427504b74ab4d073c4d26ff51",
+  "verify": "sed -n '960p' /home/mira/taey_tool_audit.jsonl | python3 -m json.tool  # must show event_id 695ba40d05d14b1ca9f7811efcac3e16"
+}
