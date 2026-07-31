@@ -119,3 +119,53 @@ Per the task, and none of it is satisfied by the design alone:
 
 The red-test is the load-bearing one. An automation that never demonstrably fails is
 indistinguishable from one that does nothing.
+
+---
+
+## Finding 3 — BOTH options are currently blocked, and the blocker is a credential
+
+Measured after the design above, while preparing to implement option A:
+
+```
+repo secrets                     : none available to this workflow
+default_workflow_permissions     : read
+```
+
+**Option A (bot opens a PR) does not work with the default token.** GitHub does not run workflows
+on events raised by `GITHUB_TOKEN` — documented behaviour, stated here as *documented*, not
+measured, because there is no bot PR on this repo to observe. The consequence is exact and fatal
+for this design: the rebuild PR would be created and would **never receive `public-clean`**, which
+is a required check. It would sit unmergeable forever — an automation that quietly converts a
+manual lap into a permanently open PR.
+
+Making option A work needs a **PAT with `repo` scope stored as a repository secret**, so the PR is
+raised by a real identity whose events do trigger workflows.
+
+**Option B (direct push) needs the protection relaxed**, which is the trade already argued against
+above.
+
+So the implementation is blocked on one of two things, and **both are operator decisions, not
+engineering ones**:
+
+| unblock | who | what it costs |
+|---|---|---|
+| add a PAT secret (e.g. `INDEX_REBUILD_TOKEN`) | Jesse / conductor | a credential exists that can push and open PRs; scope it minimally |
+| relax protection for the bot | conductor | the gate becomes bypassable by whatever holds the token |
+
+**Neither is infra's to take unilaterally.** A credential is a human-only blocker by definition,
+and weakening a required check is a posture decision by the person who set it — set today,
+specifically because the advisory version had already let a red merge through.
+
+### What is NOT blocked
+
+The guards, the trigger paths, the concurrency group and the termination argument are settled and
+recorded above; they do not change under either option. Only the *landing mechanism* differs. When
+the credential or the ruling arrives, the remaining work is the workflow file plus the red-test —
+and the red-test stays the bar: **an automation that never demonstrably fails is indistinguishable
+from one that does nothing.**
+
+### Interim state is safe, not broken
+
+Until then the interim ruling holds and works: merge-commit, strict up-to-date, rebuild-at-head.
+It is a treadmill, not a hazard — every index that lands is still correct, still gate-verified, and
+still ancestry-valid. The cost is a manual lap per index-carrying PR, paid by whoever opens one.
