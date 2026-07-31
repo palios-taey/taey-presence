@@ -1,0 +1,17 @@
+{
+  "artifact_commit_sha": "34823a643428b5a0c93086ecd2c9231b4b1eac28",
+  "artifact_manifest_sha256": "087e1c22e288b9e62190af73519f7d8544dbefb64fab36d45e7811f3d591ee90",
+  "compiled_at_commit": "82f8f116feb110f1e01650236db9938f862e2819",
+  "gates_manifest_ref": "serving/gates_manifest.json",
+  "index_entry_ref": "sections.presence.capabilities.presence-proxy",
+  "liveness": {
+    "expect": {
+      "lang": "jq",
+      "predicate": ".proxy == .upstream and (.proxy | length) > 0"
+    },
+    "probe_cmd": "jq -n --arg proxy \"$(curl -sf \"$TAEY_PROXY_URL/v1/models\" | jq -r '.data[0].id')\" --arg upstream \"$(curl -sf \"$TAEY_SERVE_URL/v1/models\" | jq -r '.data[0].id')\" '{proxy:$proxy,upstream:$upstream}'"
+  },
+  "receipt_version": 2,
+  "repo": "palios-taey/taey-presence",
+  "surface_id": "presence-proxy"
+}

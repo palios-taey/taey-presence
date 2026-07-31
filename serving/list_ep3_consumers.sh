@@ -13,7 +13,7 @@
 #   WEIGHTS-WATCHER    : does not send inference, but READS the served-weights root and gates on
 #                        it -> still needs pre-bounce notice (this class was missed entirely)
 #
-# Usage:  ./list_ep3_consumers.sh [host-substring]     e.g. ./list_ep3_consumers.sh 10.0.0.8
+# Usage:  TAEY_SERVE_HOSTS='host1 host2' ./list_ep3_consumers.sh [host-substring]
 # Exit 0 always — this informs a decision, it does not gate one.
 set -uo pipefail
 TARGET="${1:-}"
@@ -57,7 +57,14 @@ done
 [ "$found" -eq 0 ] && echo "  (none found in the scanned paths — see LIMITS, this is not proof of none)"
 
 HL "== live TCP consumers on the serving ports (catches what config grep cannot) =="
-for h in 10.0.0.8 10.0.0.197; do
+# Site config, same loader as promote_model.sh — see serving/fleet.env.example.
+_here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+for _cfg in "${TAEY_FLEET_ENV:-}" "$_here/fleet.env" "$_here/../fleet.env"; do
+  [ -n "$_cfg" ] && [ -f "$_cfg" ] && { set -a; . "$_cfg"; set +a; break; }
+done
+# Node hosts come from the environment so this runs on any fleet, not just the machine it was
+# written on. Same variables promote_model.sh uses; space separated for more than two.
+for h in ${TAEY_SERVE_HOSTS:-${TAEY_NODE1_HOST:-} ${TAEY_NODE2_HOST:-}}; do
   match "$h" || continue
   out=$(ss -tnp 2>/dev/null | grep ":8000" | grep "$h" | awk '{print $5, $6}' | sort -u)
   [ -n "$out" ] && printf '  %s:\n%s\n' "$h" "$(sed 's/^/    /' <<<"$out")" \

@@ -1,0 +1,93 @@
+name: knowledge-index
+
+# Enforces the index contract ON THE MERGE PATH.
+#
+# The gates existed and were runnable, but nothing in CI ran them against the COMMITTED
+# object — so a self-referential commit field, a hand-edited manifest, or an index that
+# no longer matched its sources could reach main unchallenged. A gate nobody runs at the
+# boundary is documentation, not enforcement.
+#
+# This deliberately does NOT pass --pre-commit. In CI the index is always committed, so
+# G0's ancestry check must actually run; if it ever skips here, that is the bug.
+
+on:
+  pull_request:
+    paths:
+      - 'serving/knowledge_index/**'
+      - 'serving/manifests/**'
+      - 'serving/receipts/**'
+      - 'serving/validate_presence.sh'
+      - '.github/workflows/knowledge-index.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'serving/knowledge_index/**'
+      - 'serving/manifests/**'
+      - 'serving/receipts/**'
+      - 'serving/validate_presence.sh'
+
+jobs:
+  index-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # G0 walks commit ancestry (merge-base --is-ancestor). A shallow clone has no
+          # ancestors to walk, so the check would pass vacuously — the exact fail-open
+          # shape these gates exist to kill.
+          fetch-depth: 0
+          # CHECK OUT THE BRANCH HEAD, NOT THE SYNTHETIC MERGE COMMIT.
+          #
+          # On pull_request, actions/checkout defaults to refs/pull/N/merge — a commit that
+          # exists nowhere in the branch's history. The index's commit fields are DERIVED
+          # from `git log` over the artifact paths, so under that synthetic history they
+          # resolve to different SHAs than the ones recorded at build time, and --check
+          # failed against an index that was in fact correct. Found by this workflow's own
+          # first run.
+          #
+          # The index attests the branch head, so the branch head is the object to verify.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Install jq (liveness predicates are validated as real jq)
+        run: |
+          jq --version || sudo apt-get update -qq && sudo apt-get install -y -qq jq
+          jq --version
+
+      - name: Recompile the index and compare against the committed object
+        run: |
+          cd serving/knowledge_index
+          python3 build_index.py --check
+
+      - name: Verify the tree is unchanged by the check
+        # --check must be READ-ONLY. It previously rebuilt manifests in place before
+        # comparing, which silently repaired the very hand-edit it exists to detect.
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "FAIL: --check modified the working tree; it must be read-only"
+            git status --porcelain
+            exit 1
+          fi
+          echo "ok   --check left the tree untouched"
+
+      - name: G0 ancestry + G1 schema + G2 pointer crawl
+        # No --pre-commit: the index is committed here, so ancestry MUST be verified.
+        # G3 is deliberately absent — it probes a live deployment that CI cannot reach,
+        # and a liveness gate that cannot run is not a liveness gate.
+        run: |
+          cd serving/knowledge_index
+          python3 gates.py --g1 --g2
+
+      - name: Assert the gates did not silently skip
+        run: |
+          cd serving/knowledge_index
+          out=$(python3 gates.py --g1 --g2)
+          echo "$out"
+          if echo "$out" | grep -q "PASS-WITH-SKIP"; then
+            echo "FAIL: a gate skipped in CI. In CI the index is committed, so nothing"
+            echo "      should be unverifiable — a skip here means the check is not running."
+            exit 1
+          fi
+
+      - name: Receipt checker red-fixture battery
+        run: |
+          python3 serving/knowledge_index/test_receipt_check.py

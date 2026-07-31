@@ -1,0 +1,17 @@
+{
+  "artifact_commit_sha": "34823a643428b5a0c93086ecd2c9231b4b1eac28",
+  "artifact_manifest_sha256": "8acbd68c973a601d4e9657554ce99ac5e6081807b85e27e0367bf3c3dda579d4",
+  "compiled_at_commit": "82f8f116feb110f1e01650236db9938f862e2819",
+  "gates_manifest_ref": "serving/gates_manifest.json",
+  "index_entry_ref": "sections.presence.capabilities.presence-serve",
+  "liveness": {
+    "expect": {
+      "lang": "jq",
+      "predicate": ".data[0].root | type == \"string\" and (. | length) > 0"
+    },
+    "probe_cmd": "curl -sf \"$TAEY_SERVE_URL/v1/models\""
+  },
+  "receipt_version": 2,
+  "repo": "palios-taey/taey-presence",
+  "surface_id": "presence-serve"
+}

@@ -1,0 +1,13 @@
+{
+  "actor": "taey",
+  "audit_trail_ref": "/home/mira/taey_tool_audit.jsonl:1033",
+  "capability": "presence-seat",
+  "event_id": "a48871cd90e04a1c8d3a40e483885fd8",
+  "invocation": "grep -n \"KEY_PREFIX\\|SESSION\\|CONVERSATION_ID\" /home/mira/taey-presence-production/serving/taey_seat.py | head -20",
+  "invocation_count": 5,
+  "kind": "usage",
+  "rc": 0,
+  "timestamp": "2026-07-31T15:10:12Z",
+  "turn_id": "566b46a32b0647f8ae496904d7d05f1c",
+  "verify": "sed -n '1033p' /home/mira/taey_tool_audit.jsonl | python3 -m json.tool  # must show event_id a48871cd90e04a1c8d3a40e483885fd8"
+}

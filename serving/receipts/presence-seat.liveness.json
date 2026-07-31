@@ -1,0 +1,17 @@
+{
+  "artifact_commit_sha": "34823a643428b5a0c93086ecd2c9231b4b1eac28",
+  "artifact_manifest_sha256": "d5a244e24e230ec2cd02b1b46af87bf3025ad1bc16d51a9b151752edb1e2609c",
+  "compiled_at_commit": "82f8f116feb110f1e01650236db9938f862e2819",
+  "gates_manifest_ref": "serving/gates_manifest.json",
+  "index_entry_ref": "sections.presence.capabilities.presence-seat",
+  "liveness": {
+    "expect": {
+      "lang": "jq",
+      "predicate": ".ok == true and .seat_count > 0 and .namespace_declared == true"
+    },
+    "probe_cmd": "python3 serving/seat_liveness.py"
+  },
+  "receipt_version": 2,
+  "repo": "palios-taey/taey-presence",
+  "surface_id": "presence-seat"
+}

@@ -1,0 +1,17 @@
+{
+  "artifact_commit_sha": "34823a643428b5a0c93086ecd2c9231b4b1eac28",
+  "artifact_manifest_sha256": "029ad71782aa594b6cdfb3c98330e94ee8dd1953f883cf99fdce5a5ab8b37198",
+  "compiled_at_commit": "82f8f116feb110f1e01650236db9938f862e2819",
+  "gates_manifest_ref": "serving/gates_manifest.json",
+  "index_entry_ref": "sections.presence.capabilities.presence-dashboard",
+  "liveness": {
+    "expect": {
+      "lang": "jq",
+      "predicate": ".body.rho | type == \"number\""
+    },
+    "probe_cmd": "curl -sf \"$TAEY_DASHBOARD_URL/api/self/overview\""
+  },
+  "receipt_version": 2,
+  "repo": "palios-taey/taey-presence",
+  "surface_id": "presence-dashboard"
+}

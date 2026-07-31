@@ -158,15 +158,43 @@ than a habit — a habit is what lapses at 2am.
 #   --served-name <id>   a node serving a CANDIDATE its peers lack -> stale callers get a clean 404
 #   --keep-served-name   a fleet-wide PROMOTION -> every caller of that id should move together
 
+# PUT ONE CHECKPOINT ON BOTH NODES, and prove they match. deploy_thor.sh above swaps ONE node;
+# this is what makes the pair identical. It syncs node-to-node (never relaying through your
+# workstation, which costs ~16x throughput), refuses unless a per-file sha256 manifest matches on
+# both sides, then promotes ONE NODE AT A TIME inside a maintenance window: the consumers pinned to
+# that node are STOPPED, the node is restarted and must serve the right root AND return a real
+# completion, and only then are the consumers restarted. Config comes from serving/fleet.env.
+./serving/promote_model.sh node1 <checkpoint-dir-name>
+
+# THE STANDING DRIFT GATE. Run it after any serving change, and on a schedule.
+./serving/promote_model.sh --check            # served-root agreement; fast, mutates nothing
+./serving/promote_model.sh --check-content    # also compares per-file manifests; reads every byte
+
 # PROMOTE AN ALREADY-SERVED RELEASE INTO MAIN TAEY. This waits for zero open turns
 # across Main and every registered supporting seat,
-# writes the endpoint drop-in, restarts the UI-facing proxy, verifies the exact model/root
-# through that proxy, runs one real inference, and emits a JSON release receipt. A failed
-# CONTROL gate restores the previous route automatically.
+# writes the endpoint drop-in, restarts the UI-facing proxy, then verifies through that proxy
+# that the alias resolves to exactly one model AND that its root matches the root the target
+# endpoint was serving before the route was written — the alias alone cannot prove the route
+# changed, since it is permanent by design and reads identical on either node. Runs one real
+# inference and emits a JSON release receipt. A failed CONTROL gate restores the previous route.
 ./serving/promote_main_model.sh \
   --endpoint http://<serving-host>:8000 \
   --model <new-id>
 ```
+
+**The three tools compose; none replaces another.** `deploy_thor.sh` installs the stack and swaps
+the artifact on ONE node. `promote_model.sh` makes BOTH nodes hold and serve the same checkpoint,
+and is the only step that verifies content rather than paths. `promote_main_model.sh` points the
+UI-facing proxy at an endpoint that is already serving correctly. A release runs them in that order;
+skipping the middle one is how two nodes end up answering to one alias over different weights.
+
+**Why the maintenance window is not optional.** The proxies have no admission control — there is no
+way to tell one "stop accepting turns" — so an instantaneous zero-open-turns poll proves nothing: a
+turn can be admitted immediately after it. `promote_model.sh` therefore STOPS the consumers pinned
+to a node before restarting it, and requires you to declare which units those are (the literal
+`none` is accepted, so the declaration is explicit rather than forgotten). Sequencing one node at a
+time bounds the blast radius; it does NOT preserve availability, because each proxy is pinned to a
+node and that node's route is down while it reloads.
 
 **Served id vs weights.** The served name is a stable alias chosen at launch, which is exactly why
 it is useless as evidence of what is loaded — it stays constant when the weights change. Read the
