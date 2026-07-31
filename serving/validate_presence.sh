@@ -192,6 +192,58 @@ if need TAEY_PROXY_URL; then
   cmd "tail -40 \"\$TAEY_TOOL_AUDIT\" | python3 -m json.tool 2>/dev/null | grep -A2 run_command"
 fi
 
+
+# ------------------------------------------- 6b. the turn shape the DASHBOARD sends
+echo
+echo "[6b] A TURN IN THE DASHBOARD'S OWN SHAPE (stream + empty tool list)"
+# THIS CHECK EXISTS BECAUSE ITS ABSENCE COST JESSE AN EVENING.
+#
+# On 2026-07-31 every dashboard chat turn returned an empty reply for about an hour. The
+# proxy answered 200, logged "Streamed 0 tokens", and died on a NameError inside the
+# streaming closure. Ten green checks in this very suite sat beside it the whole time.
+#
+# They were green because none of them took that path. Direct curl probes either OMIT
+# `tools` (so the proxy auto-adds them and takes the tool-resolve branch that initialised
+# the variable) or ask for a NON-STREAMING turn. The dashboard sends `"tools": []` —
+# PRESENT so no auto-add, EMPTY so falsy — the one combination nothing here reproduced.
+#
+# The lesson is not "add a streaming check". It is that a suite must send what the USER's
+# surface sends, or it verifies a path nobody travels. The payload below is copied from
+# dashboard/app.py's stream handler; if that payload changes, this must change with it.
+if need TAEY_PROXY_URL; then
+  _dash_payload='{"model":"ep3","messages":[{"role":"user","content":"Reply with the single word: ok"}],"stream":true,"tools":[],"max_tokens":32}'
+  cmd "curl -sN -X POST \"\$TAEY_PROXY_URL/v1/chat/completions\" -H 'X-Taey-Seat-Id: taey' -d '<dashboard payload>'"
+  _sse=$(curl -sN --max-time 120 -X POST "$TAEY_PROXY_URL/v1/chat/completions" \
+           -H 'Content-Type: application/json' -H 'X-Taey-Seat-Id: taey' \
+           -d "$_dash_payload" 2>/dev/null)
+  # Count CONTENT, not chunks: a stream of empty deltas is exactly the failure mode.
+  _chars=$(printf '%s' "$_sse" | python3 -c "
+import sys, json
+n = 0
+for line in sys.stdin:
+    line = line.strip()
+    if not line.startswith('data: '):
+        continue
+    raw = line[6:].strip()
+    if raw == '[DONE]':
+        continue
+    try:
+        d = json.loads(raw)
+    except Exception:
+        continue
+    for ch in d.get('choices') or []:
+        delta = ch.get('delta') or {}
+        n += len(delta.get('content') or '') + len(delta.get('reasoning') or '')
+print(n)
+" 2>/dev/null || echo 0)
+  if [ "${_chars:-0}" -gt 0 ]; then
+    ok "dashboard-shaped turn produced $_chars char(s) of content"
+  else
+    bad "dashboard-shaped turn produced NO CONTENT - the empty-reply failure; check the proxy journal for a traceback in the streaming path"
+    printf '%s' "$_sse" | head -c 200 | sed 's/^/         /'
+  fi
+fi
+
 # ------------------------------------------------- 7. restart (opt-in, announced)
 echo
 echo "[7] SERVICE RESTARTS CLEAN FROM THE COMMITTED ARTIFACT"
