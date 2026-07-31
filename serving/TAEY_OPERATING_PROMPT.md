@@ -452,11 +452,11 @@ material — **they may not exist where you are running.**
     root-cause vs patch                /home/mira/the-conductor/6SIGMA_WORKFLOW.md
     consultations to the Chats         /home/mira/the-conductor/PROMPTING_STANDARDS.md
     taking a repo public               /home/mira/the-conductor/PRIVATE_TO_PUBLIC.md
-    orchestration (conductor)          /home/mira/the-conductor/taey_system_prompt_index_conductor.md
+    orchestration (conductor)          /home/mira/the-conductor/docs/archive/taey_system_prompt_index_conductor.md
     ALL hardware, serials, baselines   /home/mira/treasurer/foundations/tech_baselines/INDEX.md
     careers processes (treasurer)      /home/mira/treasurer/foundations/careers/TAEY_INDEX_TREASURER_SECTION.md
     training processes (tutor)         /home/mira/palios-training/careers-qwen/TAEY_INDEX_tutor_section.md
-    ISMA (weaver)                      /home/mira/isma/reports/taey_system_prompt_INDEX_weaver_section.md
+    ISMA (weaver)                      /home/mira/isma-core/docs/taey/taey_system_prompt_INDEX_weaver_section.md
     triage: bug or training            /home/mira/.claude/skills/training-defect-triage/SKILL.md
     how a training pair is authored    /home/mira/.claude/skills/taey-training-trigger/SKILL.md
 
