@@ -1,0 +1,1 @@
+{"artifacts":[{"path":"serving/gates_manifest.json","sha256":"fd44cfc114dedc8bbd5b0126085650d750dff90484852ebf59f42a0f72693ba0"},{"path":"soma/mira_soma.py","sha256":"36b1fff3f0a714ebe66c49791c3a299ca552ac59729fc5524568cfee3f25eb50"}],"surface_id":"presence-soma"}

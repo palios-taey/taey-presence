@@ -1,0 +1,1 @@
+{"artifacts":[{"path":"presence/prediction_worker.py","sha256":"dc171a7271abfb7e43f1abe6290671e744f787f61788b89b8d41b32e3245379c"},{"path":"serving/gates_manifest.json","sha256":"fd44cfc114dedc8bbd5b0126085650d750dff90484852ebf59f42a0f72693ba0"}],"surface_id":"presence-prediction"}
