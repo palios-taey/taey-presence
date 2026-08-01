@@ -605,6 +605,24 @@ def candidate_strings(capability: dict[str, Any]) -> set[str]:
 def resolve_target(target: str) -> str:
     index, _ = load_adopted_index()
     needle = normalize_lookup_value(target)
+
+    # A CAPABILITY ASKED FOR BY ITS OWN CANONICAL ID RESOLVES TO ITSELF, BEFORE ANY
+    # SUBSTRING MATCHING IS ATTEMPTED.
+    #
+    # Without this, an id that appears inside ANOTHER entry collides and the lookup is
+    # refused as ambiguous. That is not hypothetical: `presence-proxy` lists
+    # `presence-serve` in bootstrap.requires, so asking for `presence-serve` matched both
+    # entries and refused — a production capability, present in sections_present, with
+    # every one of its references resolving, unreachable by its own name. Measured
+    # 2026-07-31: 2 of 4 production capabilities were unresolvable this way.
+    #
+    # A dependency edge is exactly the kind of honest cross-reference the index is supposed
+    # to carry, so the matcher has to stop treating a mention as a candidacy.
+    for _, cap in production_entries(index):
+        cap_id = str(cap.get("id"))
+        if normalize_lookup_value(cap_id) == needle:
+            return cap_id
+
     matches = []
     for _, cap in production_entries(index):
         if needle in candidate_strings(cap):
