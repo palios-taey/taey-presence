@@ -159,48 +159,15 @@ class CouncilEventStore(executive.EventStore):
         super().__init__(path, max_turns)
 
     def messages_for(self, prompt: str) -> list[dict[str, str]]:
-        history: list[dict[str, str]] = []
-        recorded_prompt = False
-        seen_ingress: set[str] = set()
-        for event in self._read_events():
-            event_type = event.get("event_type")
-            if event_type == "council_ingress":
-                event_id = str(event.get("event_id") or "")
-                if event_id and event_id in seen_ingress:
-                    continue
-                if event_id:
-                    seen_ingress.add(event_id)
-                context_role = event.get("context_role")
-                context_content = event.get("context_content")
-                if (
-                    event.get("context_visible") is not False
-                    and context_role in {"user", "assistant"}
-                    and isinstance(context_content, str)
-                    and context_content
-                ):
-                    history.append(
-                        {"role": context_role, "content": context_content}
-                    )
-                    if context_role == "user" and context_content == prompt:
-                        recorded_prompt = True
-                continue
-            if (
-                event_type == "turn_outcome"
-                and event.get("ok")
-                and event.get("context_visible") is not False
-            ):
-                prior_reply = event.get("reply")
-                if isinstance(prior_reply, str) and prior_reply:
-                    history.append({"role": "assistant", "content": prior_reply})
-        if not recorded_prompt:
-            history.append({"role": "user", "content": prompt})
-        messages = history[-(self.max_turns * 2):]
         contract = (
             "[COUNCIL ROLE CONTRACT]\n"
             f"{self.seat_contract}\n"
             "[/COUNCIL ROLE CONTRACT]"
         )
-        return [{"role": "system", "content": contract}, *messages]
+        return [
+            {"role": "system", "content": contract},
+            {"role": "user", "content": prompt},
+        ]
 
     def evidence_registry(
         self,
@@ -208,20 +175,6 @@ class CouncilEventStore(executive.EventStore):
         event_id: str,
     ) -> list[str]:
         references = [f"role_contract:{self.prompt_contract_sha256}"]
-        history_references: list[str] = []
-        for event in self._read_events():
-            if (
-                event.get("event_type") == "turn_outcome"
-                and event.get("ok")
-                and event.get("context_visible") is not False
-            ):
-                prior_event_id = str(event.get("event_id") or "")
-                if prior_event_id:
-                    history_references.append(
-                        "history_event:"
-                        f"{executive._safe_trace_id(prior_event_id, event_id)}"
-                    )
-        references.extend(history_references[-self.max_turns :])
         if claims:
             references.extend(
                 "fleet_message:"
