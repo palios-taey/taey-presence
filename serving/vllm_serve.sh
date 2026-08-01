@@ -32,6 +32,15 @@ CACHE_DIR="${TAEY_CACHE_DIR:-$HOME/.cache}"
 LORA_PATH="${TAEY_LORA_PATH:-}"
 VLLM_PORT="${VLLM_PORT:-8000}"
 GPU_UTIL="${VLLM_GPU_UTIL:-0.85}"
+# Concurrency. These were HARDCODED to 8/8/8192 while taey-ep3.service set
+# VLLM_MAX_NUM_SEQS=128 / VLLM_MAX_CUDAGRAPH=128 / VLLM_MAX_BATCHED_TOKENS=32768 — the unit
+# configured the serve and the script ignored it, so the engine ran at 1/16th the intended
+# concurrency. max-num-seqs 8 is exactly seven council seats plus main Taey, i.e. saturated by
+# construction: one request got the whole engine and seven had to split it. Defaults below
+# preserve the old behaviour for anyone with no env set; the unit supplies the real values.
+MAX_NUM_SEQS="${VLLM_MAX_NUM_SEQS:-8}"
+MAX_CUDAGRAPH="${VLLM_MAX_CUDAGRAPH:-8}"
+MAX_BATCHED_TOKENS="${VLLM_MAX_BATCHED_TOKENS:-8192}"
 # Served model id clients address (default: the model dir basename). Set explicitly so
 # a redeploy on another Thor keeps the SAME id (e.g. Qwen3.6-27B-FP8) — a default basename
 # would silently change the id (lowercased dir name) and break every consumer + the eval harness.
@@ -147,9 +156,9 @@ exec docker run \
     --gpu-memory-utilization "${GPU_UTIL}" \
     --enable-prefix-caching \
     --kv-cache-dtype fp8 \
-    --max-num-seqs 8 \
-    --max-cudagraph-capture-size 8 \
-    --max-num-batched-tokens 8192 \
+    --max-num-seqs ${VLLM_MAX_NUM_SEQS:-8} \
+    --max-cudagraph-capture-size ${VLLM_MAX_CUDAGRAPH:-8} \
+    --max-num-batched-tokens ${VLLM_MAX_BATCHED_TOKENS:-8192} \
     --reasoning-parser qwen3 \
     --enable-auto-tool-choice \
     --tool-call-parser qwen3_xml \
