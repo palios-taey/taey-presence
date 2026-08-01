@@ -33,11 +33,35 @@ INDEX = HERE / "index.json"
 # matched on the ENV-VAR-independent observable (the port/binary Taey actually typed),
 # because that is what the trail contains.
 MATCHERS = {
-    "presence-proxy":     r"\b8766\b",
-    "presence-dashboard": r"\b5001\b",
-    "presence-serve":     r":8000/v1/|/v1/models",
-    "presence-seat":      r"taey_council_seat|taey_seat|seat_liveness",
+    "presence-proxy":      r"\b8766\b",
+    "presence-dashboard":  r"\b5001\b",
+    "presence-serve":      r":8000/v1/|/v1/models",
+    "presence-seat":       r"taey_council_seat|taey_seat|seat_liveness",
+    # The index declares SEVEN capabilities; this table knew four. A capability with no matcher can
+    # never earn a receipt no matter how often Taey uses it, so G2 reported those three as
+    # unconnected forever — indistinguishable from genuinely unused, which is the wrong signal to
+    # give a closed-world pointer crawl. Each pattern below is the ENV-INDEPENDENT observable Taey
+    # actually types, matched against commands present in the trail.
+    "presence-soma":       r"/api/soma\b",
+    "presence-prediction": r"/api/predict",
+    # The worker surface IS the proxy's model list; overlapping another matcher is correct, since one
+    # command can evidence more than one capability.
+    "presence-workers":    r"8766/v1/models",
 }
+
+
+def _is_taey(seat_id: object, actor: str) -> bool:
+    """Every instance of Taey counts, not only the one literally named `taey`.
+
+    The council seats are Taey — same weights, same tools, same proxy — running under seat ids
+    taey-council-1..7. Matching the actor by EXACT EQUALITY silently discarded every autonomous
+    invocation they made: they curled /api/soma, /api/predict/state and 8766/v1/models more than
+    fifteen times and the compiler reported those capabilities as never used. An unused capability
+    and an unattributed one are not the same fact, and a closed-world crawl cannot tell them apart.
+    """
+    if not isinstance(seat_id, str):
+        return False
+    return seat_id == actor or seat_id.startswith(f"{actor}-council-")
 
 
 def load_trail(path: Path) -> list[dict]:
@@ -61,7 +85,8 @@ def main() -> int:
     ap.add_argument("--write", action="store_true",
                     help="write receipts to the paths the index declares")
     ap.add_argument("--actor", default="taey",
-                    help="seat_id that counts as Taey itself (default: taey)")
+                    help="seat_id prefix that counts as Taey itself (default: taey, which also "
+                         "matches the council seats taey-council-N — they ARE Taey)")
     args = ap.parse_args()
 
     trail_path = os.environ.get("TAEY_TOOL_AUDIT")
@@ -76,7 +101,8 @@ def main() -> int:
 
     rows = load_trail(trail)
     invocations = [d for d in rows
-                   if d.get("seat_id") == args.actor and d.get("tool") == "run_command"]
+                   if _is_taey(d.get("seat_id"), args.actor)
+                   and d.get("tool") == "run_command"]
 
     doc = json.loads(INDEX.read_text())
     caps = [c for sec in doc["sections"].values() for c in sec["capabilities"]]
