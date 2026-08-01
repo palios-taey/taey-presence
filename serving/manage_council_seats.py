@@ -8,6 +8,7 @@ import os
 import shutil
 import stat
 import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,6 +18,7 @@ import redis
 
 
 SERVING_ROOT = Path(__file__).resolve().parent
+REPO_ROOT = SERVING_ROOT.parent
 DEFAULT_MANIFEST = SERVING_ROOT / "council_seats.json"
 RUN_ROOT = SERVING_ROOT / "run"
 SYSTEMD_UNIT_PREFIX = "taey-council-seat@"
@@ -196,6 +198,70 @@ def _systemctl_binary() -> str:
     return systemctl_binary
 
 
+def _systemctl_show_properties(
+    systemctl_binary: str,
+    unit: str,
+    properties: tuple[str, ...],
+) -> dict[str, str]:
+    result = subprocess.run(
+        [
+            systemctl_binary,
+            "--user",
+            "show",
+            unit,
+            *(f"--property={name}" for name in properties),
+            "--no-page",
+        ],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip() or f"exit {result.returncode}"
+        raise CouncilConfigError(f"could not inspect {unit}: {detail}")
+    return dict(
+        line.split("=", 1)
+        for line in result.stdout.splitlines()
+        if "=" in line
+    )
+
+
+def _preflight_systemd_unit(systemctl_binary: str, seat: SeatConfig) -> None:
+    unit = _systemd_unit(seat)
+    properties = _systemctl_show_properties(
+        systemctl_binary,
+        unit,
+        ("LoadState", "WorkingDirectory", "EnvironmentFiles"),
+    )
+    load_state = properties.get("LoadState", "unknown")
+    if load_state != "loaded":
+        raise CouncilConfigError(
+            f"{unit} is not installed (LoadState={load_state}); install "
+            f"serving/systemd/taey-council-seat@.service with @TAEY_ROOT@={REPO_ROOT}"
+        )
+    working_directory = properties.get("WorkingDirectory", "")
+    if not working_directory:
+        raise CouncilConfigError(
+            f"{unit} does not report WorkingDirectory; reinstall the unit for "
+            f"this checkout ({REPO_ROOT})"
+        )
+    if Path(working_directory).expanduser().resolve() != REPO_ROOT:
+        raise CouncilConfigError(
+            f"{unit} is installed for WorkingDirectory={working_directory}, "
+            f"but this launcher is running from {REPO_ROOT}; launch from the "
+            "installed checkout or reinstall the unit for this checkout"
+        )
+    expected_env = str(_seat_env_file(seat).resolve())
+    environment_files = properties.get("EnvironmentFiles", "")
+    if expected_env not in environment_files:
+        raise CouncilConfigError(
+            f"{unit} EnvironmentFiles={environment_files or '<unset>'} does not "
+            f"consume generated environment file {expected_env}; reinstall the "
+            "unit after substituting @TAEY_ROOT@ for this checkout"
+        )
+
+
 def _tmux_session_exists(tmux_binary: str | None, seat_id: str) -> bool:
     if not tmux_binary:
         return False
@@ -323,6 +389,8 @@ def launch(seats: list[SeatConfig]) -> None:
             "refusing a partial or configuration-blind launch because canonical "
             f"sessions already exist: {', '.join(existing)}"
         )
+    for seat in seats:
+        _preflight_systemd_unit(systemctl_binary, seat)
     client = _redis_client()
     prefix = os.environ.get("NOTIFY_KEY_PREFIX", "taey")
     active = {
@@ -371,7 +439,7 @@ def launch(seats: list[SeatConfig]) -> None:
     print(json.dumps({"started": started}, separators=(",", ":")))
 
 
-def _unit_state(systemctl_binary: str, seat: SeatConfig) -> dict[str, str]:
+def _unit_state(systemctl_binary: str, seat: SeatConfig) -> dict[str, Any]:
     result = subprocess.run(
         [
             systemctl_binary,
@@ -391,6 +459,8 @@ def _unit_state(systemctl_binary: str, seat: SeatConfig) -> dict[str, str]:
     )
     if result.returncode != 0:
         return {
+            "transport": "systemd",
+            "answered": False,
             "unit": _systemd_unit(seat),
             "active": "unknown",
             "sub": "unknown",
@@ -403,6 +473,8 @@ def _unit_state(systemctl_binary: str, seat: SeatConfig) -> dict[str, str]:
         if "=" in line
     )
     return {
+        "transport": "systemd",
+        "answered": True,
         "unit": _systemd_unit(seat),
         "active": parsed.get("ActiveState", "unknown"),
         "sub": parsed.get("SubState", "unknown"),
@@ -411,8 +483,18 @@ def _unit_state(systemctl_binary: str, seat: SeatConfig) -> dict[str, str]:
     }
 
 
+def _tmux_state(tmux_binary: str | None, seat: SeatConfig) -> dict[str, Any]:
+    return {
+        "transport": "tmux",
+        "answered": bool(tmux_binary),
+        "session": seat.seat_id,
+        "exists": _tmux_session_exists(tmux_binary, seat.seat_id),
+    }
+
+
 def status(seats: list[SeatConfig]) -> list[dict[str, Any]]:
     systemctl_binary = _systemctl_binary()
+    tmux_binary = shutil.which("tmux")
     client = _redis_client()
     prefix = os.environ.get("NOTIFY_KEY_PREFIX", "taey")
     sessions_root = _sessions_root()
@@ -424,11 +506,18 @@ def status(seats: list[SeatConfig]) -> list[dict[str, Any]]:
             registration = json.loads(raw_registration) if raw_registration else None
         except json.JSONDecodeError:
             registration = {"invalid": raw_registration}
+        systemd_state = _unit_state(systemctl_binary, seat)
+        tmux_state = _tmux_state(tmux_binary, seat)
         rows.append(
             {
                 "seat_id": seat.seat_id,
                 "role_id": seat.role_id,
-                "systemd": _unit_state(systemctl_binary, seat),
+                "transports": {
+                    "systemd": systemd_state,
+                    "tmux": tmux_state,
+                },
+                "systemd": systemd_state,
+                "tmux": tmux_state["exists"],
                 "idle": client.get(f"{seat_prefix}:idle") == "1",
                 "turns_open": int(client.get(f"{seat_prefix}:turns_open") or 0),
                 "inbox_depth": int(client.llen(f"{seat_prefix}:inbox")),
