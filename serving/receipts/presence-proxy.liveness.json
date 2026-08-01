@@ -1,7 +1,7 @@
 {
-  "artifact_commit_sha": "34823a643428b5a0c93086ecd2c9231b4b1eac28",
-  "artifact_manifest_sha256": "087e1c22e288b9e62190af73519f7d8544dbefb64fab36d45e7811f3d591ee90",
-  "compiled_at_commit": "82f8f116feb110f1e01650236db9938f862e2819",
+  "artifact_commit_sha": "78339dfd0d56643e853bb27bb3c057a0ea8a34d6",
+  "artifact_manifest_sha256": "9256c6074ecc07c14edadc0071d766b7a2f7dfe40ad890d820e25a56a03988dc",
+  "compiled_at_commit": "85c30577eb541201adddfdcd0e485a2db229fce1",
   "gates_manifest_ref": "serving/gates_manifest.json",
   "index_entry_ref": "sections.presence.capabilities.presence-proxy",
   "liveness": {
