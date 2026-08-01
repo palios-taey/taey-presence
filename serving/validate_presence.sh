@@ -61,6 +61,9 @@ presence-serve	jq	curl -sf "$TAEY_SERVE_URL/v1/models"	.data[0].root | type == "
 presence-proxy	jq	jq -n --arg proxy "$(curl -sf "$TAEY_PROXY_URL/v1/models" | jq -r '.data[0].id')" --arg upstream "$(curl -sf "$TAEY_SERVE_URL/v1/models" | jq -r '.data[0].id')" '{proxy:$proxy,upstream:$upstream}'	.proxy == .upstream and (.proxy | length) > 0
 presence-dashboard	jq	curl -sf "$TAEY_DASHBOARD_URL/api/self/overview"	.body.rho | type == "number"
 presence-seat	jq	python3 serving/seat_liveness.py	.ok == true and .seat_count > 0 and .namespace_declared == true
+presence-soma	jq	curl -sf "$TAEY_DASHBOARD_URL/api/soma"	.clarity | type == "number"
+presence-prediction	jq	curl -sf "$TAEY_DASHBOARD_URL/api/predict/state"	.state | type == "string" and (. | length) > 0
+presence-workers	jq	python3 serving/presence_liveness.py	.ok == true and .dcm_emitting == true and (.workers | to_entries | map(.value.running) | all)
 ORACLE
 
 run_oracle() {
