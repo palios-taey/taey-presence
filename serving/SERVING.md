@@ -270,6 +270,8 @@ For other model families, set the parsers your model expects.
 |-----|---------|---------|
 | `VLLM_BASE_URL` | `http://127.0.0.1:8000` | the raw vLLM endpoint to front |
 | `VLLM_REQUEST_TIMEOUT_SECS` | `1800` | upstream inference timeout; aligned with council-seat and wave deadlines |
+| `VLLM_HEALTH_PROBE_TIMEOUT_SECS` | `10` | hard timeout for `/health` upstream catalogue and generation probes |
+| `VLLM_HEALTH_CACHE_SECS` | `30` | generation-probe cache TTL so health polling does not queue behind live traffic |
 | `PROXY_PORT` | `8765` | port the proxy serves on |
 | `SYSTEM_PROMPT_PATH` | `serving/persona.example.md` | persona file injected as the system prefix |
 | `PERMANENT_KERNEL_PATH` | *(empty)* | optional file prepended ahead of the persona |

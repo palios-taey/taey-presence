@@ -42,6 +42,14 @@ VLLM_REQUEST_TIMEOUT_SECS = max(
     1.0,
     float(os.environ.get("VLLM_REQUEST_TIMEOUT_SECS", "1800")),
 )
+VLLM_HEALTH_PROBE_TIMEOUT_SECS = max(
+    0.1,
+    float(os.environ.get("VLLM_HEALTH_PROBE_TIMEOUT_SECS", "10")),
+)
+VLLM_HEALTH_CACHE_SECS = max(
+    1.0,
+    float(os.environ.get("VLLM_HEALTH_CACHE_SECS", "30")),
+)
 REDIS_HOST = os.environ.get("REDIS_HOST", "127.0.0.1")
 REDIS_PORT = int(os.environ.get("REDIS_PORT", "6379"))
 MIRA_REDIS_HOST = os.environ.get("MIRA_REDIS_HOST", "")
@@ -96,6 +104,11 @@ _liveness_reaper_task: Optional[asyncio.Task] = None
 _last_liveness_error: str = ""
 _last_liveness_error_at: float = 0.0
 _last_liveness_success_at: float = 0.0
+_health_generation_cache: dict[str, object] = {
+    "expires_at": 0.0,
+    "result": None,
+}
+_health_generation_lock: Optional[asyncio.Lock] = None
 
 
 @dataclass(frozen=True)
@@ -1380,17 +1393,199 @@ async def tokenize(request: Request):
     return resp.json()
 
 
+def _health_probe_error(status: str, error: str, started: float) -> dict:
+    return {
+        "ok": False,
+        "status": status,
+        "error": error,
+        "timeout_secs": VLLM_HEALTH_PROBE_TIMEOUT_SECS,
+        "latency_ms": round((time.monotonic() - started) * 1000, 1),
+        "checked_at": round(time.time(), 3),
+    }
+
+
+async def _probe_vllm_catalogue() -> dict:
+    started = time.monotonic()
+    if _http is None:
+        return _health_probe_error("unreachable", "HTTP client is not initialized", started)
+    try:
+        resp = await asyncio.wait_for(
+            _http.get("/v1/models", timeout=VLLM_HEALTH_PROBE_TIMEOUT_SECS),
+            timeout=VLLM_HEALTH_PROBE_TIMEOUT_SECS,
+        )
+    except asyncio.TimeoutError:
+        return _health_probe_error("unreachable", "catalogue probe timed out", started)
+    except httpx.TimeoutException as exc:
+        return _health_probe_error("unreachable", f"{type(exc).__name__}: {exc}", started)
+    except httpx.RequestError as exc:
+        return _health_probe_error("unreachable", f"{type(exc).__name__}: {exc}", started)
+    except Exception as exc:
+        return _health_probe_error("unhealthy", f"{type(exc).__name__}: {exc}", started)
+
+    latency_ms = round((time.monotonic() - started) * 1000, 1)
+    if resp.status_code != 200:
+        return {
+            "ok": False,
+            "status": "unhealthy",
+            "code": resp.status_code,
+            "timeout_secs": VLLM_HEALTH_PROBE_TIMEOUT_SECS,
+            "latency_ms": latency_ms,
+            "checked_at": round(time.time(), 3),
+        }
+    try:
+        payload = resp.json()
+    except Exception as exc:
+        return {
+            "ok": False,
+            "status": "unhealthy",
+            "error": f"invalid catalogue response: {type(exc).__name__}: {exc}",
+            "timeout_secs": VLLM_HEALTH_PROBE_TIMEOUT_SECS,
+            "latency_ms": latency_ms,
+            "checked_at": round(time.time(), 3),
+        }
+    models = payload.get("data", []) if isinstance(payload, dict) else []
+    first_model = models[0] if models and isinstance(models[0], dict) else {}
+    return {
+        "ok": True,
+        "status": "healthy",
+        "model": first_model.get("id", "none"),
+        "timeout_secs": VLLM_HEALTH_PROBE_TIMEOUT_SECS,
+        "latency_ms": latency_ms,
+        "checked_at": round(time.time(), 3),
+    }
+
+
+async def _probe_vllm_generation() -> dict:
+    started = time.monotonic()
+    if _http is None:
+        return _health_probe_error("unreachable", "HTTP client is not initialized", started)
+    body = {
+        "messages": [{"role": "user", "content": "health"}],
+        "temperature": 0,
+        "max_tokens": 1,
+        "stream": False,
+    }
+    try:
+        resp = await asyncio.wait_for(
+            _http.post(
+                "/v1/chat/completions",
+                json=body,
+                timeout=VLLM_HEALTH_PROBE_TIMEOUT_SECS,
+            ),
+            timeout=VLLM_HEALTH_PROBE_TIMEOUT_SECS,
+        )
+    except asyncio.TimeoutError:
+        return _health_probe_error("unhealthy", "generation probe timed out", started)
+    except httpx.TimeoutException as exc:
+        return _health_probe_error("unhealthy", f"{type(exc).__name__}: {exc}", started)
+    except httpx.RequestError as exc:
+        return _health_probe_error("unreachable", f"{type(exc).__name__}: {exc}", started)
+    except Exception as exc:
+        return _health_probe_error("unhealthy", f"{type(exc).__name__}: {exc}", started)
+
+    latency_ms = round((time.monotonic() - started) * 1000, 1)
+    if resp.status_code != 200:
+        return {
+            "ok": False,
+            "status": "unhealthy",
+            "code": resp.status_code,
+            "timeout_secs": VLLM_HEALTH_PROBE_TIMEOUT_SECS,
+            "latency_ms": latency_ms,
+            "checked_at": round(time.time(), 3),
+        }
+    try:
+        payload = resp.json()
+    except Exception as exc:
+        return {
+            "ok": False,
+            "status": "unhealthy",
+            "error": f"invalid generation response: {type(exc).__name__}: {exc}",
+            "timeout_secs": VLLM_HEALTH_PROBE_TIMEOUT_SECS,
+            "latency_ms": latency_ms,
+            "checked_at": round(time.time(), 3),
+        }
+    choices = payload.get("choices", []) if isinstance(payload, dict) else []
+    if not choices:
+        return {
+            "ok": False,
+            "status": "unhealthy",
+            "error": "generation response had no choices",
+            "timeout_secs": VLLM_HEALTH_PROBE_TIMEOUT_SECS,
+            "latency_ms": latency_ms,
+            "checked_at": round(time.time(), 3),
+        }
+    choice = choices[0] if isinstance(choices[0], dict) else {}
+    return {
+        "ok": True,
+        "status": "healthy",
+        "finish_reason": choice.get("finish_reason"),
+        "timeout_secs": VLLM_HEALTH_PROBE_TIMEOUT_SECS,
+        "latency_ms": latency_ms,
+        "checked_at": round(time.time(), 3),
+    }
+
+
+def _cached_generation_result(now: float) -> Optional[dict]:
+    cached = _health_generation_cache.get("result")
+    expires_at = float(_health_generation_cache.get("expires_at") or 0.0)
+    if not isinstance(cached, dict) or now >= expires_at:
+        return None
+    result = dict(cached)
+    result["cached"] = True
+    result["cache_expires_in_secs"] = round(expires_at - now, 3)
+    return result
+
+
+async def _vllm_generation_health() -> dict:
+    global _health_generation_cache, _health_generation_lock
+    now = time.monotonic()
+    cached = _cached_generation_result(now)
+    if cached is not None:
+        return cached
+    if _health_generation_lock is None:
+        _health_generation_lock = asyncio.Lock()
+    async with _health_generation_lock:
+        now = time.monotonic()
+        cached = _cached_generation_result(now)
+        if cached is not None:
+            return cached
+        result = await _probe_vllm_generation()
+        _health_generation_cache = {
+            "expires_at": time.monotonic() + VLLM_HEALTH_CACHE_SECS,
+            "result": dict(result),
+        }
+        response = dict(result)
+        response["cached"] = False
+        response["cache_expires_in_secs"] = round(VLLM_HEALTH_CACHE_SECS, 3)
+        return response
+
+
+async def _vllm_health() -> dict:
+    catalogue, generation = await asyncio.gather(
+        _probe_vllm_catalogue(),
+        _vllm_generation_health(),
+    )
+    catalogue_ok = bool(catalogue.get("ok"))
+    generation_ok = bool(generation.get("ok"))
+    if generation_ok and catalogue_ok:
+        status = "healthy"
+    elif generation_ok:
+        status = "degraded"
+    else:
+        status = str(generation.get("status") or "unhealthy")
+    return {
+        "status": status,
+        "model": catalogue.get("model", "none"),
+        "catalogue_ok": catalogue_ok,
+        "generation_ok": generation_ok,
+        "catalogue": catalogue,
+        "generation": generation,
+    }
+
+
 @app.get("/health")
 async def health():
-    try:
-        resp = await _http.get("/v1/models")
-        if resp.status_code == 200:
-            models = resp.json().get("data", [])
-            vllm_health = {"status": "healthy", "model": models[0]["id"] if models else "none"}
-        else:
-            vllm_health = {"status": "unhealthy", "code": resp.status_code}
-    except Exception as e:
-        vllm_health = {"status": "unreachable", "error": str(e)}
+    vllm_health = await _vllm_health()
 
     vprop_raw = None
     redis_error = ""
@@ -1425,20 +1620,27 @@ async def health():
             liveness["error"] = redis_error
 
     overall = "healthy"
-    if vllm_health.get("status") != "healthy":
+    if vllm_health.get("status") in {"unhealthy", "unreachable"}:
         overall = "unhealthy"
     elif TAEY_LIVENESS_REQUIRED and liveness.get("status") == "unavailable":
         overall = "unhealthy"
+    elif vllm_health.get("status") == "degraded":
+        overall = "degraded"
     elif liveness.get("status") in {"degraded", "unavailable"}:
         overall = "degraded"
 
-    return {
-        "status": overall,
-        "vllm": vllm_health,
-        "soma_connected": vprop_raw is not None,
-        "redis_error": redis_error or None,
-        "liveness": liveness,
-    }
+    headers = {"X-Health-Status": "degraded"} if overall == "degraded" else {}
+    return JSONResponse(
+        status_code=200 if overall in {"healthy", "degraded"} else 503,
+        headers=headers,
+        content={
+            "status": overall,
+            "vllm": vllm_health,
+            "soma_connected": vprop_raw is not None,
+            "redis_error": redis_error or None,
+            "liveness": liveness,
+        },
+    )
 
 
 @app.get("/v1/models")
