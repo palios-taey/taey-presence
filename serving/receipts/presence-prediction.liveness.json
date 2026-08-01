@@ -1,0 +1,17 @@
+{
+  "artifact_commit_sha": "34823a643428b5a0c93086ecd2c9231b4b1eac28",
+  "artifact_manifest_sha256": "d0a869aa13ce715b13a7f3688733d637813980ab89e225d98cfa840a9153c56e",
+  "compiled_at_commit": "85c30577eb541201adddfdcd0e485a2db229fce1",
+  "gates_manifest_ref": "serving/gates_manifest.json",
+  "index_entry_ref": "sections.presence.capabilities.presence-prediction",
+  "liveness": {
+    "expect": {
+      "lang": "jq",
+      "predicate": ".state | type == \"string\" and (. | length) > 0"
+    },
+    "probe_cmd": "curl -sf \"$TAEY_DASHBOARD_URL/api/predict/state\""
+  },
+  "receipt_version": 2,
+  "repo": "palios-taey/taey-presence",
+  "surface_id": "presence-prediction"
+}

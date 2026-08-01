@@ -191,6 +191,111 @@ production status, which is exactly a new artifact commit.
 }
 ```
 
+```json
+{
+  "id": "presence-soma",
+  "kind": "serve",
+  "repo": {
+    "name": "palios-taey/taey-presence",
+    "public_url": "https://github.com/palios-taey/taey-presence"
+  },
+  "entry_doc": "serving/DEPLOYMENT_TOPOLOGY.md",
+  "artifact_paths": [
+    "serving/gates_manifest.json",
+    "soma/mira_soma.py"
+  ],
+  "bootstrap": {
+    "cmd": "systemctl start taey-soma.service",
+    "requires": []
+  },
+  "endpoints": [
+    {
+      "name": "soma",
+      "env": "TAEY_DASHBOARD_URL",
+      "health": "/api/soma"
+    }
+  ],
+  "hardware_tier": "any",
+  "receipts": {
+    "liveness": "serving/receipts/presence-soma.liveness.json",
+    "usage": "serving/receipts/presence-soma.usage.json"
+  },
+  "status": "production"
+}
+```
+
+```json
+{
+  "id": "presence-prediction",
+  "kind": "serve",
+  "repo": {
+    "name": "palios-taey/taey-presence",
+    "public_url": "https://github.com/palios-taey/taey-presence"
+  },
+  "entry_doc": "serving/DEPLOYMENT_TOPOLOGY.md",
+  "artifact_paths": [
+    "presence/prediction_worker.py",
+    "serving/gates_manifest.json"
+  ],
+  "bootstrap": {
+    "cmd": "systemctl start taey-prediction-worker.service",
+    "requires": [
+      "presence-proxy"
+    ]
+  },
+  "endpoints": [
+    {
+      "name": "predict",
+      "env": "TAEY_DASHBOARD_URL",
+      "health": "/api/predict/state"
+    }
+  ],
+  "hardware_tier": "any",
+  "receipts": {
+    "liveness": "serving/receipts/presence-prediction.liveness.json",
+    "usage": "serving/receipts/presence-prediction.usage.json"
+  },
+  "status": "production"
+}
+```
+
+```json
+{
+  "id": "presence-workers",
+  "kind": "orchestrate",
+  "repo": {
+    "name": "palios-taey/taey-presence",
+    "public_url": "https://github.com/palios-taey/taey-presence"
+  },
+  "entry_doc": "serving/DEPLOYMENT_TOPOLOGY.md",
+  "artifact_paths": [
+    "presence-engine/engine.py",
+    "presence/dcm_presence.py",
+    "serving/gates_manifest.json",
+    "serving/presence_liveness.py"
+  ],
+  "bootstrap": {
+    "cmd": "systemctl start taey-dcm-presence.service",
+    "requires": [
+      "presence-proxy"
+    ]
+  },
+  "endpoints": [
+    {
+      "name": "proxy",
+      "env": "TAEY_PROXY_URL",
+      "health": "/v1/models"
+    }
+  ],
+  "hardware_tier": "any",
+  "receipts": {
+    "liveness": "serving/receipts/presence-workers.liveness.json",
+    "usage": "serving/receipts/presence-workers.usage.json"
+  },
+  "status": "production"
+}
+```
+
 ## PROCESSES
 
 PROCESS:  Find out which weights are actually answering as `ep3`
