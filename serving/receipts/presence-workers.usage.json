@@ -1,10 +1,10 @@
 {
   "actor": "taey-council-1",
   "audit_trail_ref": "/home/mira/taey_tool_audit.jsonl:2039",
-  "capability": "presence-serve",
+  "capability": "presence-workers",
   "event_id": "dcm-20260801T192327Z-b4918ddc110c:1:critique:taey-council-1",
   "invocation": "curl -s -m 10 http://127.0.0.1:8766/v1/models",
-  "invocation_count": 38,
+  "invocation_count": 19,
   "kind": "usage",
   "rc": 0,
   "timestamp": "2026-08-01T21:15:14Z",

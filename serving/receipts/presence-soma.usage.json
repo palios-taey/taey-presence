@@ -1,0 +1,13 @@
+{
+  "actor": "taey-council-1",
+  "audit_trail_ref": "/home/mira/taey_tool_audit.jsonl:2033",
+  "capability": "presence-soma",
+  "event_id": "dcm-20260801T192327Z-b4918ddc110c:1:critique:taey-council-1",
+  "invocation": "curl -s -m 10 http://127.0.0.1:5001/api/soma",
+  "invocation_count": 18,
+  "kind": "usage",
+  "rc": 0,
+  "timestamp": "2026-08-01T21:15:14Z",
+  "turn_id": "83486e6202d84d9f9c03a2a367e36e5c",
+  "verify": "sed -n '2033p' /home/mira/taey_tool_audit.jsonl | python3 -m json.tool  # must show event_id dcm-20260801T192327Z-b4918ddc110c:1:critique:taey-council-1"
+}

@@ -1,13 +1,13 @@
 {
-  "actor": "taey",
-  "audit_trail_ref": "/home/mira/taey_tool_audit.jsonl:960",
+  "actor": "taey-council-1",
+  "audit_trail_ref": "/home/mira/taey_tool_audit.jsonl:2039",
   "capability": "presence-proxy",
-  "event_id": "695ba40d05d14b1ca9f7811efcac3e16",
-  "invocation": "ps aux | grep -E 'uvicorn|dashboard|presence|8766|8767' | grep -v grep",
-  "invocation_count": 5,
+  "event_id": "dcm-20260801T192327Z-b4918ddc110c:1:critique:taey-council-1",
+  "invocation": "curl -s -m 10 http://127.0.0.1:8766/v1/models",
+  "invocation_count": 30,
   "kind": "usage",
   "rc": 0,
-  "timestamp": "2026-07-31T14:58:55Z",
-  "turn_id": "1bfd976427504b74ab4d073c4d26ff51",
-  "verify": "sed -n '960p' /home/mira/taey_tool_audit.jsonl | python3 -m json.tool  # must show event_id 695ba40d05d14b1ca9f7811efcac3e16"
+  "timestamp": "2026-08-01T21:15:14Z",
+  "turn_id": "83486e6202d84d9f9c03a2a367e36e5c",
+  "verify": "sed -n '2039p' /home/mira/taey_tool_audit.jsonl | python3 -m json.tool  # must show event_id dcm-20260801T192327Z-b4918ddc110c:1:critique:taey-council-1"
 }
