@@ -2211,8 +2211,12 @@ async def _chat_completions_for_turn(
     resolved_answer = ""
     resolved_thinking = ""
 
-    # Council seats are advisory unless a caller supplies an explicit bounded tool grant.
-    if "tools" not in body and not _COUNCIL_SEAT_RE.fullmatch(turn.seat_id):
+    # EVERY Taey instance gets the full tool surface, council seats included (Jesse, 2026-08-01).
+    # The council is what researches ISMA, files and repos; a seat that cannot look at anything can
+    # only opine. Seats were excluded in 2db83fe2 with no stated rationale, inside a commit about
+    # PROMPT isolation — the exclusion was never a decision anyone took, and it made the council
+    # structurally unable to do the job it exists for.
+    if "tools" not in body:
         body["tools"] = TOOLS
 
     t0 = time.time()
@@ -2409,6 +2413,31 @@ async def _chat_completions_for_turn(
             total_tokens = 0
             round_num = 0
 
+            # A schema-constrained grammar leaves NO tokens for tool-call syntax, so one request
+            # carrying both `response_format` and `tools` can neither call a tool nor answer:
+            # measured against ep3 as tool_calls=[], content=None, finish_reason="length" — it
+            # burns the whole budget producing nothing. Callers that need a structured result
+            # (the council seats do) therefore get the schema applied to the FINAL answer only,
+            # while the tool rounds run unconstrained. This is the same two-phase shape the loop
+            # below already uses for `tools`, applied to the other half of the conflict.
+            held_response_format = (
+                body.pop("response_format", None) if body.get("tools") else None
+            )
+
+            async def _final_answer():
+                final_body = dict(body)
+                final_body["messages"] = messages
+                final_body.pop("tools", None)
+                final_body["tool_choice"] = "none"
+                if held_response_format is not None:
+                    final_body["response_format"] = held_response_format
+                r = await _http.post(
+                    "/v1/chat/completions",
+                    json=final_body,
+                    headers=_upstream_headers(turn),
+                )
+                return r.json()
+
             while True:
                 resp = await _http.post(
                     "/v1/chat/completions",
@@ -2425,7 +2454,11 @@ async def _chat_completions_for_turn(
                 tool_calls = message.get("tool_calls", [])
 
                 if not tool_calls or finish_reason != "tool_calls":
-                    # No tool calls -- final response
+                    # No tool calls -- final response. If a schema was held aside for the tool
+                    # rounds, the answer the caller contracted for has not been produced yet.
+                    if held_response_format is not None:
+                        result = await _final_answer()
+                        total_tokens += result.get("usage", {}).get("completion_tokens", 0)
                     break
 
                 if round_num >= MAX_TOOL_ROUNDS:
@@ -2433,18 +2466,8 @@ async def _chat_completions_for_turn(
                         "Tool round cap hit (%d); forcing final text response",
                         MAX_TOOL_ROUNDS,
                     )
-                    final_body = dict(body)
-                    final_body["messages"] = messages
-                    final_body.pop("tools", None)
-                    final_body["tool_choice"] = "none"
-                    resp = await _http.post(
-                        "/v1/chat/completions",
-                        json=final_body,
-                        headers=_upstream_headers(turn),
-                    )
-                    result = resp.json()
-                    usage = result.get("usage", {})
-                    total_tokens += usage.get("completion_tokens", 0)
+                    result = await _final_answer()
+                    total_tokens += result.get("usage", {}).get("completion_tokens", 0)
                     break
 
                 # Execute tool calls
