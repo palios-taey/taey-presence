@@ -8,7 +8,6 @@ import os
 import shutil
 import stat
 import subprocess
-import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,7 +18,8 @@ import redis
 
 SERVING_ROOT = Path(__file__).resolve().parent
 DEFAULT_MANIFEST = SERVING_ROOT / "council_seats.json"
-SEAT_RUNTIME = SERVING_ROOT / "taey_council_seat.py"
+RUN_ROOT = SERVING_ROOT / "run"
+SYSTEMD_UNIT_PREFIX = "taey-council-seat@"
 CANONICAL_ROLES = {
     "taey-council-1": "context-memory",
     "taey-council-2": "evidence-reality",
@@ -177,7 +177,28 @@ def render(seats: list[SeatConfig]) -> list[dict[str, Any]]:
     ]
 
 
-def _tmux_session_exists(tmux_binary: str, seat_id: str) -> bool:
+def _seat_instance(seat: SeatConfig) -> str:
+    return seat.seat_id.removeprefix("taey-council-")
+
+
+def _systemd_unit(seat: SeatConfig) -> str:
+    return f"{SYSTEMD_UNIT_PREFIX}{_seat_instance(seat)}.service"
+
+
+def _seat_env_file(seat: SeatConfig) -> Path:
+    return RUN_ROOT / f"council-seat-{_seat_instance(seat)}.env"
+
+
+def _systemctl_binary() -> str:
+    systemctl_binary = shutil.which("systemctl")
+    if not systemctl_binary:
+        raise CouncilConfigError("systemctl is not installed or not on PATH")
+    return systemctl_binary
+
+
+def _tmux_session_exists(tmux_binary: str | None, seat_id: str) -> bool:
+    if not tmux_binary:
+        return False
     result = subprocess.run(
         [tmux_binary, "has-session", "-t", f"={seat_id}"],
         stdout=subprocess.DEVNULL,
@@ -185,6 +206,31 @@ def _tmux_session_exists(tmux_binary: str, seat_id: str) -> bool:
         check=False,
     )
     return result.returncode == 0
+
+
+def _systemd_env_value(value: str) -> str:
+    if "\n" in value or "\r" in value:
+        raise CouncilConfigError("systemd EnvironmentFile values must be single-line")
+    escaped = (
+        value.replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("$", "\\$")
+        .replace("`", "\\`")
+    )
+    return f'"{escaped}"'
+
+
+def _write_seat_environment_file(seat: SeatConfig, sessions_root: Path) -> Path:
+    RUN_ROOT.mkdir(mode=0o700, parents=True, exist_ok=True)
+    environment = _seat_environment(seat, sessions_root)
+    env_file = _seat_env_file(seat)
+    contents = "".join(
+        f"{name}={_systemd_env_value(value)}\n"
+        for name, value in sorted(environment.items())
+    )
+    env_file.write_text(contents, encoding="utf-8")
+    env_file.chmod(0o600)
+    return env_file
 
 
 def _prepare_sessions_root(path: Path) -> None:
@@ -211,17 +257,24 @@ def _redis_client() -> redis.Redis:
 
 def _wait_for_at_rest(
     client: redis.Redis,
-    tmux_binary: str,
+    systemctl_binary: str,
     seat: SeatConfig,
     previous_registration: str | None,
     timeout_seconds: float = 5.0,
 ) -> None:
     prefix = f"{os.environ.get('NOTIFY_KEY_PREFIX', 'taey')}:{seat.seat_id}"
+    unit = _systemd_unit(seat)
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
-        if not _tmux_session_exists(tmux_binary, seat.seat_id):
+        result = subprocess.run(
+            [systemctl_binary, "--user", "is-active", "--quiet", unit],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        if result.returncode != 0:
             raise CouncilConfigError(
-                f"{seat.seat_id} exited before publishing at-rest liveness"
+                f"{seat.seat_id} unit exited before publishing at-rest liveness"
             )
         raw_registration = client.get(f"{prefix}:seat_registration")
         if raw_registration and raw_registration != previous_registration:
@@ -258,9 +311,8 @@ def _wait_for_at_rest(
 
 
 def launch(seats: list[SeatConfig]) -> None:
+    systemctl_binary = _systemctl_binary()
     tmux_binary = shutil.which("tmux")
-    if not tmux_binary:
-        raise CouncilConfigError("tmux is not installed or not on PATH")
     existing = [
         seat.seat_id
         for seat in seats
@@ -294,40 +346,73 @@ def launch(seats: list[SeatConfig]) -> None:
     _prepare_sessions_root(sessions_root)
     started: list[str] = []
     for seat in seats:
-        environment = _seat_environment(seat, sessions_root)
+        env_file = _write_seat_environment_file(seat, sessions_root)
         command = [
-            tmux_binary,
-            "new-session",
-            "-d",
-            "-s",
-            seat.seat_id,
-            "-c",
-            str(SERVING_ROOT.parent),
+            systemctl_binary,
+            "--user",
+            "start",
+            _systemd_unit(seat),
         ]
-        for name, value in environment.items():
-            command.extend(["-e", f"{name}={value}"])
-        command.extend([sys.executable, str(SEAT_RUNTIME)])
         try:
             subprocess.run(command, check=True)
             started.append(seat.seat_id)
             _wait_for_at_rest(
                 client,
-                tmux_binary,
+                systemctl_binary,
                 seat,
                 previous_registrations[seat.seat_id],
             )
         except (subprocess.CalledProcessError, CouncilConfigError) as exc:
             raise CouncilConfigError(
-                f"launch failed for {seat.seat_id}; already-started sessions "
-                f"remain inspectable: {started}"
+                f"launch failed for {seat.seat_id} using {_systemd_unit(seat)} "
+                f"with environment {env_file}; already-started units remain "
+                f"inspectable: {started}"
             ) from exc
     print(json.dumps({"started": started}, separators=(",", ":")))
 
 
+def _unit_state(systemctl_binary: str, seat: SeatConfig) -> dict[str, str]:
+    result = subprocess.run(
+        [
+            systemctl_binary,
+            "--user",
+            "show",
+            _systemd_unit(seat),
+            "--property=ActiveState",
+            "--property=SubState",
+            "--property=MainPID",
+            "--property=ExecMainStatus",
+            "--no-page",
+        ],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    if result.returncode != 0:
+        return {
+            "unit": _systemd_unit(seat),
+            "active": "unknown",
+            "sub": "unknown",
+            "main_pid": "0",
+            "exec_main_status": "unknown",
+        }
+    parsed = dict(
+        line.split("=", 1)
+        for line in result.stdout.splitlines()
+        if "=" in line
+    )
+    return {
+        "unit": _systemd_unit(seat),
+        "active": parsed.get("ActiveState", "unknown"),
+        "sub": parsed.get("SubState", "unknown"),
+        "main_pid": parsed.get("MainPID", "0"),
+        "exec_main_status": parsed.get("ExecMainStatus", "unknown"),
+    }
+
+
 def status(seats: list[SeatConfig]) -> list[dict[str, Any]]:
-    tmux_binary = shutil.which("tmux")
-    if not tmux_binary:
-        raise CouncilConfigError("tmux is not installed or not on PATH")
+    systemctl_binary = _systemctl_binary()
     client = _redis_client()
     prefix = os.environ.get("NOTIFY_KEY_PREFIX", "taey")
     sessions_root = _sessions_root()
@@ -343,7 +428,7 @@ def status(seats: list[SeatConfig]) -> list[dict[str, Any]]:
             {
                 "seat_id": seat.seat_id,
                 "role_id": seat.role_id,
-                "tmux": _tmux_session_exists(tmux_binary, seat.seat_id),
+                "systemd": _unit_state(systemctl_binary, seat),
                 "idle": client.get(f"{seat_prefix}:idle") == "1",
                 "turns_open": int(client.get(f"{seat_prefix}:turns_open") or 0),
                 "inbox_depth": int(client.llen(f"{seat_prefix}:inbox")),
@@ -353,6 +438,7 @@ def status(seats: list[SeatConfig]) -> list[dict[str, Any]]:
                 ),
                 "registration": registration,
                 "event_log": str(sessions_root / f"{seat.seat_id}.jsonl"),
+                "environment_file": str(_seat_env_file(seat)),
             }
         )
     return rows
