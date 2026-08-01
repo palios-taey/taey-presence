@@ -21,7 +21,7 @@ dependencies = ["httpx>=0.27,<1.0", "redis>=5.0"]
 
 [project.optional-dependencies]
 dcm = ["neo4j>=5.0"]          # only if you use inter-instance coordination
-dev = ["ruff>=0.4", "pytest>=8"]
+dev = ["ruff>=0.4"]
 
 [project.urls]
 Homepage = "https://github.com/palios-taey/taey-presence-engine"
@@ -30,7 +30,7 @@ Issues = "https://github.com/palios-taey/taey-presence-engine/issues"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["interrupt*", "prediction*", "dcm*", "retrieval*"]
-exclude = ["tests*", "docs*", "static*"]
+exclude = ["docs*", "static*"]
 
 [tool.ruff]
 line-length = 100
