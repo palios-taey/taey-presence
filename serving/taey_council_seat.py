@@ -10,7 +10,7 @@ import sys
 import time
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import redis
 
@@ -31,6 +31,7 @@ ROLE_PROMPT_PATH = Path(ROLE_PROMPT_VALUE).expanduser()
 RESPONSE_CONTRACT = "taey-council-contribution/v1"
 ROLE_CONTRACT_REVISION = 1
 DEFAULT_PROMPT_REVISION = 1
+DEFAULT_IDLE_POLL_SECONDS = 0.25
 PROCESS_GENERATION = uuid.uuid4().hex
 CONTRIBUTION_FIELDS = (
     "schema_version",
@@ -421,8 +422,9 @@ def _run_turn(
     inbox: executive.ReliableInbox,
     store: CouncilEventStore,
     proxy: executive.ProxyClient,
+    claims: list[executive.ClaimedMessage] | None = None,
 ) -> str:
-    claims = inbox.claim_available()
+    claims = inbox.claim_available() if claims is None else list(claims)
     claims, skipped_claims = executive._split_actionable_claims(claims)
     skipped_reply = ""
     if skipped_claims:
@@ -527,6 +529,71 @@ def _run_turn(
     return reply
 
 
+def _idle_poll_seconds() -> float:
+    raw = os.environ.get(
+        "TAEY_COUNCIL_IDLE_POLL_SECONDS",
+        str(DEFAULT_IDLE_POLL_SECONDS),
+    )
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise executive.SeatFailure(
+            f"TAEY_COUNCIL_IDLE_POLL_SECONDS must be a number, got {raw!r}"
+        ) from exc
+    if value < 0:
+        raise executive.SeatFailure(
+            "TAEY_COUNCIL_IDLE_POLL_SECONDS must be non-negative"
+        )
+    return value
+
+
+def _claimed_pointer_text(claims: list[executive.ClaimedMessage]) -> str:
+    return f"[NOTIFY] You have {len(claims)} messages"
+
+
+def _serve_next_inbox_turn(
+    *,
+    inbox: executive.ReliableInbox,
+    store: CouncilEventStore,
+    proxy: executive.ProxyClient,
+) -> str | None:
+    claims = inbox.claim_available()
+    if not claims:
+        return None
+    return _run_turn(
+        _claimed_pointer_text(claims),
+        inbox=inbox,
+        store=store,
+        proxy=proxy,
+        claims=claims,
+    )
+
+
+def _serve_inbox_loop(
+    *,
+    inbox: executive.ReliableInbox,
+    store: CouncilEventStore,
+    proxy: executive.ProxyClient,
+    poll_seconds: float,
+    idle_sleep: Callable[[float], None] = time.sleep,
+    max_turns: int | None = None,
+) -> int:
+    completed_turns = 0
+    while True:
+        reply = _serve_next_inbox_turn(
+            inbox=inbox,
+            store=store,
+            proxy=proxy,
+        )
+        if reply is None:
+            idle_sleep(poll_seconds)
+            continue
+        print(reply, flush=True)
+        completed_turns += 1
+        if max_turns is not None and completed_turns >= max_turns:
+            return 0
+
+
 def _register_at_rest_liveness(
     client: redis.Redis,
     store: CouncilEventStore,
@@ -588,6 +655,7 @@ def main() -> int:
             conversation_visible=False,
         )
         active_turns = _register_at_rest_liveness(client, store)
+        poll_seconds = _idle_poll_seconds()
     except Exception as exc:
         print(
             f"[taey-council-seat] FATAL startup: "
@@ -604,29 +672,21 @@ def main() -> int:
         flush=True,
     )
     proxy = executive.ProxyClient()
-    for line in sys.stdin:
-        text = line.strip()
-        if not text:
-            continue
-        if text in {"/quit", "/exit"}:
-            return 0
-        try:
-            reply = _run_turn(
-                text,
-                inbox=inbox,
-                store=store,
-                proxy=proxy,
-            )
-        except Exception as exc:
-            print(
-                f"[taey-council-seat] FATAL turn: "
-                f"{type(exc).__name__}: {exc}",
-                file=sys.stderr,
-                flush=True,
-            )
-            return 1
-        print(reply, flush=True)
-    return 0
+    try:
+        return _serve_inbox_loop(
+            inbox=inbox,
+            store=store,
+            proxy=proxy,
+            poll_seconds=poll_seconds,
+        )
+    except Exception as exc:
+        print(
+            f"[taey-council-seat] FATAL turn: "
+            f"{type(exc).__name__}: {exc}",
+            file=sys.stderr,
+            flush=True,
+        )
+        return 1
 
 
 if __name__ == "__main__":
