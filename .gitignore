@@ -36,3 +36,11 @@ serving/fleet.env
 
 # Operator-local known-credential deny-list for check_public_clean.sh (never commit real values)
 serving/credential-denylist.txt
+
+# Retired path components are history-only, not current public surface.
+archive/
+archived/
+deprecated/
+superseded/
+obsolete/
+legacy/
