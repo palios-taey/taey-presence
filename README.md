@@ -80,10 +80,11 @@ FastAPI dashboard renders all of it.
   records. Leased Redis sorted sets represent concurrent open turns; the legacy
   `idle` key is a projection of that set rather than a single request's flag.
 - **Seven-seat council runtime definition** — `serving/council_seats.json`
-  binds the immutable tmux identities `taey-council-1..7` to seven explicit
+  binds the immutable runtime identities `taey-council-1..7` to seven explicit
   cognitive roles. `serving/manage_council_seats.py` validates and launches
-  those seats with separate inbox namespaces, conversation IDs, 0600 event
-  logs, and role prompts while sharing one configured proxy/model/tool path.
+  those seats under `taey-council-seat@N.service` with separate inbox namespaces,
+  conversation IDs, 0600 event logs, and role prompts while sharing one
+  configured proxy/model/tool path.
   The launcher does not make a deployment claim; production registration and
   concurrent-inference acceptance remain separate gates.
 - **Taey-native council transport** — `dashboard/native_council.py` opens one
@@ -282,6 +283,8 @@ serving/soma_proxy.py           OpenAI-compatible proxy: persona injection + som
 serving/taey_seat.py            Durable tmux fleet seat: claim/outcome/ack + event-log recovery.
 serving/taey_council_seat.py    Isolated private runtime for seven supporting council seats.
 serving/manage_council_seats.py Validate, render, launch, and inspect seven private council seats.
+serving/systemd/taey-council-seat@.service
+                                User unit template for supervised council seats.
 serving/council_seats.json      Canonical numeric seat IDs to semantic role IDs.
 serving/council_prompts/        Shared supporting-seat contract plus seven stable role prompts.
 serving/persona.example.md      Generic example persona (replace with your own).

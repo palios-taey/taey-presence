@@ -98,7 +98,7 @@ python3 serving/manage_council_seats.py render
 ```
 
 Then point every seat at the same attributable proxy/model used by Main Taey and
-launch:
+launch the user units:
 
 ```bash
 export TAEY_SEAT_PROXY=http://127.0.0.1:8766/v1/chat/completions
@@ -114,8 +114,10 @@ together; seat identities, prompts, inboxes, and histories do not need to be
 rebuilt or restarted for each release.
 
 `launch` refuses to proceed if any canonical council tmux session already exists;
-it never restarts or adopts an unknown process. By default, private seat logs live
-under `~/taey_sessions/council/`, one 0600 JSONL per seat. Override that root with
+it never restarts or adopts an unknown process. `launch` writes one generated
+environment file per seat under `serving/run/council-seat-N.env`, then starts
+`taey-council-seat@N.service`. By default, private seat logs live under
+`~/taey_sessions/council/`, one 0600 JSONL per seat. Override that root with
 `TAEY_COUNCIL_SESSIONS_DIR`. Each log reconstructs only that seat's mutable
 history. Supporting outcomes carry the seat, role, event, request, correlation,
 round, and prompt-revision lineage available in the inbound envelope and remain
