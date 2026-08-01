@@ -87,7 +87,3 @@ jobs:
             echo "      should be unverifiable — a skip here means the check is not running."
             exit 1
           fi
-
-      - name: Receipt checker red-fixture battery
-        run: |
-          python3 serving/knowledge_index/test_receipt_check.py

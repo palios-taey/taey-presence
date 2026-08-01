@@ -31,7 +31,7 @@ From `pyproject.toml`:
 - Python `>= 3.10`
 - runtime: `httpx>=0.27,<1.0`, `redis>=5.0` (uses `redis.asyncio`)
 - `[dcm]` extra (only if using inter-instance publishing): `neo4j>=5.0`
-- `[dev]`: `ruff>=0.4`, `pytest>=8`
+- `[dev]`: `ruff>=0.4`
 
 External services you must provide (all no-auth, on your own network):
 - an OpenAI-compatible chat-completions endpoint (vLLM, etc.)
