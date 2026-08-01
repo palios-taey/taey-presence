@@ -51,6 +51,31 @@ class FakeRedis:
 
 
 class ManageCouncilSeatsTests(unittest.TestCase):
+    def test_main_error_handler_reports_original_exception_without_nameerror(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            missing_manifest = Path(tmp) / "missing.json"
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(MODULE_PATH),
+                    "validate",
+                    "--manifest",
+                    str(missing_manifest),
+                ],
+                cwd=MODULE_PATH.parents[1],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+
+        self.assertEqual(1, result.returncode)
+        self.assertEqual("", result.stdout)
+        self.assertIn("[taey-council] FATAL: CouncilConfigError:", result.stderr)
+        self.assertIn(str(missing_manifest), result.stderr)
+        self.assertNotIn("NameError", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
     def test_launch_refuses_existing_canonical_tmux_session_before_systemd_start(self):
         seat = make_seat()
         with (
@@ -66,12 +91,59 @@ class ManageCouncilSeatsTests(unittest.TestCase):
         redis_client.assert_not_called()
         run.assert_not_called()
 
+    def test_launch_refuses_unit_bound_to_different_checkout_before_start(self):
+        seat = make_seat()
+        other_root = Path("/tmp/other-taey-presence").resolve()
+        show_output = (
+            "LoadState=loaded\n"
+            f"WorkingDirectory={other_root}\n"
+            f"EnvironmentFiles={other_root}/serving/run/council-seat-1.env "
+            "(ignore_errors=no)\n"
+        )
+        with (
+            patch.object(manager, "_systemctl_binary", return_value="systemctl"),
+            patch.object(manager.shutil, "which", return_value=None),
+            patch.object(manager, "_redis_client") as redis_client,
+            patch.object(
+                manager.subprocess,
+                "run",
+                return_value=subprocess.CompletedProcess(
+                    ["systemctl"],
+                    0,
+                    stdout=show_output,
+                    stderr="",
+                ),
+            ) as run,
+        ):
+            with self.assertRaisesRegex(
+                manager.CouncilConfigError,
+                "installed for WorkingDirectory",
+            ):
+                manager.launch([seat])
+
+        redis_client.assert_not_called()
+        run.assert_called_once()
+        self.assertEqual(
+            [
+                "systemctl",
+                "--user",
+                "show",
+                "taey-council-seat@1.service",
+                "--property=LoadState",
+                "--property=WorkingDirectory",
+                "--property=EnvironmentFiles",
+                "--no-page",
+            ],
+            run.call_args.args[0],
+        )
+
     def test_launch_refuses_authoritative_active_turns_before_systemd_start(self):
         seat = make_seat()
         with (
             patch.object(manager, "_systemctl_binary", return_value="systemctl"),
             patch.object(manager.shutil, "which", return_value=None),
             patch.object(manager, "_tmux_session_exists", return_value=False),
+            patch.object(manager, "_preflight_systemd_unit"),
             patch.object(manager, "_redis_client", return_value=FakeRedis(active_turns={seat.seat_id: 1})),
             patch.object(manager.subprocess, "run") as run,
         ):
@@ -87,6 +159,7 @@ class ManageCouncilSeatsTests(unittest.TestCase):
             patch.object(manager, "_systemctl_binary", return_value="systemctl"),
             patch.object(manager.shutil, "which", return_value=None),
             patch.object(manager, "_tmux_session_exists", return_value=False),
+            patch.object(manager, "_preflight_systemd_unit"),
             patch.object(
                 manager,
                 "_redis_client",
@@ -108,16 +181,40 @@ class ManageCouncilSeatsTests(unittest.TestCase):
         self.assertEqual(seat, wait_for_at_rest.call_args.args[2])
         self.assertEqual(previous_registration, wait_for_at_rest.call_args.args[3])
 
-    def test_status_reports_systemd_state_without_tmux_field(self):
+    def test_preflight_accepts_unit_bound_to_current_checkout(self):
+        seat = make_seat()
+        expected_env = manager._seat_env_file(seat).resolve()
+        show_output = (
+            "LoadState=loaded\n"
+            f"WorkingDirectory={manager.REPO_ROOT}\n"
+            f"EnvironmentFiles={expected_env} (ignore_errors=no)\n"
+        )
+        with patch.object(
+            manager.subprocess,
+            "run",
+            return_value=subprocess.CompletedProcess(
+                ["systemctl"],
+                0,
+                stdout=show_output,
+                stderr="",
+            ),
+        ):
+            manager._preflight_systemd_unit("systemctl", seat)
+
+    def test_status_reports_systemd_and_tmux_transport_state(self):
         seat = make_seat()
         with (
             patch.object(manager, "_systemctl_binary", return_value="systemctl"),
+            patch.object(manager.shutil, "which", return_value="tmux"),
+            patch.object(manager, "_tmux_session_exists", return_value=True),
             patch.object(manager, "_redis_client", return_value=FakeRedis()),
             patch.object(
                 manager,
                 "_unit_state",
                 return_value={
                     "unit": "taey-council-seat@1.service",
+                    "transport": "systemd",
+                    "answered": True,
                     "active": "active",
                     "sub": "running",
                     "main_pid": "123",
@@ -128,7 +225,11 @@ class ManageCouncilSeatsTests(unittest.TestCase):
             rows = manager.status([seat])
 
         self.assertEqual("taey-council-seat@1.service", rows[0]["systemd"]["unit"])
-        self.assertNotIn("tmux", rows[0])
+        self.assertTrue(rows[0]["tmux"])
+        self.assertEqual("systemd", rows[0]["transports"]["systemd"]["transport"])
+        self.assertEqual("tmux", rows[0]["transports"]["tmux"]["transport"])
+        self.assertTrue(rows[0]["transports"]["tmux"]["answered"])
+        self.assertTrue(rows[0]["transports"]["tmux"]["exists"])
         self.assertTrue(rows[0]["environment_file"].endswith("serving/run/council-seat-1.env"))
 
     def test_generated_environment_file_uses_numeric_instance_and_seat_identity(self):
