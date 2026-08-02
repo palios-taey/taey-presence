@@ -275,7 +275,7 @@ for pair in "node1:$NODE1_HOST:$NODE1_CONSUMERS" "node2:$NODE2_HOST:$NODE2_CONSU
   lbl="${pair%%:*}"; rest="${pair#*:}"; host="${rest%%:*}"; decl="${rest#*:}"
   [ "$decl" = "none" ] && decl=""
   missing="$(undeclared_for "$host" "$decl")"
-  [ -z "$missing" ] || die "$lbl: these ACTIVE units target $host but are not in TAEY_${lbl#node}_CONSUMERS: $missing
+  [ -z "$missing" ] || die "$lbl: these ACTIVE units target $host but are not in TAEY_NODE${lbl#node}_CONSUMERS: $missing
 Add them (they must be stopped for the maintenance window) or stop them first. Refusing to restart a node while an undeclared consumer can admit work."
 done
 log "consumer declarations cover every active unit targeting each node"
