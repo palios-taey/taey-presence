@@ -17,9 +17,9 @@ Environment=TAEY_SERVED_NAME=ep3
 Environment=TAEY_MAX_MODEL_LEN=262144
 Environment=VLLM_GPU_UTIL=0.92
 Environment=VLLM_PORT=8000
-Environment=VLLM_MAX_NUM_SEQS=128
-Environment=VLLM_MAX_CUDAGRAPH=128
-Environment=VLLM_MAX_BATCHED_TOKENS=32768
+Environment=VLLM_MAX_NUM_SEQS=8
+Environment=VLLM_MAX_CUDAGRAPH=8
+Environment=VLLM_MAX_BATCHED_TOKENS=8192
 ExecStartPre=-/usr/bin/docker stop taey-vllm
 ExecStartPre=-/usr/bin/docker rm taey-vllm
 ExecStartPre=@TAEY_ROOT@/bin/gpu-cleanup.sh 90 120
