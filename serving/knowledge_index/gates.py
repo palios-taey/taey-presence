@@ -34,8 +34,10 @@ INDEX = HERE / "index.json"
 
 # A private/operator-local reference is a disconnection: a downloaded Taey following it
 # finds nothing. Names are matched as path segments, not substrings.
+# palios-training is public train-how; it remains sections_pending until train-connect
+# lands receipt-backed production entries, but it is not a private disconnection.
 PRIVATE_REPO_SEGMENTS = {
-    "the-conductor", "treasurer", "palios-training", "apply-machine",
+    "the-conductor", "treasurer", "apply-machine",
     "infra-soul", "linkedin", "isma",
 }
 
