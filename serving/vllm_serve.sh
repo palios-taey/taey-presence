@@ -146,6 +146,7 @@ exec docker run \
   -e TORCHINDUCTOR_FX_GRAPH_CACHE=1 \
   -e TORCHINDUCTOR_AUTOGRAD_CACHE=1 \
   -e VLLM_CACHE_ROOT=/root/.cache/vllm \
+  -e VLLM_ALLOW_RUNTIME_LORA_UPDATING="${VLLM_ALLOW_RUNTIME_LORA_UPDATING:-0}" \
   ${QUANT_ENV_ARGS} \
   "${VLLM_IMAGE}" \
   vllm serve "/models/$(basename "${MODEL_PATH}")" \
