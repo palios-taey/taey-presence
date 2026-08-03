@@ -1,5 +1,9 @@
 # Production Infrastructure Map — Taey serving surface
 
+Status: dated Mira production receipt, not portable setup. Hostnames, IPs, unit names, and
+absolute paths below are observed values on Mira; use configuration examples and re-measurement
+commands for any other deployment.
+
 **Measured 2026-07-30 on Mira, with model-root refresh probes on 2026-08-03.**
 Every line here was read from a live system, not from config or memory. Where a value came from
 config it is labelled as such, because today proved config and reality disagree. Model roots are
