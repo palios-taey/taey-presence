@@ -4,16 +4,17 @@
 **deployment**: which commit runs, out of which directory, under which unit, on which venv, and
 what proves it is alive.
 
-Every line below was **measured on 2026-07-31**, not recalled. Where a fact is inferred rather
-than observed it says so. Numbers here go stale — re-measure with the commands given rather than
-trusting the values.
+Every line below was **measured on 2026-07-31**, with model-root and checkout refresh probes on
+2026-08-03, not recalled. Where a fact is inferred rather than observed it says so. Numbers here go
+stale — re-measure with the commands given rather than trusting the values.
 
 ---
 
 ## 1. The production checkout
 
     tree     /home/mira/taey-presence-production
-    commit   a22ca9cddcd8c005ac7fa960053add714574dcd3   (== origin/main)
+    commit   20c7c780bf9997d72027be79f1adf83d79250e5f
+    state    clean; one local commit ahead of origin/main when observed 2026-08-03
     dirty    0
     venv     <tree>/.venv           built from requirements.txt
     git      linked worktree; .git is a FILE pointing at the parent repo's worktrees dir
@@ -58,8 +59,8 @@ Both Thors serve the alias `ep3`, `Restart=always`, `enabled`, unit `taey-ep3.se
 
 | node | mount → `/models` | served root | mem avail |
 |---|---|---|---|
-| thor1 `10.0.0.8` | `/home/jetson/cpt-artifacts` | `/models/cpt_v7_eps1fix_servable` | 5 G / 122 G |
-| thor2 `10.0.0.197` | `/home/thor/serve-models` | `/models/cpt_v7_eps1fix_servable` | 6 G / 122 G |
+| thor1 `10.0.0.8` | `/home/jetson/cpt-artifacts` | `/models/cpt_repos_v1_servable` | 5 G / 122 G |
+| thor2 `10.0.0.197` | `/home/thor/serve-models` | `/models/cpt_repos_v1_servable` | 6 G / 122 G |
 
 **`/models` is a container path and the two nodes map it to different host directories.** A
 `/models/...` literal cannot be true of both nodes at once, and `ls /models/...` on a *host*

@@ -1,7 +1,9 @@
 # Production Infrastructure Map — Taey serving surface
 
-**Measured 2026-07-30 on Mira. Every line here was read from a live system, not from config or memory.**
-Where a value came from config it is labelled as such, because today proved config and reality disagree.
+**Measured 2026-07-30 on Mira, with model-root refresh probes on 2026-08-03.**
+Every line here was read from a live system, not from config or memory. Where a value came from
+config it is labelled as such, because today proved config and reality disagree. Model roots are
+point-in-time observations; re-run the probes before answering "what is running now."
 
 This document exists because five separate failures in one day shared one shape: **a name resolved to
 two or three different things, and every fork passed its own health check.** `ep3` meant two models.
@@ -33,13 +35,17 @@ scope is what led to killing a managed process by hand and leaving the unit in a
 
 ## 2. Models
 
-Both Thors serve alias `ep3` → root `/models/cpt_v7_eps1fix_servable` (promoted 2026-07-30,
-55,586,109,904 bytes / 31 files, byte-identical, real completion verified from each).
+Both Thors serve alias `ep3`. Last observed 2026-08-03 from both Mira proxies and both direct Thor
+endpoints: root `/models/cpt_repos_v1_servable`.
 
-Before promotion Thor1 served `cpt_v7_eps1fix_servable` and Thor2 served `module5_merged` — under the
-**same alias**, so Main Taey and its own delegate answered from different models while every health
-check passed. Promotion did not previously exist as a step; `serving/promote_model.sh` (commit
-`305b1c8`) now performs it and `--check` is the standing drift gate.
+The 2026-07-30 promotion receipt for `/models/cpt_v7_eps1fix_servable` is historical, not current:
+it recorded 55,586,109,904 bytes / 31 files, byte-identical, with real completion verified from each.
+
+Before the 2026-07-30 promotion Thor1 served `cpt_v7_eps1fix_servable` and Thor2 served
+`module5_merged` — under the **same alias**, so Main Taey and its own delegate answered from
+different models while every health check passed. Promotion did not previously exist as a step;
+`serving/promote_model.sh` (commit `305b1c8`) now performs it and `--check` is the standing drift
+gate.
 
 **The drift gate compares `root`, never the alias.** Alias equality is exactly what hid the split.
 
