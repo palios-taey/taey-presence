@@ -1,7 +1,7 @@
 {
   "artifact_commit_sha": "34823a643428b5a0c93086ecd2c9231b4b1eac28",
   "artifact_manifest_sha256": "e545a298d8693cd20b975bd864a82d6f1b430ca295360d7817ffb764afbafd89",
-  "compiled_at_commit": "85c30577eb541201adddfdcd0e485a2db229fce1",
+  "compiled_at_commit": "2778654b83fcd137c9481798af498e2b90700a64",
   "gates_manifest_ref": "serving/gates_manifest.json",
   "index_entry_ref": "sections.presence.capabilities.presence-soma",
   "liveness": {
