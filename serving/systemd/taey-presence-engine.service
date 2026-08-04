@@ -1,0 +1,16 @@
+[Unit]
+Description=Taey presence engine
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=@TAEY_ROOT@/presence-engine
+EnvironmentFile=-@TAEY_ROOT@/presence-engine/.env
+Environment=PYTHONPATH=@TAEY_ROOT@/presence-engine
+ExecStart=@TAEY_VENV@/bin/python @TAEY_ROOT@/presence-engine/engine.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
