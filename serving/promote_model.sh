@@ -122,6 +122,43 @@ generates() {  # <host> -> proof the weights load AND produce tokens
     | python3 -c 'import sys,json;print(json.load(sys.stdin)["choices"][0]["message"]["content"].strip())' 2>/dev/null || true
 }
 
+assert_dropin_convention() {  # <ssh> <host> -> the promoted node carries ONLY the convention drop-in
+  # WHY THIS EXISTS SEPARATELY FROM THE ROOT CHECK. served_root() already proves the promoted
+  # WEIGHTS are what the alias opened, so a sibling drop-in that clobbers TAEY_MODEL_PATH is
+  # already caught. What nothing caught is a sibling that sets something ELSE. Observed
+  # 2026-08-04: node2 carried zzzz-lora-eval.conf injecting TAEY_LORA_PATH, so every restart
+  # silently re-attached an eval adapter to the promoted model — correct root, real generation,
+  # green on every existing gate, and an unintended adapter live in production for two days.
+  # A promotion is exactly when that should surface, because a promotion is when the operator
+  # believes they know what the node is serving.
+  #
+  # Checked on the EFFECTIVE merged env, not only the files: an adapter injected from the unit
+  # itself or an env file would satisfy a file census and still reach the serve.
+  local ssh_t="$1" host="$2" lora siblings
+
+  lora="$(ssh -o ConnectTimeout=10 "$ssh_t" \
+            "systemctl show $UNIT -p Environment --value" 2>/dev/null \
+          | tr ' ' '\n' | grep '^TAEY_LORA_PATH=' || true)"
+  [ -z "$lora" ] \
+    || die "$host: promoted serve resolves ${lora% *} — an adapter is attached to the model just
+       promoted. Remove the drop-in or env entry that sets it, then re-run. (Adapters are attached
+       deliberately for an eval; carrying one THROUGH a promotion is never deliberate.)"
+
+  siblings="$(ssh -o ConnectTimeout=10 "$ssh_t" \
+                "ls /etc/systemd/system/$UNIT.d/ 2>/dev/null | grep -v '^zzz-taey-promoted-model.conf$'" \
+              2>/dev/null || true)"
+  if [ -n "$siblings" ]; then
+    # Not fatal on its own — the two hard properties above are already proven, and a legitimate
+    # operator drop-in must not block a promotion. Loud, named, and attributable is the point.
+    log "WARNING: $host carries drop-ins besides the promotion drop-in. Effective model path and"
+    log "         adapter state are verified above, so these are not currently overriding either —"
+    log "         but each one wins over the promoted config if it ever sets the same key:"
+    printf '%s\n' "$siblings" | while read -r s; do [ -n "$s" ] && log "           $s"; done
+  else
+    log "$host drop-ins: exactly the promotion drop-in, no siblings"
+  fi
+}
+
 manifest() {  # <ssh> <dir> -> one digest over every file's name+content, or NOTHING on any failure
   # pipefail on the REMOTE side is load-bearing: without it a failing find, an unreadable file, or a
   # dying sha256sum is masked by the trailing `cut`, which exits 0 and prints a perfectly plausible
@@ -225,6 +262,11 @@ promote_node() {  # <ssh> <models-dir> <host> <model-name> <node-label>
   local out; out="$(generates "$host")"
   [ -n "$out" ] || die "$host: serves the right root but does NOT generate — weights are loaded but broken"
   restore "$label"
+  # AFTER restore, deliberately. This asserts config hygiene, not whether the promotion worked —
+  # the weights are already proven serving AND generating above. A die() here before restore would
+  # leave every pinned consumer stopped over a drop-in problem, which is a worse outage than the
+  # one it reports.
+  assert_dropin_convention "$ssh_t" "$host"
   log "$host OK: root=$root, completion=$(printf %q "$out"), consumers restored"
 }
 
