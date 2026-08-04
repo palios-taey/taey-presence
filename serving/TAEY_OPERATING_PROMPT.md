@@ -224,7 +224,8 @@ run from memory drifts; a claimed step arrives complete.
 
 **THE TWO REVENUE PLANS you will be asked for most:**
 
-`careers-standing-loops` — the current LinkedIn task describes six units in a fixed order:
+`careers-standing-loops` — while paused, its non-runnable activation contract preserves six units in
+a fixed order. Activation creates the bounded recurring task from this contract:
 
     step-1-comment              open the cycle, lock the hour, COMMENT FIRST (recency-urgent)
     step-2-mypost-engagement    engagement on our own posts
