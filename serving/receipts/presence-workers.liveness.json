@@ -1,13 +1,13 @@
 {
-  "artifact_commit_sha": "6759dad48e26d990b1f5a3c8b9fb542d72b6600b",
-  "artifact_manifest_sha256": "3e6012c020f4850a1c94d1ac4ca0d8d24b373d49a41920e4f4c8f7cf2bbdc480",
-  "compiled_at_commit": "2778654b83fcd137c9481798af498e2b90700a64",
+  "artifact_commit_sha": "7f6b92e3600192e65752a7aadad152df98ef8959",
+  "artifact_manifest_sha256": "873a3e8e281618432665abfade1d2cd6af7ea9e6b9669b6e7705265d63df1073",
+  "compiled_at_commit": "7f6b92e3600192e65752a7aadad152df98ef8959",
   "gates_manifest_ref": "serving/gates_manifest.json",
   "index_entry_ref": "sections.presence.capabilities.presence-workers",
   "liveness": {
     "expect": {
       "lang": "jq",
-      "predicate": ".ok == true and .dcm_emitting == true and (.workers | to_entries | map(.value.running) | all)"
+      "predicate": ".ok == true and (.workers | to_entries | map(.value.running and .value.heartbeat_fresh) | all)"
     },
     "probe_cmd": "python3 serving/presence_liveness.py"
   },
