@@ -25,7 +25,6 @@ import logging
 import os
 import re
 import time
-from typing import Optional
 
 import httpx
 import redis
@@ -58,6 +57,9 @@ NEO4J_URI = os.environ.get("NEO4J_URI", "bolt://localhost:7687")
 POLL_INTERVAL = 0.3  # seconds between Redis checks
 DEBOUNCE = 0.5       # seconds after last keystroke before workers fire
 TTL = 30             # Redis key TTL
+HEARTBEAT_INTERVAL = 3
+HEARTBEAT_TTL = 15
+HEARTBEAT_KEY = "taey:presence:heartbeat:dcm-presence"
 THINKER_MIN_CHARS = 30   # Don't think until user types this much
 MEMORY_MIN_CHARS = 15    # Start memory search earlier than thinking
 
@@ -492,6 +494,16 @@ class ThinkerWorker:
 
 # ── Main Loop ──────────────────────────────────────────────────────────────
 
+async def heartbeat_loop():
+    """Publish event-loop liveness independently of demand-driven DCM output."""
+    while True:
+        try:
+            _r.set(HEARTBEAT_KEY, f"{time.time():.6f}", ex=HEARTBEAT_TTL)
+        except redis.RedisError:
+            pass
+        await asyncio.sleep(HEARTBEAT_INTERVAL)
+
+
 async def dcm_loop():
     """Main DCM presence loop — runs all three workers concurrently."""
     log = logging.getLogger("MAIN")
@@ -548,5 +560,9 @@ async def dcm_loop():
         await asyncio.sleep(POLL_INTERVAL)
 
 
+async def dcm_runtime():
+    await asyncio.gather(dcm_loop(), heartbeat_loop())
+
+
 if __name__ == "__main__":
-    asyncio.run(dcm_loop())
+    asyncio.run(dcm_runtime())
