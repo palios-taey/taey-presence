@@ -63,7 +63,7 @@ presence-dashboard	jq	curl -sf "$TAEY_DASHBOARD_URL/api/self/overview"	.body.rho
 presence-seat	jq	python3 serving/seat_liveness.py	.ok == true and .seat_count > 0 and .namespace_declared == true
 presence-soma	jq	curl -sf "$TAEY_DASHBOARD_URL/api/soma"	.clarity | type == "number"
 presence-prediction	jq	curl -sf "$TAEY_DASHBOARD_URL/api/predict/state"	.state | type == "string" and (. | length) > 0
-presence-workers	jq	python3 serving/presence_liveness.py	.ok == true and .dcm_emitting == true and (.workers | to_entries | map(.value.running) | all)
+presence-workers	jq	python3 serving/presence_liveness.py	.ok == true and (.workers | to_entries | map(.value.running and .value.heartbeat_fresh) | all)
 ORACLE
 
 run_oracle() {

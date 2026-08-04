@@ -29,6 +29,7 @@ import json
 import logging
 import os
 import signal
+import time
 
 import httpx
 import redis.asyncio as aioredis
@@ -44,6 +45,9 @@ log = logging.getLogger("engine")
 POLL_INTERVAL = 0.3
 DEBOUNCE = 0.5
 TTL = 30
+HEARTBEAT_INTERVAL = 3
+HEARTBEAT_TTL = 15
+HEARTBEAT_KEY = "taey:presence:heartbeat:presence-engine"
 
 
 def _require(name: str) -> str:
@@ -189,6 +193,8 @@ async def presence_loop(stop: asyncio.Event):
     log.info("presence engine up | model=%s name=%s search=%s dcm=%s",
              model_endpoint, model_name or "(unset)", search_url or "(none)", neo4j_bolt or "(none)")
 
+    heartbeat_task = asyncio.create_task(_heartbeat_loop(stop, r))
+
     # last_processed guards against re-inferring an UNCHANGED partial every tick
     # (a paused typist must not generate a steady stream of identical inferences).
     last_partial, last_change, last_processed = "", 0.0, None
@@ -252,10 +258,22 @@ async def presence_loop(stop: asyncio.Event):
             else:
                 await _idle_or_stop(stop)
     finally:
+        heartbeat_task.cancel()
+        await asyncio.gather(heartbeat_task, return_exceptions=True)
         log.info("shutting down — closing gateway, dcm, redis")
         await gateway.close()
         dcm.close()
         await r.aclose()
+
+
+async def _heartbeat_loop(stop: asyncio.Event, r):
+    """Publish event-loop liveness independently of partial-input activity."""
+    while not stop.is_set():
+        try:
+            await r.set(HEARTBEAT_KEY, f"{time.time():.6f}", ex=HEARTBEAT_TTL)
+        except aioredis.RedisError:
+            pass
+        await _idle_or_stop(stop, HEARTBEAT_INTERVAL)
 
 
 async def _idle_or_stop(stop: asyncio.Event, delay: float = POLL_INTERVAL):
