@@ -7,6 +7,7 @@ implementation; do not fork these into another repo or hand-edit them on a node.
 |---|---|---|
 | `taey-ep3.service` | vLLM serve of ep3 (docker, digest-pinned via `vllm_serve.sh`) | 8000 |
 | `taey-soma-proxy.service` | persona injection + latency feedback + tool surface | 8765 |
+| `taey-seat.service` | supervised tmux executive seat and fleet-notify reader | n/a |
 | `taey-council-seat@.service` | supervised private supporting council seats | n/a |
 
 (The INFRA=SOUL embodiment daemon `taey-soma` is owned by the infra-soul repo, not here — a
