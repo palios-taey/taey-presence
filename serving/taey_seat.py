@@ -258,7 +258,14 @@ class EventStore:
             finally:
                 os.close(directory)
 
-    def messages_for(self, prompt: str) -> list[dict[str, str]]:
+    def messages_for(
+        self,
+        prompt: str,
+        *,
+        include_history: bool = True,
+    ) -> list[dict[str, str]]:
+        if not include_history:
+            return [{"role": "user", "content": prompt}]
         messages: list[dict[str, str]] = []
         recorded_prompt = False
         seen_ingress: set[str] = set()
@@ -737,11 +744,12 @@ def _run_turn(
         prompt=prompt,
     )
     try:
+        # Claimed fleet packets are self-contained; unrelated prior turns violate their context bound.
         result = proxy.ask(
             prompt,
             event_id=event_id,
             correlation_id=correlation_id,
-            messages=store.messages_for(prompt),
+            messages=store.messages_for(prompt, include_history=not claims),
         )
         store.append(
             "turn_outcome",
