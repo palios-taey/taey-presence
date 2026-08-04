@@ -1,0 +1,29 @@
+[Unit]
+# CANONICAL presence-engine unit. Install FROM this repo — do not hand-write one on a node.
+#
+# WHY THIS FILE EXISTS. Production ran for weeks on an uncommitted user unit that pointed at a
+# staging checkout with no git remote, patched at runtime by a hand-written drop-in that inlined
+# resolved operator paths and endpoints. The running config was recoverable only from that local
+# drop-in and the journal — a running system that was not a committed artifact. Committing the
+# unit removes the reason the drop-in existed rather than committing the drop-in.
+#
+# CONFIG DOES NOT LIVE IN THIS FILE. Endpoints and ids come from the operator-local .env named
+# below (gitignored; see .env.example for every key). A unit carrying resolved operator values is
+# how those values end up in a public repo, and how two nodes silently drift.
+Description=Taey Presence Engine — ep3 presence operator (model endpoint + optional ISMA memory + optional DCM)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+# @TAEY_ROOT@ = this repo's checkout on the node (e.g. $HOME/taey-presence)
+# @TAEY_VENV@ = the python venv holding httpx/redis/neo4j (e.g. @TAEY_ROOT@/.venv)
+WorkingDirectory=@TAEY_ROOT@/presence-engine
+EnvironmentFile=@TAEY_ROOT@/presence-engine/.env
+Environment=PYTHONPATH=@TAEY_ROOT@/presence-engine
+ExecStart=@TAEY_VENV@/bin/python @TAEY_ROOT@/presence-engine/engine.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
