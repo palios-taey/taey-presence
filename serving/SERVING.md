@@ -139,6 +139,101 @@ atomic transition publishes a generation-specific `seat_registration`; the
 launcher requires a new identity-matched generation before it reports a seat
 started, so stale `idle` state cannot certify a dead or prior process.
 
+### Non-UI supervised capture
+
+The existing proxy can capture a real, non-streaming Taey tool trajectory without
+changing the normal UI or council route. Enable a private append-only root on the
+proxy, then opt in one request with explicit provenance headers:
+
+```bash
+install -d -m 0700 /private/path/taey-supervised-captures
+export TAEY_SUPERVISED_CAPTURE_ROOT=/private/path/taey-supervised-captures
+export TAEY_SUPERVISED_APPROVAL_WAIT_SECS=300
+
+curl "$TAEY_SEAT_PROXY" \
+  -H 'Content-Type: application/json' \
+  -H 'X-Taey-Supervised-Capture: v1' \
+  -H 'X-Taey-Supervised-Trace-Id: <public-safe-unique-id>' \
+  -H 'X-Taey-Supervised-Source-Ref: <immutable-task-or-commit-ref>' \
+  --data-binary @request.json
+```
+
+The request selects the capture contract; Taey still chooses whether and how to
+call a tool. Capture mode replaces any caller-supplied tools with four bounded
+contracts: public Git inspection, read-only orchestration inspection, immutable
+state-precondition inspection, and a durable state-change refusal contract. The
+last tool retains the `run_approved_state_change` name for trace-schema
+compatibility, but it creates no approval authority and executes no mutation.
+
+The header diverts the turn into `supervised_turn.py` before the proxy's general
+tool loop. That module has no import or call path to the proxy's shell command,
+expression evaluator, or generic tool executor. It serializes each fully resolved
+upstream request once, appends those exact bytes before transmission, sends those
+same bytes, and causally pairs the exact response bytes. This repeats for every
+tool and final-answer round after preamble, tool, message, response-format, and
+model-selector transformations. Each request also binds the complete non-message
+settings and the single loaded model's exact `/v1/models` `id`/`root`; ambiguous
+multi-model catalogues refuse capture.
+
+Mutation argv remains a grammar, not a token blacklist. Recognized forms are
+classified before any mutable-state read or approval event. This packet has no
+trace-owned checkout and the production GitHub/fleet CLIs do not expose complete
+expected-revision contracts, so every recognized mutation is classed `refusal`:
+
+| Operation | Execution class | Why execution is unavailable |
+|---|---|---|
+| `git add` | refusal | shared index/worktree; no trace-owned checkout |
+| `git commit` | refusal | shared HEAD/index; no atomic expected HEAD+tree contract |
+| `git fetch` | refusal | destination ref lacks an approved compare-and-swap lease |
+| `git merge` | refusal | shared HEAD/index; exact source SHA does not bind destination |
+| `git push` | refusal | approved remote ref and local source are not one atomic lease |
+| `git switch` | refusal | shared HEAD/worktree; no trace-owned checkout |
+| `gh pr create` | refusal | base/head can change without one expected-state token |
+| `gh pr comment` | refusal | PR state can change without an expected-revision token |
+| `gh pr review` | refusal | PR state can change without an expected-revision token |
+| `gh pr merge` | refusal | `--match-head-commit` does not bind the reviewed base/PR state |
+| `taey-notify send` | refusal | readiness observation and delivery are not one CAS operation |
+| `taey-plan assign` | refusal | task assignment has no expected-revision token |
+| `taey-plan ingest` | refusal | plan file and tracker update are not one atomic contract |
+| `taey-plan next` | refusal | claim/readiness transition has no expected-revision token |
+| `taey-task create` | refusal | tracker append has no trace-owned or expected-state contract |
+| `taey-task outcome` | refusal | current binding can change without an expected revision |
+| `taey-task update` | refusal | task status can change without an expected revision |
+
+Interactive, force, delete, admin, editor, file-fed, alternate-repository, and
+unrecognized forms fail grammar validation as before.
+
+Before proposing a mutation, Taey calls `inspect_state_preconditions` with the
+same `argv`, `cwd`, and timeout. The returned canonical object binds the public
+repository's current HEAD, symbolic branch, index, worktree, and local config,
+plus command-specific path content and local/remote refs. GitHub PR operations
+also bind exact base/head commits or the current PR state; orchestration actions
+bind their target's read-only CLI observation. A state-change proposal records
+that exact object/hash together with `execution_operation`,
+`execution_class=refusal`, and the fixed refusal reason. It returns exit 79 with
+`executed=false` before reading mutable state again, emitting approval events, or
+calling `_run`. Complete-trace verification requires this exact refusal shape.
+
+The local operator CLI exposes pending exact proposal bytes, records validation
+or CONTROL receipts, verifies admission, and writes a public-safe hash export:
+
+```bash
+python3 serving/supervised_capture.py --root "$TAEY_SUPERVISED_CAPTURE_ROOT" \
+  receipt <trace-id> --kind validation --source-ref <independent-validator-ref> \
+  --payload-file <exact-result-file> --public-id <commit-or-task-id>
+python3 serving/supervised_capture.py --root "$TAEY_SUPERVISED_CAPTURE_ROOT" \
+  verify <trace-id> --admission
+python3 serving/supervised_capture.py --root "$TAEY_SUPERVISED_CAPTURE_ROOT" \
+  export-public <trace-id> --out <new-public-jsonl-path>
+```
+
+Raw caller request, per-round upstream request/response, model/settings, argument,
+stdout, stderr, and receipt bytes remain only in a
+`0700` root with `0600` ledgers. Public export contains hashes and allowlisted
+public identifiers, never raw request/result bytes, hostnames, or filesystem
+paths. Missing, duplicated, reordered, failed, unvalidated, or reconstructed
+events refuse training admission.
+
 ## Running a fleet: deploy, swap models, and the checks that gate each step
 
 The quick start above stands up ONE node by hand. Once a node carries real traffic, every step
@@ -283,6 +378,8 @@ For other model families, set the parsers your model expects.
 | `TAEY_LIVENESS_REQUIRED` | `1` | refuse proxy startup/turn admission when Redis cannot provide attributable liveness |
 | `TAEY_TURN_LEASE_SECS` | `120` | active-turn lease; expiry is archived as an abandoned turn |
 | `TAEY_TURN_HEARTBEAT_SECS` | `30` | lease-renewal interval, capped at one-third of the lease |
+| `TAEY_SUPERVISED_CAPTURE_ROOT` | *(empty → capture off)* | private `0700` root for exact non-UI supervised traces |
+| `TAEY_SUPERVISED_APPROVAL_WAIT_SECS` | `300` | maximum wait for one exact, unused mutation approval |
 
 `VLLM_REQUEST_TIMEOUT_SECS`, the dashboard's `TAEY_COUNCIL_WAVE_TIMEOUT`,
 and each worker's `TAEY_SEAT_TIMEOUT` all default to 1800 seconds. Keep these
