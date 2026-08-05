@@ -30,6 +30,13 @@ from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import StreamingResponse, JSONResponse
 import uvicorn
 
+try:
+    from .supervised_capture import CaptureError
+    from .supervised_turn import run_supervised_completion
+except ImportError:
+    from supervised_capture import CaptureError
+    from supervised_turn import run_supervised_completion
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [SOMA-PROXY] %(message)s",
@@ -83,6 +90,11 @@ TAEY_TURN_HEARTBEAT_SECS = max(
         int(os.environ.get("TAEY_TURN_HEARTBEAT_SECS", "30")),
         TAEY_TURN_LEASE_SECS // 3,
     ),
+)
+SUPERVISED_CAPTURE_ROOT = os.environ.get("TAEY_SUPERVISED_CAPTURE_ROOT", "").strip()
+SUPERVISED_APPROVAL_WAIT_SECS = max(
+    0.0,
+    float(os.environ.get("TAEY_SUPERVISED_APPROVAL_WAIT_SECS", "300")),
 )
 
 app = FastAPI(title="Taey Soma Proxy", version="1.0.0")
@@ -2160,6 +2172,20 @@ async def chat_completions(request: Request):
         raise HTTPException(status_code=400, detail="request body must be an object")
     body = dict(raw_body)
     turn = _turn_context(request, body)
+    capture_mode = request.headers.get("X-Taey-Supervised-Capture", "").strip()
+    if capture_mode:
+        if capture_mode != "v1":
+            raise HTTPException(status_code=400, detail="unsupported supervised capture mode")
+        if not SUPERVISED_CAPTURE_ROOT:
+            raise HTTPException(
+                status_code=503,
+                detail="TAEY_SUPERVISED_CAPTURE_ROOT is required for supervised capture",
+            )
+        if bool(body.get("stream")):
+            raise HTTPException(
+                status_code=400,
+                detail="supervised non-UI capture refuses streaming requests",
+            )
     context_token = _request_context.set(_turn_payload(turn))
     started = False
     try:
@@ -2168,7 +2194,56 @@ async def chat_completions(request: Request):
         except LivenessUnavailable as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
         started = open_turns >= 0
-        response = await _chat_completions_for_turn(body, turn, started)
+        if capture_mode:
+            supervised_started = time.time()
+            try:
+                supervised = await run_supervised_completion(
+                    client=_http,
+                    caller_body=body,
+                    caller_request_bytes=await request.body(),
+                    upstream_headers=_upstream_headers(turn),
+                    capture_root=SUPERVISED_CAPTURE_ROOT,
+                    trace_id=request.headers.get(
+                        "X-Taey-Supervised-Trace-Id", ""
+                    ).strip(),
+                    source_ref=request.headers.get(
+                        "X-Taey-Supervised-Source-Ref", ""
+                    ).strip(),
+                    approval_wait_seconds=SUPERVISED_APPROVAL_WAIT_SECS,
+                    request_metadata={
+                        "seat_id": turn.seat_id,
+                        "turn_id": turn.turn_id,
+                        "event_id": turn.event_id,
+                        "correlation_id": turn.correlation_id,
+                    },
+                    inject_preamble=inject_preamble,
+                    max_tool_rounds=MAX_TOOL_ROUNDS,
+                )
+            except CaptureError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            elapsed_ms = (time.time() - supervised_started) * 1000
+            publish_metrics(
+                elapsed_ms,
+                supervised.prompt_tokens,
+                supervised.completion_tokens,
+                supervised.tool_rounds,
+            )
+            log.info(
+                "Supervised completion generated %d tokens in %.0fms (%d tool rounds)",
+                supervised.completion_tokens,
+                elapsed_ms,
+                supervised.tool_rounds,
+            )
+            response = JSONResponse(
+                content=supervised.payload,
+                status_code=supervised.status_code,
+                headers={
+                    **_turn_headers(turn),
+                    "X-Taey-Supervised-Trace-Id": supervised.trace_id,
+                },
+            )
+        else:
+            response = await _chat_completions_for_turn(body, turn, started)
         if started and not isinstance(response, StreamingResponse):
             await _end_turn(turn, "nonstream_complete")
         return response
