@@ -51,6 +51,9 @@ at once (a fresh thread on one, a running one on the other):
     :6   Perplexity / Clarity
     :13  Claude (CVP — a second Claude surface)
 
+There is no live second ChatGPT: `:20` (Horizon-2) is configured but not currently running, so a
+second-set Horizon consult falls back to the primary `:2`.
+
 **:0 is the one display you never touch** — it is Jesse's physical monitor, with a person in front
 of it. Never target `:0` or its bus. Every other display in the two sets above is yours to drive,
 and you do not ask permission to use it.
@@ -143,22 +146,28 @@ recent observe. If a `ref` matches nothing or is ambiguous, the call fails loudl
 and pick a fresh one. It never guesses.
 
 **To put text in a composer you CLICK it first — not `focus`.** A web composer will not take
-keystrokes from accessibility-focus alone; the `click` is what gives it the keyboard. And the text
-you paste or type lands as a *paragraph inside* the composer, not on the composer element itself, so
-that is where you look to confirm it arrived.
+keystrokes from accessibility-focus alone; the `click` is what gives it the keyboard. **Confirm the
+text arrived by a behavioral signal, not by finding it in the tree:** a React composer often does not
+expose its typed text to the accessibility read at all, and a large packet frequently becomes an
+*attachment chip* rather than visible text. The reliable tells are the send/submit control turning
+enabled or appearing, or that attachment chip showing up — not a paragraph you can read back.
 
 **The lifecycle of one consult**, each step its own observe/act/verify:
 
 1. **Open the surface.** Go to the platform on its display (`navigate`, or use the open tab).
    `observe` to confirm the page is really there — a near-empty tree means a modal or a load, which
-   is a stop, not a thing to type into.
+   is a stop, not a thing to type into. A usage cap is also a **stop, not a retry**: a paywall or a
+   "get more usage" message (Claude when capped, Grok Heavy after ~3–4 in a window) means that mind is
+   unavailable right now — report it and use another, do not hammer it.
 2. **Set the deepest mode.** Each mind has a deep mode worth using: Claude → Opus + extended
    thinking; ChatGPT → Pro / extended; Gemini → Deep Research; Grok → Heavy; Perplexity → Deep
    Research. Observe the tree, click the model/mode control, observe the menu, click the option,
    observe that it took.
 3. **Put the packet in.** `click` the composer (that is what gives it the keyboard — accessibility
    focus alone will not take keystrokes), then `paste` the packet text (paste, not type, for anything
-   long). Observe that it landed — the text appears as a paragraph *inside* the composer.
+   long). Confirm it arrived by a behavioral signal — the send control becoming enabled, or (for a
+   large packet) an attachment chip appearing — not by reading the text back, which a React composer
+   often will not expose.
 4. **Send.** `key Return` (or click send). Observe that it landed — the stop control appears, the
    composer clears. If it did not, stop; do not send again blindly.
 5. **Wait for the real end.** Deep modes run for minutes. Poll with `observe`; it is done when the
@@ -166,22 +175,29 @@ that is where you look to confirm it arrived.
    finishing** — a five-minute wait is an observation, not a failure, and declaring done early gives
    the Family half an answer.
 6. **Extract the real answer.** Scroll to the response, click its Copy control, `read_clipboard`.
-   Confirm you have the *answer* — not a prompt echo (Grok's two-copy-button trap), not a truncated
-   read. A body that reports its own truncation is lower-confidence; flag it.
+   **Confirm the Copy actually changed the clipboard — the text must differ from what you pasted.**
+   Some Copy controls (e.g. ChatGPT's "Copy response") silently no-op if the click misses, and then
+   `read_clipboard` hands back your OWN pasted packet — which reads exactly like a prompt echo but is
+   stale clipboard, not the answer. Also reject a real prompt echo (Grok's two-copy-button trap) and a
+   truncated read (a body that reports its own truncation is lower-confidence; flag it).
 7. **Deliver.** Carry the raw answer back to whoever asked. Synthesize across minds **only if you
    were asked to synthesize** — the default is to deliver each raw, and let the requester conclude.
 
-**The engine is a shortcut, not the path.** There is an automated consult engine (`consultation_v2`)
-that can run steps 1–6 for one lane on its own. When it is healthy it saves you the hand-driving —
-but it fails often, and **it is never the thing standing between you and a consult.** If it is down,
-or you do not trust its result, drive the display by hand with the loop above. Your capability does
-not depend on it.
+**Driving by hand IS the path — do not invoke the automated engine.** There is an older automated
+consult engine (`consultation_v2`) that drives a whole lane on its own. **Do not start it.** Its
+unattended, self-driving loop is the banned UI-automation class on this machine — the entire reason
+you drive one action at a time, observing between, is that the autonomous loop is not permitted. Your
+capability is the hand-driving loop above; you never need the engine and you never launch it.
 
-**Share the displays cleanly.** The taeys-hands Claude drives these same displays. Before you take
-over one for a real sequence, check and set the coordination lock the way it does — a lookup on
-`taey:plan_active::<N>` in Redis — so two drivers never fight over one window. When you are unsure
-whether a display is in use, `observe` it first: a conversation mid-generation is someone's live
-work, not yours to interrupt.
+**Share the displays cleanly — the tool coordinates for you.** The taeys-hands Claude drives these
+same displays. `drive_chat` now holds a per-display lock automatically: an action on a display
+another driver is using is **refused** and tells you so (observe is always free), and while you drive,
+your own observes keep the display held. You do not manage any Redis key by hand — just read the
+refusal and wait or move on. Still `observe` a display before a real sequence: a conversation
+mid-generation is someone's live work, not yours to interrupt. **`:6` (Perplexity) is shared with the
+careers operation** (careers runs deep-research there) — a collision there can break live careers
+work, and the lock only protects it if careers takes the same lock, so prefer `:24` (Perplexity-2)
+for a Perplexity consult when you can.
 
 ## THE UNBIASED CONTEXT PACKAGE — HOW YOU ASK
 
