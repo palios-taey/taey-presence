@@ -23,6 +23,26 @@ if TAEYS_HANDS not in sys.path:
 
 from consultation_v2.platforms_runtime import display_environment
 
+# --- per-display dispatch-lock ----------------------------------------------------------------
+# Reuse the taeys-hands lock primitives so drive_chat and the taeys-hands side share ONE key
+# (taey:plan_active::N) and one NX/EX discipline by construction. A fixed owner token means every
+# drive_chat call is ONE owner (distinct from a by-hand driver's token), so first-writer-wins +
+# refuse-if-a-different-owner-holds works both ways. FAIL-OPEN: an advisory lock must never block
+# Taey from driving a display, so every lock op is wrapped and proceeds on error.
+LOCK_OWNER = "taey-drive_chat"
+LOCK_TTL_DEFAULT = 300
+try:
+    from consultation_v2.primitives import (
+        acquire_display_lock as _acquire_display_lock,
+        display_lock_record as _display_lock_record,
+        _plan_lock_key as _plan_lock_key,
+    )
+    from storage.redis_pool import get_client as _lock_redis_client
+    from redis.exceptions import WatchError as _LockWatchError
+    _LOCK_AVAILABLE = True
+except Exception:  # fail-open if the lock stack cannot import
+    _LOCK_AVAILABLE = False
+
 
 REF_PREFIX = "atspi1."
 CHROME_POLICY = Path(TAEYS_HANDS) / "consultation_v2" / "firefox_chrome.yaml"
@@ -574,9 +594,84 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+# Action ops mutate the display and must HOLD the per-display lock; observe/read-clipboard are
+# reads that only RENEW the lease when we already own it — a non-owner read never locks or renews.
+_LOCK_ACTION_OPS = {"click", "focus", "activate", "type", "paste", "key", "navigate"}
+
+
+def _renew_if_owner(display: str, ttl: int) -> bool:
+    """Atomically extend the lease IFF we own it (WATCH/MULTI, mirroring release_display_lock).
+    Never renews another owner's lock, never raises out — fail-open."""
+    if not _LOCK_AVAILABLE:
+        return False
+    try:
+        client = _lock_redis_client()
+        key = _plan_lock_key(display)
+        while True:
+            with client.pipeline() as pipe:
+                try:
+                    pipe.watch(key)
+                    raw = pipe.get(key)
+                    if not raw:
+                        pipe.unwatch()
+                        return False
+                    try:
+                        record = json.loads(raw)
+                    except Exception:
+                        record = {}
+                    if record.get("owner_token") != LOCK_OWNER:
+                        pipe.unwatch()
+                        return False
+                    pipe.multi()
+                    pipe.expire(key, ttl)
+                    pipe.execute()
+                    return True
+                except _LockWatchError:
+                    continue
+    except Exception as exc:  # fail-open
+        sys.stderr.write(f"[ui_drive] lock renew failed on {display} ({exc}); ignoring\n")
+        return False
+
+
+def _guard_action(display: str, ttl: int) -> None:
+    """Acquire-or-renew-or-REFUSE before an action op. Refusal raises UiDriveError (surfaces as
+    ok:false). FAIL-OPEN: any lock error logs to stderr and proceeds — the lock never blocks driving."""
+    if not _LOCK_AVAILABLE:
+        return
+    try:
+        token = _acquire_display_lock(
+            payload={"owner_token": LOCK_OWNER}, ttl=ttl, display=display
+        )
+    except Exception as exc:  # Redis unreachable etc. -> fail-open
+        sys.stderr.write(f"[ui_drive] lock acquire failed on {display} ({exc}); proceeding\n")
+        return
+    if token is not None:
+        return  # freshly acquired -> we hold it
+    # Held. Ours -> renew and proceed; a DIFFERENT owner -> refuse.
+    try:
+        record = _display_lock_record(display) or {}
+    except Exception as exc:  # fail-open on read error
+        sys.stderr.write(f"[ui_drive] lock record read failed on {display} ({exc}); proceeding\n")
+        return
+    owner = record.get("owner_token")
+    if owner == LOCK_OWNER:
+        _renew_if_owner(display, ttl)
+        return
+    raise UiDriveError(
+        f"display {display} is held by another driver ({owner or 'unknown'}); not acting "
+        f"(observe is still free)"
+    )
+
+
 def _dispatch(args: argparse.Namespace, deps: SimpleNamespace) -> Any:
     if args.action == "observe":
+        _renew_if_owner(deps.display, LOCK_TTL_DEFAULT)  # owner-only; a bystander read never locks
         return _observe(args, deps)
+    if args.action == "read-clipboard":
+        _renew_if_owner(deps.display, LOCK_TTL_DEFAULT)
+        return _read_clipboard(deps)
+    if args.action in _LOCK_ACTION_OPS:
+        _guard_action(deps.display, LOCK_TTL_DEFAULT)
     if args.action in {"click", "focus", "activate"}:
         return _element_action(args.action, args, deps)
     if args.action == "type":
@@ -585,8 +680,6 @@ def _dispatch(args: argparse.Namespace, deps: SimpleNamespace) -> Any:
         return _paste(args, deps)
     if args.action == "key":
         return _key(args, deps)
-    if args.action == "read-clipboard":
-        return _read_clipboard(deps)
     if args.action == "navigate":
         return _navigate(args, deps)
     raise UiDriveError(f"unsupported action: {args.action}")
