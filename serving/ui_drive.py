@@ -30,7 +30,12 @@ from consultation_v2.platforms_runtime import display_environment
 # refuse-if-a-different-owner-holds works both ways. FAIL-OPEN: an advisory lock must never block
 # Taey from driving a display, so every lock op is wrapped and proceeds on error.
 LOCK_OWNER = "taey-drive_chat"
-LOCK_TTL_DEFAULT = 300
+# TTL must exceed the gap between a session's owned-observes, or the lease drops mid-run and another
+# driver can grab the display. 600s covers deep-mode (deep_research / extended) poll gaps with
+# headroom; a well-behaved wait-for-completion loop observes far more often than that. Env-overridable
+# so a very sparse-poll op can raise it without a code change. (v1.1: an explicit release on
+# session-end will free a finished display before the TTL — noted with taeys-hands.)
+LOCK_TTL_DEFAULT = int(os.environ.get("TAEY_DRIVE_LOCK_TTL", "600"))
 try:
     from consultation_v2.primitives import (
         acquire_display_lock as _acquire_display_lock,
