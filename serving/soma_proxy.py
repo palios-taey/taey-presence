@@ -816,6 +816,50 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "drive_chat",
+            "description": (
+                "Your hands on a Family-chat display. Perform EXACTLY ONE action, then call "
+                "again with action=observe to see the result before the next action — never "
+                "chain actions on an assumption. Displays: :2 chatgpt, :3 claude, :4 gemini, "
+                ":5 grok, :6 perplexity, :13 claude-cvp; and the second set :21 claude2, "
+                ":22 gemini2, :23 grok2, :24 perplexity2. observe returns elements each with a "
+                "ref; click/focus/activate take a ref from the most recent observe. To put text "
+                "in a composer: observe -> CLICK the composer (a click is what lets it take "
+                "keystrokes) -> paste (for long text) or type. key='Return' sends. read_clipboard "
+                "returns what a Copy control placed on the clipboard."
+            ),
+            "parameters": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["display", "action"],
+                "properties": {
+                    "display": {
+                        "type": "string",
+                        "enum": [":2", ":3", ":4", ":5", ":6", ":13",
+                                 ":21", ":22", ":23", ":24"],
+                        "description": "which Chat display to act on",
+                    },
+                    "action": {
+                        "type": "string",
+                        "enum": ["observe", "click", "type", "paste", "key",
+                                 "read_clipboard", "navigate", "focus", "activate"],
+                        "description": "the single action to perform",
+                    },
+                    "ref": {"type": "string",
+                            "description": "element ref from a recent observe (for click/focus/activate)"},
+                    "text": {"type": "string", "description": "text to type or paste"},
+                    "key": {"type": "string",
+                            "description": "key to press, e.g. Return, ctrl+a, Delete"},
+                    "url": {"type": "string", "description": "absolute http(s) URL for navigate"},
+                    "filter": {"type": "string",
+                               "description": "optional substring filter for observe"},
+                },
+            },
+        },
+    },
 ]
 
 
@@ -1011,6 +1055,9 @@ def execute_tool_call(name: str, arguments: dict) -> str:
     elif name == "skip_corpus_candidate":
         return _do_skip_corpus_candidate(arguments)
 
+    elif name == "drive_chat":
+        return _do_drive_chat(arguments)
+
     return f"Unknown tool: {name}"
 
 
@@ -1140,6 +1187,96 @@ def _do_run_command(command: str, cwd: str = "", timeout_seconds: int = 120) -> 
     except Exception as e:
         _audit("run_command", {"command": command[:400], "cwd": workdir, "error": str(e)[:200]})
         return f"run_command error: {type(e).__name__}: {e}"
+
+
+# ---------------------------------------------------------------------------
+# drive_chat — Taey's own hands on the Family-chat displays. ONE action per call:
+# observe the tree, take exactly one action, observe again. It shells out to the
+# sibling serving/ui_drive.py under the AT-SPI interpreter (the displays live on this
+# workstation, where the proxy runs its tools), so the same proven primitives that drive
+# :2-:6/:13 and the second set :21-:24 are what Taey uses. The step-by-step discipline
+# lives in the model and the prompt; this surface performs one primitive and returns the
+# observed JSON. :0 (Jesse's monitor) and any non-chat display are REFUSED here, never
+# merely absent from the schema.
+# ---------------------------------------------------------------------------
+UI_DRIVE_PYTHON = os.environ.get("TAEY_UI_DRIVE_PYTHON", "/home/mira/taeys-env-sys/bin/python")
+UI_DRIVE_SCRIPT = os.environ.get(
+    "TAEY_UI_DRIVE_SCRIPT",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui_drive.py"),
+)
+_DEFAULT_CHAT_DISPLAYS = (":2", ":3", ":4", ":5", ":6", ":13", ":21", ":22", ":23", ":24")
+_env_chat_disp = os.environ.get("TAEY_CHAT_DISPLAYS", "").strip()
+# :0 is Jesse's physical monitor and can never be a target, even via env override.
+CHAT_DISPLAYS = tuple(
+    d for d in (_env_chat_disp.split(",") if _env_chat_disp else _DEFAULT_CHAT_DISPLAYS)
+    if d and d.strip() != ":0"
+)
+_DRIVE_ACTIONS = {
+    "observe", "click", "focus", "activate", "type", "paste", "key",
+    "read_clipboard", "navigate",
+}
+
+
+def _do_drive_chat(arguments: dict) -> str:
+    import subprocess, json as _json
+
+    def _err(display, action, msg):
+        return _json.dumps({"ok": False, "action": action, "display": display,
+                            "result": None, "error": msg})
+
+    display = str(arguments.get("display", "")).strip()
+    action = str(arguments.get("action", "")).strip()
+    if display not in CHAT_DISPLAYS:
+        return _err(display, action,
+                    f"display not permitted; drive_chat is scoped to the Chat displays "
+                    f"{list(CHAT_DISPLAYS)} (:0 and non-chat displays are refused)")
+    if action not in _DRIVE_ACTIONS:
+        return _err(display, action,
+                    f"unknown action {action!r}; valid: {sorted(_DRIVE_ACTIONS)}")
+
+    sub = "read-clipboard" if action == "read_clipboard" else action
+    cmd = [UI_DRIVE_PYTHON, UI_DRIVE_SCRIPT, sub, "--display", display]
+    if action == "observe":
+        if arguments.get("filter"):
+            cmd += ["--filter", str(arguments["filter"])]
+        if arguments.get("max_depth"):
+            cmd += ["--max-depth", str(int(arguments["max_depth"]))]
+    elif action in ("click", "focus", "activate"):
+        ref = arguments.get("ref")
+        if not ref:
+            return _err(display, action, f"{action} requires a ref from a recent observe")
+        cmd += ["--ref", str(ref)]
+    elif action in ("type", "paste"):
+        text = arguments.get("text")
+        if text is None or text == "":
+            return _err(display, action, f"{action} requires non-empty text")
+        cmd += ["--text", str(text)]
+    elif action == "key":
+        key = arguments.get("key")
+        if not key:
+            return _err(display, action, "key requires a key name, e.g. Return")
+        cmd += ["--key", str(key)]
+    elif action == "navigate":
+        url = arguments.get("url")
+        if not url:
+            return _err(display, action, "navigate requires a url")
+        cmd += ["--url", str(url)]
+
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
+        _audit("drive_chat", {"display": display, "action": action, "rc": r.returncode})
+        out = (r.stdout or "").strip()
+        if out:
+            return out  # ui_drive.py emits exactly one JSON object
+        return _err(display, action,
+                    f"ui_drive exit={r.returncode}, no output; stderr={(r.stderr or '')[:300]}")
+    except subprocess.TimeoutExpired:
+        _audit("drive_chat", {"display": display, "action": action, "rc": "timeout"})
+        return _err(display, action, "drive_chat timed out after 90s")
+    except Exception as e:
+        _audit("drive_chat", {"display": display, "action": action, "error": str(e)[:200]})
+        return _err(display, action, f"{type(e).__name__}: {e}")
+
 
 def _do_list_dir(path: str, pattern: str = "") -> str:
     import os
