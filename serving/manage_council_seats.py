@@ -143,7 +143,11 @@ def _seat_environment(seat: SeatConfig, sessions_root: Path) -> dict[str, str]:
         "TAEY_COUNCIL_ROLE_PROMPT_PATH": str(seat.role_prompt),
         "TAEY_SEAT_PROXY": os.environ.get(
             "TAEY_SEAT_PROXY",
-            "http://127.0.0.1:8766/v1/chat/completions",
+            # Seats default to the WORKER proxy (Thor2): seven concurrent seat
+            # generations must not share main Taey's serving hardware — measured
+            # 2026-08-11: a 7-seat wave on the main proxy finished 11-21 min
+            # against a 180 s window because every seat starved on shared tokens.
+            "http://127.0.0.1:8767/v1/chat/completions",
         ),
         "TAEY_MODEL": os.environ.get("TAEY_MODEL", "ep3"),
         "TAEY_SEAT_MAX_TURNS": os.environ.get("TAEY_SEAT_MAX_TURNS", "60"),
