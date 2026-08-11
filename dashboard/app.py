@@ -2193,7 +2193,6 @@ async def chat_session_stream(session_id: str, request: Request):
         "model": MODEL or "ep3",
         "messages": history,
         "stream": True,
-        "tools": [],
     }
     isma_tiles = body.get("isma_tiles")
     if isma_tiles:
