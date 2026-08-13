@@ -4,13 +4,11 @@
 from __future__ import annotations
 
 import argparse
-import base64
 import json
 import os
 import re
 import sys
 import time
-from collections import Counter
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -59,40 +57,6 @@ try:
     _LOCK_AVAILABLE = True
 except Exception:  # fail-open if the lock stack cannot import
     _LOCK_AVAILABLE = False
-
-
-REF_PREFIX = "atspi1."
-CHROME_POLICY = Path(TAEYS_HANDS) / "consultation_v2" / "firefox_chrome.yaml"
-OUTPUT_ROLES = {
-    "article",
-    "check box",
-    "combo box",
-    "entry",
-    "heading",
-    "link",
-    "list item",
-    "menu item",
-    "paragraph",
-    "push button",
-    "radio button",
-    "section",
-    "spin button",
-    "static",
-    "text",
-    "toggle button",
-}
-STATE_NAMES = (
-    "editable",
-    "focusable",
-    "focused",
-    "showing",
-    "visible",
-    "sensitive",
-    "enabled",
-    "checked",
-    "pressed",
-    "selected",
-)
 
 
 class UiDriveError(RuntimeError):
@@ -145,297 +109,24 @@ def _configure_display(display: str) -> SimpleNamespace:
         raise UiDriveError(f"no AT-SPI bus resolved for display {display}")
     os.environ.update(env)
 
-    from consultation_v2 import atspi, clipboard, input as ui_input, interact
-    import gi
-
-    gi.require_version("Atspi", "2.0")
-    from gi.repository import Atspi
+    from consultation_v2 import clipboard, input as ui_input, interact, snapshot, tree
+    from consultation_v2.platforms import routing
+    from consultation_v2.runtime import ConsultationRuntime
+    from consultation_v2.seat_actions import SeatActions
 
     ui_input.set_display(display)
     clipboard.set_display(display)
     return SimpleNamespace(
         display=env["DISPLAY"],
-        Atspi=Atspi,
-        atspi=atspi,
         clipboard=clipboard,
         input=ui_input,
         interact=interact,
+        routing=routing,
+        snapshot=snapshot,
+        tree=tree,
+        ConsultationRuntime=ConsultationRuntime,
+        SeatActions=SeatActions,
     )
-
-
-def _chrome_policy() -> tuple[set[str], set[tuple[str, str]], set[str]]:
-    import yaml
-
-    if not CHROME_POLICY.is_file():
-        raise UiDriveError(f"Firefox chrome policy is missing: {CHROME_POLICY}")
-    data = (yaml.safe_load(CHROME_POLICY.read_text(encoding="utf-8")) or {}).get(
-        "firefox_chrome", {}
-    )
-    subtree_roles = set(data.get("subtree_roles") or [])
-    portal_roles = set(data.get("portal_container_roles") or [])
-    exact: set[tuple[str, str]] = set()
-    for spec in data.get("exact_elements") or []:
-        names = spec.get("names_any_of") or ([spec["name"]] if "name" in spec else [])
-        for name in names:
-            exact.add((str(name), str(spec.get("role") or "")))
-    return subtree_roles, exact, portal_roles
-
-
-def _states(node: Any, Atspi: Any) -> list[str]:
-    found: list[str] = []
-    try:
-        state_set = node.get_state_set()
-    except Exception:
-        return found
-    for name in STATE_NAMES:
-        try:
-            if state_set.contains(getattr(Atspi.StateType, name.upper())):
-                found.append(name)
-        except Exception:
-            continue
-    return found
-
-
-def _text(node: Any, Atspi: Any, max_chars: int = 700) -> str:
-    try:
-        iface = node.get_text_iface()
-        if iface:
-            count = int(iface.get_character_count())
-            if 0 < count <= max_chars:
-                return (iface.get_text(0, count) or "").strip()
-    except Exception:
-        pass
-    try:
-        count = int(Atspi.Text.get_character_count(node))
-        if 0 < count <= max_chars:
-            return (Atspi.Text.get_text(node, 0, count) or "").strip()
-    except Exception:
-        pass
-    return ""
-
-
-def _is_showing(node: Any, Atspi: Any) -> bool:
-    try:
-        return bool(node.get_state_set().contains(Atspi.StateType.SHOWING))
-    except Exception:
-        return False
-
-
-def _is_onscreen(node: Any, Atspi: Any) -> bool:
-    try:
-        component = node.get_component_iface()
-        if component is None:
-            return False
-        rect = component.get_extents(Atspi.CoordType.SCREEN)
-        return bool(
-            rect
-            and rect.x >= 0
-            and rect.y >= 0
-            and rect.width > 0
-            and rect.height > 0
-        )
-    except Exception:
-        return False
-
-
-def _ancestor_set(node: Any) -> set[Any]:
-    ancestors: set[Any] = set()
-    current = node
-    for _ in range(50):
-        try:
-            parent = current.get_parent()
-        except Exception:
-            break
-        if parent is None:
-            break
-        ancestors.add(parent)
-        current = parent
-    return ancestors
-
-
-def _portal_roots(
-    firefox: Any,
-    document: Any,
-    *,
-    Atspi: Any,
-    subtree_roles: set[str],
-    portal_roles: set[str],
-    max_depth: int = 10,
-) -> list[Any]:
-    document_ancestors = _ancestor_set(document)
-    roots: list[Any] = []
-
-    def walk(node: Any, depth: int) -> None:
-        if depth > max_depth:
-            return
-        try:
-            role = str(node.get_role_name() or "")
-            if node == document or role == "document web" or role in subtree_roles:
-                return
-            if (
-                node not in document_ancestors
-                and role in portal_roles
-                and _is_onscreen(node, Atspi)
-            ):
-                roots.append(node)
-                return
-            for index in range(node.get_child_count()):
-                child = node.get_child_at_index(index)
-                if child is not None:
-                    walk(child, depth + 1)
-        except Exception:
-            return
-
-    walk(firefox, 0)
-    return roots
-
-
-def _encode_ref(
-    *,
-    display: str,
-    role: str,
-    name: str,
-    nth: int,
-    count: int,
-    max_depth: int,
-) -> str:
-    payload = json.dumps(
-        {
-            "v": 1,
-            "display": display,
-            "role": role,
-            "name": name,
-            "nth": nth,
-            "count": count,
-            "max_depth": max_depth,
-        },
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    return REF_PREFIX + base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
-
-
-def _decode_ref(value: str) -> dict[str, Any]:
-    if not value.startswith(REF_PREFIX):
-        raise UiDriveError(f"invalid ref prefix; expected {REF_PREFIX}")
-    encoded = value[len(REF_PREFIX) :]
-    try:
-        padding = "=" * (-len(encoded) % 4)
-        payload = json.loads(base64.urlsafe_b64decode(encoded + padding).decode("utf-8"))
-    except Exception as exc:
-        raise UiDriveError(f"invalid ref encoding: {exc}") from exc
-    required = {"v", "display", "role", "name", "nth", "count", "max_depth"}
-    if set(payload) != required or payload.get("v") != 1:
-        raise UiDriveError("invalid ref schema")
-    if not re.fullmatch(r":\d+", payload.get("display") or ""):
-        raise UiDriveError("invalid ref display")
-    if not isinstance(payload["role"], str) or not isinstance(payload["name"], str):
-        raise UiDriveError("invalid ref role/name")
-    for key in ("nth", "count", "max_depth"):
-        if not isinstance(payload[key], int):
-            raise UiDriveError(f"invalid ref {key}")
-    if payload["nth"] < 0 or payload["count"] < 1:
-        raise UiDriveError("invalid ref occurrence metadata")
-    _validate_max_depth(payload["max_depth"])
-    return payload
-
-
-def _validate_max_depth(value: int) -> None:
-    if not 1 <= value <= 80:
-        raise UiDriveError(f"max depth must be between 1 and 80, got {value}")
-
-
-def _snapshot(deps: SimpleNamespace, *, max_depth: int) -> list[dict[str, Any]]:
-    _validate_max_depth(max_depth)
-    firefox = deps.atspi.find_firefox()
-    if firefox is None:
-        raise UiDriveError(f"Firefox not found on display {deps.display}")
-
-    documents = deps.atspi.document_web_elements(firefox, max_depth=10)
-    showing_documents = [doc for doc in documents if _is_showing(doc, deps.Atspi)]
-    if len(showing_documents) != 1:
-        raise UiDriveError(
-            f"expected exactly one SHOWING document web on {deps.display}, found {len(showing_documents)}"
-        )
-
-    subtree_roles, exact_chrome, portal_roles = _chrome_policy()
-    roots = [showing_documents[0]]
-    roots.extend(
-        _portal_roots(
-            firefox,
-            showing_documents[0],
-            Atspi=deps.Atspi,
-            subtree_roles=subtree_roles,
-            portal_roles=portal_roles,
-        )
-    )
-    rows: list[dict[str, Any]] = []
-
-    def walk(node: Any, depth: int) -> None:
-        if depth > max_depth:
-            return
-        try:
-            role = str(node.get_role_name() or "")
-            if role in subtree_roles:
-                return
-            if role == "document web" and not _is_showing(node, deps.Atspi):
-                return
-            name = str(node.get_name() or "").strip()
-            states = _states(node, deps.Atspi)
-            text = _text(node, deps.Atspi)
-            if (
-                "showing" in states
-                and role in OUTPUT_ROLES
-                and (name or text)
-                and (name, role) not in exact_chrome
-            ):
-                rows.append(
-                    {
-                        "role": role,
-                        "name": name,
-                        "text": text,
-                        "states": states,
-                        "atspi_obj": node,
-                    }
-                )
-            for index in range(node.get_child_count()):
-                child = node.get_child_at_index(index)
-                if child is not None:
-                    walk(child, depth + 1)
-        except Exception:
-            return
-
-    for root in roots:
-        walk(root, 0)
-
-    totals = Counter((row["role"], row["name"]) for row in rows)
-    occurrences: Counter[tuple[str, str]] = Counter()
-    for row in rows:
-        key = (row["role"], row["name"])
-        nth = occurrences[key]
-        occurrences[key] += 1
-        row["nth"] = nth
-        row["match_count"] = totals[key]
-        row["ref"] = _encode_ref(
-            display=deps.display,
-            role=row["role"],
-            name=row["name"],
-            nth=nth,
-            count=totals[key],
-            max_depth=max_depth,
-        )
-    return rows
-
-
-def _public_element(row: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "ref": row["ref"],
-        "role": row["role"],
-        "name": row["name"],
-        "text": row["text"],
-        "states": row["states"],
-    }
 
 
 # ---------------------------------------------------------------------------
@@ -456,25 +147,17 @@ _DISPLAY_PLATFORM = {
     ":2": "chatgpt", ":3": "claude", ":4": "gemini", ":5": "grok", ":6": "perplexity",
     ":21": "claude", ":22": "gemini", ":23": "grok", ":24": "perplexity",
 }
-_YAML_ROOT = os.path.join(TAEYS_HANDS, "consultation_v2", "platforms")
-_yaml_cache: dict[str, dict] = {}
 
 
 def _platform_config(display: str) -> dict:
+    from consultation_v2.runtime import ConsultationRuntime
+
     platform = _DISPLAY_PLATFORM.get(display)
     if not platform:
         raise UiDriveError(
             f"no platform mapping for display {display}; "
             f"known: {sorted(_DISPLAY_PLATFORM)}")
-    if platform not in _yaml_cache:
-        path = os.path.join(_YAML_ROOT, platform, f"{platform}.yaml")
-        try:
-            import yaml as _yaml
-            with open(path, "r", encoding="utf-8") as fh:
-                _yaml_cache[platform] = _yaml.safe_load(fh) or {}
-        except Exception as exc:
-            raise UiDriveError(f"cannot load platform YAML {path}: {exc}") from exc
-    return _yaml_cache[platform]
+    return ConsultationRuntime(platform).cfg
 
 
 def _attachment_name_matches(display_name: str, filename: str) -> bool:
@@ -506,7 +189,11 @@ def _attachment_name_matches(display_name: str, filename: str) -> bool:
 def _verify_attachment(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str, Any]:
     """Is FILE attached? Chip in the composer, roles push button/panel, and the
     file dialog closed — the engine's two-part verification, not a name guess."""
-    rows = _snapshot(deps, max_depth=getattr(args, "max_depth", None) or 20)
+    platform = _DISPLAY_PLATFORM.get(deps.display)
+    firefox = deps.routing.find_firefox_for_platform(platform) if platform else None
+    if firefox is None:
+        raise UiDriveError(f"Firefox not found for {platform or deps.display}")
+    rows = deps.tree.find_elements(firefox, fence_after=[])
     chips = [r for r in rows
              if r.get("role") in ("push button", "panel")
              and _attachment_name_matches(r.get("name") or r.get("text") or "", args.file)]
@@ -567,8 +254,6 @@ def _element_spec(display: str, key: str) -> dict:
             f"element {key!r} is not defined for {_DISPLAY_PLATFORM.get(display)} "
             f"in its platform YAML. Defined keys include: "
             f"{sorted(list(emap)[:24])}")
-    if not spec.get("name") or not spec.get("role"):
-        raise UiDriveError(f"element {key!r} lacks name/role in the platform YAML: {spec}")
     return spec
 
 
@@ -655,25 +340,20 @@ def _extract_response(args: argparse.Namespace, deps: SimpleNamespace) -> dict[s
 
 
 def _verify_element(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str, Any]:
-    """Did the previous step land? Resolve a YAML element key to its exact
-    {name, role} and report whether that control is on screen.
-
-    Exact match only — a substring hit on a control element is not evidence the
-    control is there. _snapshot collects only SHOWING nodes, so `present` means
-    present-and-on-screen and its absence means the control is not on screen.
-    """
+    """Report whether the exact platform-YAML element is on screen."""
+    platform = _DISPLAY_PLATFORM.get(deps.display)
+    firefox = deps.routing.find_firefox_for_platform(platform) if platform else None
+    if firefox is None:
+        raise UiDriveError(f"Firefox not found for {platform or deps.display}")
     spec = _element_spec(deps.display, args.element)
-    rows = _snapshot(deps, max_depth=getattr(args, "max_depth", None) or 20)
-    matches = [
-        row for row in rows
-        if row["role"] == spec["role"] and row["name"] == spec["name"]
-    ]
+    rows = deps.tree.find_elements(firefox, fence_after=[])
+    matches = [row for row in rows if deps.snapshot.matches_spec(row, spec)]
     expect = getattr(args, "expect", None) or "present"
     present = bool(matches)
     return {
         "element": args.element,
-        "name": spec["name"],
-        "role": spec["role"],
+        "name": spec.get("name"),
+        "role": spec.get("role"),
         "present": present,
         "count": len(matches),
         "states": sorted({str(state) for row in matches for state in (row.get("states") or [])}),
@@ -682,87 +362,27 @@ def _verify_element(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str
     }
 
 
-def _resolve_target(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str, Any]:
-    element_key = getattr(args, "element", None)
-    if element_key:
-        if args.ref:
-            raise UiDriveError("--element cannot be combined with --ref")
-        spec = _element_spec(deps.display, element_key)
-        args = argparse.Namespace(**{**vars(args),
-                                     "role": spec["role"], "name": spec["name"],
-                                     "nth": args.nth, "ref": None})
-    if args.ref:
-        if args.role is not None or args.name is not None or args.nth is not None:
-            raise UiDriveError("--ref cannot be combined with --role, --name, or --nth")
-        descriptor = _decode_ref(args.ref)
-        if descriptor["display"] != deps.display:
-            raise UiDriveError(
-                f"ref is scoped to display {descriptor['display']}, not {deps.display}"
-            )
-        role = descriptor["role"]
-        name = descriptor["name"]
-        nth = descriptor["nth"]
-        max_depth = descriptor["max_depth"]
-        expected_count = descriptor["count"]
-    else:
-        if args.role is None or args.name is None:
-            raise UiDriveError("target requires --ref or both --role and --name")
-        role = args.role
-        name = args.name
-        nth = args.nth
-        max_depth = args.max_depth
-        expected_count = None
-
-    rows = _snapshot(deps, max_depth=max_depth)
-    matches = [row for row in rows if row["role"] == role and row["name"] == name]
-    if expected_count is not None and len(matches) != expected_count:
-        raise UiDriveError(
-            f"ref tree shape changed: expected {expected_count} exact role/name matches, found {len(matches)}"
-        )
-    if nth is None:
-        if len(matches) != 1:
-            raise UiDriveError(
-                f"target descriptor matched {len(matches)} elements; expected exactly one or supply --nth"
-            )
-        return matches[0]
-    if nth < 0:
-        raise UiDriveError("--nth must be zero or greater")
-    if nth >= len(matches):
-        raise UiDriveError(
-            f"target descriptor matched {len(matches)} elements; occurrence {nth} does not exist"
-        )
-    return matches[nth]
-
-
 def _observe(args: argparse.Namespace, deps: SimpleNamespace) -> list[dict[str, Any]]:
-    rows = _snapshot(deps, max_depth=args.max_depth)
-    if args.filter:
-        needle = args.filter.casefold()
-        rows = [
-            row
-            for row in rows
-            if needle in row["role"].casefold()
-            or needle in row["name"].casefold()
-            or needle in row["text"].casefold()
-        ]
-    return [_public_element(row) for row in rows]
-
-
-def _full_text(node: Any) -> str:
-    """The element's COMPLETE text. _text() caps at 700 chars and returns ''
-    past that, which is fine for labels and useless for a composer holding a
-    prompt — a comparison against a truncated read would pass or fail for the
-    wrong reason."""
-    try:
-        iface = node.get_text_iface()
-        if not iface:
-            return ""
-        count = iface.get_character_count()
-        if count <= 0:
-            return ""
-        return iface.get_text(0, count) or ""
-    except Exception:
-        return ""
+    platform = _DISPLAY_PLATFORM.get(deps.display)
+    firefox = deps.routing.find_firefox_for_platform(platform) if platform else None
+    if firefox is None:
+        raise UiDriveError(f"Firefox not found for {platform or deps.display}")
+    rows = deps.tree.find_elements(firefox, fence_after=[])
+    element_map = ((_platform_config(deps.display).get("tree") or {}).get("element_map") or {})
+    return [
+        {
+            "element": next(
+                (key for key, spec in element_map.items()
+                 if deps.snapshot.matches_spec(row, spec)),
+                None,
+            ),
+            "name": row.get("name") or "",
+            "role": row.get("role") or "",
+            "text": row.get("text") or "",
+            "states": list(row.get("states") or []),
+        }
+        for row in rows
+    ]
 
 
 def _verify_composer(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str, Any]:
@@ -774,14 +394,22 @@ def _verify_composer(args: argparse.Namespace, deps: SimpleNamespace) -> dict[st
     the paste call returns ok either way. This is the check that makes the
     difference visible BEFORE send rather than after.
     """
+    platform = _DISPLAY_PLATFORM.get(deps.display)
+    firefox = deps.routing.find_firefox_for_platform(platform) if platform else None
+    if firefox is None:
+        raise UiDriveError(f"Firefox not found for {platform or deps.display}")
     spec = _element_spec(deps.display, args.element or "input")
-    rows = _snapshot(deps, max_depth=getattr(args, "max_depth", None) or 20)
-    matches = [r for r in rows
-               if r["role"] == spec["role"] and r["name"] == spec["name"]]
+    rows = deps.tree.find_elements(firefox, fence_after=[])
+    matches = [row for row in rows if deps.snapshot.matches_spec(row, spec)]
     if len(matches) != 1:
         raise UiDriveError(
-            f"composer {spec['name']!r} matched {len(matches)} elements; expected exactly one")
-    actual = _full_text(matches[0]["atspi_obj"]).strip()
+            f"composer element {args.element!r} matched {len(matches)} elements; expected exactly one")
+    try:
+        iface = matches[0]["atspi_obj"].get_text_iface()
+        count = int(iface.get_character_count()) if iface else 0
+        actual = (iface.get_text(0, count) if iface and count > 0 else "").strip()
+    except Exception as exc:
+        raise UiDriveError(f"composer text read failed: {exc}") from exc
     expected = Path(args.file).read_text(encoding="utf-8").strip()
     if actual == expected:
         return {"match": True, "chars": len(actual), "file": args.file}
@@ -798,57 +426,42 @@ def _verify_composer(args: argparse.Namespace, deps: SimpleNamespace) -> dict[st
     }
 
 
-def _element_centre(row: dict[str, Any], deps: SimpleNamespace) -> tuple[int, int] | None:
-    """Screen centre of an element, computed the way the engine does it
-    (consultation_v2/tree.py:204-209)."""
-    obj = row.get("atspi_obj")
-    if obj is None:
-        return None
-    try:
-        comp = obj.get_component_iface()
-        if not comp:
-            return None
-        rect = comp.get_extents(deps.Atspi.CoordType.SCREEN)
-    except Exception:
-        return None
-    if not rect or rect.x < 0 or rect.y < 0:
-        return None
-    return (
-        rect.x + (rect.width // 2 if rect.width else 0),
-        rect.y + (rect.height // 2 if rect.height else 0),
-    )
-
-
 def _element_action(
     action: str, args: argparse.Namespace, deps: SimpleNamespace
 ) -> dict[str, Any]:
-    row = _resolve_target(args, deps)
-    primitive = {
-        "click": deps.interact.atspi_click,
-        "focus": deps.interact.atspi_focus,
-        "activate": deps.interact.atspi_activate,
-    }[action]
-    if primitive(row):
-        return {"performed": True, "via": "atspi", "element": _public_element(row)}
-    if action != "click":
-        raise UiDriveError(f"{action} primitive returned false")
-    # atspi_click documents "No fallback — caller decides alternatives", so the
-    # second path belongs here. Many web controls expose no AT-SPI action at all
-    # and legitimately return false; the canonical seat then clicks the element's
-    # centre with the pointer (consultation_v2/seat_actions.py click(), described
-    # in SEAT_SELFCONTAIN_MAPPING.md as "the same 2-path strategy act.py uses").
-    # One path was never the whole click.
-    centre = _element_centre(row, deps)
-    if centre is None:
+    platform = _DISPLAY_PLATFORM.get(deps.display)
+    firefox = deps.routing.find_firefox_for_platform(platform) if platform else None
+    if firefox is None:
+        raise UiDriveError(f"Firefox not found for {platform or deps.display}")
+    spec = _element_spec(deps.display, args.element)
+    rows = deps.tree.find_elements(firefox, fence_after=[])
+    matches = [row for row in rows if deps.snapshot.matches_spec(row, spec)]
+    if len(matches) != 1:
         raise UiDriveError(
-            f"click: {row['name']!r} exposes no AT-SPI action and has no on-screen "
-            f"bounds to click")
-    if not deps.input.click_at(int(centre[0]), int(centre[1])):
-        raise UiDriveError(
-            f"click: {row['name']!r} exposes no AT-SPI action and the pointer click "
-            f"at {centre} failed")
-    return {"performed": True, "via": "pointer", "at": list(centre),
-            "element": _public_element(row)}
+            f"element {args.element!r} matched {len(matches)} elements; expected exactly one")
+    row = matches[0]
+    actions = deps.SeatActions(deps.display, deps.ConsultationRuntime(platform))
+    if action == "click":
+        performed = actions.click(str(row.get("name") or ""), row.get("role"))
+        via = "seat_actions"
+    elif action == "activate":
+        performed = actions.do(str(row.get("name") or ""), row.get("role"))
+        via = "seat_actions"
+    else:
+        performed = deps.interact.atspi_focus(row)
+        via = "atspi"
+    if not performed:
+        raise UiDriveError(f"{action} failed for element {args.element!r}")
+    return {
+        "performed": True,
+        "via": via,
+        "element": {
+            "key": args.element,
+            "name": row.get("name") or "",
+            "role": row.get("role") or "",
+            "states": list(row.get("states") or []),
+        },
+    }
 
 
 # GTK file-chooser titles Firefox uses, in the order worth trying.
@@ -982,13 +595,10 @@ def _key(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str, Any]:
 
 
 def _read_clipboard(deps: SimpleNamespace) -> dict[str, Any]:
-    lock = deps.clipboard.acquire_clipboard_lock()
-    try:
-        text = deps.clipboard.read()
-    finally:
-        deps.clipboard.release_clipboard_lock(lock)
-    if text is None:
-        raise UiDriveError("clipboard read returned no text")
+    platform = _DISPLAY_PLATFORM.get(deps.display)
+    if not platform:
+        raise UiDriveError(f"no platform is mapped for display {deps.display}")
+    text = deps.ConsultationRuntime(platform).read_clipboard()
     return {"text": text}
 
 
@@ -1013,12 +623,11 @@ def _add_display(parser: argparse.ArgumentParser) -> None:
 
 
 def _add_target(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--ref")
-    parser.add_argument("--role")
-    parser.add_argument("--name")
-    parser.add_argument("--nth", type=int)
-    parser.add_argument("--max-depth", type=int, default=40)
-    parser.add_argument("--element", help="platform-YAML element key (e.g. attach_trigger, composer_input, send_button) — resolved from that display's platform YAML")
+    parser.add_argument(
+        "--element",
+        required=True,
+        help="platform-YAML element key (e.g. attach_trigger, input, send_button)",
+    )
 
 
 
@@ -1028,8 +637,6 @@ def _parser() -> argparse.ArgumentParser:
 
     observe = commands.add_parser("observe")
     _add_display(observe)
-    observe.add_argument("--max-depth", type=int, default=12)
-    observe.add_argument("--filter")
 
     for action in ("click", "focus", "activate"):
         target = commands.add_parser(action)
@@ -1075,13 +682,11 @@ def _parser() -> argparse.ArgumentParser:
     _add_display(verify_composer)
     verify_composer.add_argument("--file", required=True, help="absolute path of the artifact the composer must hold, exactly")
     verify_composer.add_argument("--element", default="input", help="composer element key in the platform YAML (default: input)")
-    verify_composer.add_argument("--max-depth", type=int, default=20)
 
     verify_element = commands.add_parser("verify")
     _add_display(verify_element)
     verify_element.add_argument("--element", required=True, help="platform-YAML element key to check for on screen")
     verify_element.add_argument("--expect", choices=("present", "absent"), default="present")
-    verify_element.add_argument("--max-depth", type=int, default=20)
 
     read_clipboard = commands.add_parser("read-clipboard")
     _add_display(read_clipboard)

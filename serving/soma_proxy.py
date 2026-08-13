@@ -832,8 +832,9 @@ TOOLS = [
                 "again with action=observe to see the result before the next action — never "
                 "chain actions on an assumption. Displays: :2 chatgpt, :3 claude, :4 gemini, "
                 ":5 grok, :6 perplexity, :13 claude-cvp; and the second set :21 claude2, "
-                ":22 gemini2, :23 grok2, :24 perplexity2. observe returns elements each with a "
-                "ref; click/focus/activate take a ref from the most recent observe. To put text "
+                ":22 gemini2, :23 grok2, :24 perplexity2. observe returns each element's exact "
+                "platform-YAML key when mapped; click/focus/activate take that key as element. "
+                "Unmapped elements remain readable but are not targetable. To put text "
                 "in a composer: observe -> CLICK the composer (a click is what lets it take "
                 "keystrokes) -> paste (for long text) or type. key='Return' sends. read_clipboard "
                 "returns what a Copy control placed on the clipboard. "
@@ -867,17 +868,13 @@ TOOLS = [
                                  "scroll", "extract"],
                         "description": "the single action to perform",
                     },
-                    "ref": {"type": "string",
-                            "description": "element ref from a recent observe (for click/focus/activate)"},
                     "text": {"type": "string", "description": "text to type or paste (use for SHORT input; for a large packet use text_file instead so you don't regenerate every character)"},
                     "text_file": {"type": "string", "description": "absolute path to a file whose EXACT bytes are pasted (paste action only). Prefer this for any large/verbatim content — pass the path, not the content; the tool reads and pastes it. Instant and byte-perfect."},
                     "key": {"type": "string",
                             "description": "key to press, e.g. Return, ctrl+a, Delete"},
                     "url": {"type": "string", "description": "absolute http(s) URL for navigate"},
-                    "filter": {"type": "string",
-                               "description": "optional substring filter for observe"},
                     "element": {"type": "string",
-                                "description": "platform-YAML element key, e.g. 'new_chat', 'send_button', 'stop_button', 'input'. Works for click/focus/activate/verify and is the PREFERRED way to name a target — it resolves to that platform's exact name+role from its own YAML, so no observe is needed first."},
+                                "description": "platform-YAML element key, e.g. 'new_chat', 'send_button', 'stop_button', 'input'. Required for click/focus/activate/verify; resolved exactly through that platform's element_map."},
                     "sent_file": {"type": "string",
                                   "description": "for extract: absolute path of the artifact you SENT. The extraction is refused if the clipboard matches it, which is how a prompt echo is caught."},
                     "file": {"type": "string",
@@ -1378,12 +1375,7 @@ def _do_drive_chat(arguments: dict) -> str:
            "verify_attachment": "verify-attachment",
            "verify_composer": "verify-composer"}.get(action, action)
     cmd = [UI_DRIVE_PYTHON, UI_DRIVE_SCRIPT, sub, "--display", display]
-    if action == "observe":
-        if arguments.get("filter"):
-            cmd += ["--filter", str(arguments["filter"])]
-        if arguments.get("max_depth"):
-            cmd += ["--max-depth", str(int(arguments["max_depth"]))]
-    elif action == "extract":
+    if action == "extract":
         if arguments.get("sent_file"):
             cmd += ["--sent-file", str(arguments["sent_file"])]
     elif action == "verify_composer":
@@ -1411,24 +1403,12 @@ def _do_drive_chat(arguments: dict) -> str:
         if expect:
             cmd += ["--expect", str(expect)]
     elif action in ("click", "focus", "activate"):
-        # Two ways to name a target, and the YAML key is the preferred one.
-        # element=<key> resolves to that platform's exact {name, role} from its
-        # own YAML — no observe needed first. Requiring a ref meant every click
-        # had to be preceded by a full-tree observe just to obtain one, which is
-        # what drove both the 40k-char reads and the substring filtering. A key
-        # is stable across renders; a ref is not.
         element = arguments.get("element")
-        ref = arguments.get("ref")
-        if element and ref:
-            return _err(display, action, "pass element=<YAML key> or ref=<from observe>, not both")
         if element:
             cmd += ["--element", str(element)]
-        elif ref:
-            cmd += ["--ref", str(ref)]
         else:
             return _err(display, action,
-                        f"{action} requires element=<platform YAML key, e.g. 'new_chat'> "
-                        f"or ref=<from a recent observe>")
+                        f"{action} requires element=<platform YAML key, e.g. 'new_chat'>")
     elif action in ("type", "paste"):
         # Prefer text_file: the model passes a PATH and ui_drive pastes the exact
         # file bytes. A large packet as inline `text` forces the model to regenerate
