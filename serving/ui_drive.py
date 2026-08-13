@@ -666,6 +666,56 @@ def _observe(args: argparse.Namespace, deps: SimpleNamespace) -> list[dict[str, 
     return [_public_element(row) for row in rows]
 
 
+def _full_text(node: Any) -> str:
+    """The element's COMPLETE text. _text() caps at 700 chars and returns ''
+    past that, which is fine for labels and useless for a composer holding a
+    prompt — a comparison against a truncated read would pass or fail for the
+    wrong reason."""
+    try:
+        iface = node.get_text_iface()
+        if not iface:
+            return ""
+        count = iface.get_character_count()
+        if count <= 0:
+            return ""
+        return iface.get_text(0, count) or ""
+    except Exception:
+        return ""
+
+
+def _verify_composer(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str, Any]:
+    """Does the composer hold EXACTLY the artifact we intend to send?
+
+    Sending is the one action that leaves this machine, and until now nothing
+    compared what is about to be sent against what was supposed to be sent. A
+    substituted, partial, or failed paste all look identical from the outside:
+    the paste call returns ok either way. This is the check that makes the
+    difference visible BEFORE send rather than after.
+    """
+    spec = _element_spec(deps.display, args.element or "input")
+    rows = _snapshot(deps, max_depth=getattr(args, "max_depth", None) or 20)
+    matches = [r for r in rows
+               if r["role"] == spec["role"] and r["name"] == spec["name"]]
+    if len(matches) != 1:
+        raise UiDriveError(
+            f"composer {spec['name']!r} matched {len(matches)} elements; expected exactly one")
+    actual = _full_text(matches[0]["atspi_obj"]).strip()
+    expected = Path(args.file).read_text(encoding="utf-8").strip()
+    if actual == expected:
+        return {"match": True, "chars": len(actual), "file": args.file}
+    diverge = next((i for i in range(min(len(actual), len(expected)))
+                    if actual[i] != expected[i]), min(len(actual), len(expected)))
+    return {
+        "match": False,
+        "file": args.file,
+        "composer_chars": len(actual),
+        "file_chars": len(expected),
+        "first_divergence_at": diverge,
+        "composer_around_divergence": actual[max(0, diverge - 40):diverge + 80],
+        "file_around_divergence": expected[max(0, diverge - 40):diverge + 80],
+    }
+
+
 def _element_centre(row: dict[str, Any], deps: SimpleNamespace) -> tuple[int, int] | None:
     """Screen centre of an element, computed the way the engine does it
     (consultation_v2/tree.py:204-209)."""
@@ -931,6 +981,12 @@ def _parser() -> argparse.ArgumentParser:
     _add_display(verify)
     verify.add_argument("--file", required=True, help="absolute path of the file that should be attached")
 
+    verify_composer = commands.add_parser("verify-composer")
+    _add_display(verify_composer)
+    verify_composer.add_argument("--file", required=True, help="absolute path of the artifact the composer must hold, exactly")
+    verify_composer.add_argument("--element", default="input", help="composer element key in the platform YAML (default: input)")
+    verify_composer.add_argument("--max-depth", type=int, default=20)
+
     verify_element = commands.add_parser("verify")
     _add_display(verify_element)
     verify_element.add_argument("--element", required=True, help="platform-YAML element key to check for on screen")
@@ -1026,6 +1082,9 @@ def _dispatch(args: argparse.Namespace, deps: SimpleNamespace) -> Any:
     if args.action == "verify":
         _renew_if_owner(deps.display, LOCK_TTL_DEFAULT)  # a read, like observe — never guarded
         return _verify_element(args, deps)
+    if args.action == "verify-composer":
+        _renew_if_owner(deps.display, LOCK_TTL_DEFAULT)
+        return _verify_composer(args, deps)
     if args.action in _LOCK_ACTION_OPS:
         _guard_action(deps.display, LOCK_TTL_DEFAULT)
     if args.action in {"click", "focus", "activate"}:

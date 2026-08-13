@@ -863,7 +863,7 @@ TOOLS = [
                         "type": "string",
                         "enum": ["observe", "click", "type", "paste", "key",
                                  "read_clipboard", "navigate", "focus", "activate",
-                                 "focus_dialog", "verify", "verify_attachment"],
+                                 "focus_dialog", "verify", "verify_attachment", "verify_composer"],
                         "description": "the single action to perform",
                     },
                     "ref": {"type": "string",
@@ -1279,7 +1279,7 @@ _PASTE_INLINE_MAX_CHARS = int(os.environ.get("TAEY_PASTE_INLINE_MAX_CHARS", "800
 
 _DRIVE_ACTIONS = {
     "observe", "click", "focus", "activate", "type", "paste", "key",
-    "read_clipboard", "navigate", "focus_dialog", "verify", "verify_attachment",
+    "read_clipboard", "navigate", "focus_dialog", "verify", "verify_attachment", "verify_composer",
 }
 
 
@@ -1371,13 +1371,22 @@ def _do_drive_chat(arguments: dict) -> str:
 
     sub = {"read_clipboard": "read-clipboard",
            "focus_dialog": "focus-dialog",
-           "verify_attachment": "verify-attachment"}.get(action, action)
+           "verify_attachment": "verify-attachment",
+           "verify_composer": "verify-composer"}.get(action, action)
     cmd = [UI_DRIVE_PYTHON, UI_DRIVE_SCRIPT, sub, "--display", display]
     if action == "observe":
         if arguments.get("filter"):
             cmd += ["--filter", str(arguments["filter"])]
         if arguments.get("max_depth"):
             cmd += ["--max-depth", str(int(arguments["max_depth"]))]
+    elif action == "verify_composer":
+        f = arguments.get("file")
+        if not f:
+            return _err(display, action,
+                        "verify_composer requires file=<absolute path the composer must hold>")
+        cmd += ["--file", str(f)]
+        if arguments.get("element"):
+            cmd += ["--element", str(arguments["element"])]
     elif action == "verify_attachment":
         f = arguments.get("file")
         if not f:
