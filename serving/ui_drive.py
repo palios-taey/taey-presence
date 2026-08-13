@@ -520,6 +520,50 @@ def _type_text(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str, Any
     return {"typed_chars": len(args.text)}
 
 
+# GTK file-chooser titles Firefox uses, in the order worth trying.
+_FILE_DIALOG_TITLES = ("File Upload", "Open File", "Open", "Choose File", "Select File")
+
+
+def _focus_dialog(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str, Any]:
+    """Activate the GTK file-chooser at the X11 WINDOW level.
+
+    THE trap this exists for: keystrokes go to the ACTIVE X11 window. The file
+    chooser is a SEPARATE window from Firefox, so without activating it, ctrl+l
+    lands in Firefox's ADDRESS BAR instead of the dialog's location bar — which is
+    why attach never worked. AT-SPI focus is not enough; this must be a window
+    activation. Mirrors consultation_v2/runtime.py focus_file_dialog.
+    """
+    import subprocess
+    env = dict(os.environ)
+    env["DISPLAY"] = args.display
+
+    def _xdo(*a: str) -> str:
+        return subprocess.run(("xdotool",) + a, capture_output=True, text=True,
+                              env=env, timeout=10).stdout.strip()
+
+    wid = ""
+    matched = ""
+    for title in _FILE_DIALOG_TITLES:
+        out = _xdo("search", "--name", title)
+        if out:
+            wid = out.splitlines()[0].strip()
+            matched = title
+            break
+    if not wid:
+        raise UiDriveError(
+            "no GTK file dialog window found on this display "
+            f"(tried titles {list(_FILE_DIALOG_TITLES)}). Open the upload dialog first.")
+    _xdo("windowactivate", wid)
+    time.sleep(0.5)
+    active = _xdo("getactivewindow")
+    if active != wid:
+        raise UiDriveError(
+            f"file dialog {wid} did not take X11 focus (active={active!r}); "
+            "typing now would leak to Firefox — refusing")
+    return {"window_id": wid, "matched_title": matched,
+            "window_name": _xdo("getwindowname", wid), "focused": True}
+
+
 def _paste(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str, Any]:
     text = args.text
     source = "text"
@@ -616,6 +660,9 @@ def _parser() -> argparse.ArgumentParser:
     _add_display(key)
     key.add_argument("--key", required=True)
 
+    focus_dialog = commands.add_parser("focus-dialog")
+    _add_display(focus_dialog)
+
     read_clipboard = commands.add_parser("read-clipboard")
     _add_display(read_clipboard)
 
@@ -628,7 +675,7 @@ def _parser() -> argparse.ArgumentParser:
 
 # Action ops mutate the display and must HOLD the per-display lock; observe/read-clipboard are
 # reads that only RENEW the lease when we already own it — a non-owner read never locks or renews.
-_LOCK_ACTION_OPS = {"click", "focus", "activate", "type", "paste", "key", "navigate"}
+_LOCK_ACTION_OPS = {"click", "focus", "activate", "type", "paste", "key", "navigate", "focus-dialog"}
 
 
 def _renew_if_owner(display: str, ttl: int) -> bool:
@@ -714,6 +761,8 @@ def _dispatch(args: argparse.Namespace, deps: SimpleNamespace) -> Any:
         return _key(args, deps)
     if args.action == "navigate":
         return _navigate(args, deps)
+    if args.action == "focus-dialog":
+        return _focus_dialog(args, deps)
     raise UiDriveError(f"unsupported action: {args.action}")
 
 
