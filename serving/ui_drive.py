@@ -510,18 +510,50 @@ def _element_action(
     return {"performed": True, "element": _public_element(row)}
 
 
+# GTK file-chooser titles Firefox uses, in the order worth trying.
+_FILE_DIALOG_TITLES = ("File Upload", "Open File", "Open", "Choose File", "Select File")
+
+
 def _type_text(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str, Any]:
+    """Type into whatever currently holds focus. NEVER grabs focus itself.
+
+    This used to call input.focus_firefox() first, which runs `xdotool
+    windowactivate` on the Firefox window. That is destructive in two ways proven
+    live on 2026-08-13:
+      * It CLOSES AN OPEN MENU. The attach flow opens the tools menu and types a
+        type-ahead label; the focus grab dismissed the menu and the text went into
+        the PAGE instead — the window title became "Add photos — Mozilla Firefox".
+      * It STEALS FOCUS BACK FROM THE GTK FILE DIALOG, so a file path typed after
+        focus-dialog landed in Firefox. A 15-step attach ran rc=0 on every single
+        action and attached nothing.
+
+    The correct shape is simpler: the CALLER establishes focus deliberately — by
+    clicking the composer, focusing an element, or focus-dialog — and then types.
+    One action per call, focus included. A type that re-grabs focus is a second,
+    hidden action, which is exactly what the step-by-step discipline forbids.
+    """
     if not args.text:
         raise UiDriveError("type text must not be empty")
-    if not deps.input.focus_firefox():
-        raise UiDriveError("focus_firefox returned false")
     if not deps.input.type_text(args.text):
         raise UiDriveError("type_text returned false")
     return {"typed_chars": len(args.text)}
 
 
-# GTK file-chooser titles Firefox uses, in the order worth trying.
-_FILE_DIALOG_TITLES = ("File Upload", "Open File", "Open", "Choose File", "Select File")
+def _file_dialog_is_active(display: str) -> bool:
+    """True when the ACTIVE X11 window is a GTK file chooser. Read-only probe;
+    never raises — a focus question must not break the action."""
+    import subprocess
+    try:
+        env = dict(os.environ); env["DISPLAY"] = display
+        active = subprocess.run(("xdotool", "getactivewindow"), capture_output=True,
+                                text=True, env=env, timeout=5).stdout.strip()
+        if not active:
+            return False
+        name = subprocess.run(("xdotool", "getwindowname", active), capture_output=True,
+                              text=True, env=env, timeout=5).stdout.strip()
+        return any(title.lower() in name.lower() for title in _FILE_DIALOG_TITLES)
+    except Exception:
+        return False
 
 
 def _focus_dialog(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str, Any]:
@@ -582,12 +614,30 @@ def _paste(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str, Any]:
     return {"pasted_chars": len(text), "source": source}
 
 
+def _xdo_key(display: str, key: str) -> bool:
+    """Send a key with --clearmodifiers, to the ACTIVE window.
+
+    consultation_v2.input.press_key runs `xdotool key <k>` WITHOUT
+    --clearmodifiers. Any modifier still physically/logically held from a previous
+    action mangles the next combo — measured 2026-08-13: ctrl+l sent this way did
+    NOT open the GTK file chooser's location bar, so a typed path went into the
+    file-list type-ahead instead and Return dismissed the dialog with nothing
+    selected. The by-hand sequence that DID work used --clearmodifiers throughout.
+    We do not modify the shared primitive; ui_drive sends its own keys.
+    """
+    import subprocess
+    env = dict(os.environ); env["DISPLAY"] = display
+    r = subprocess.run(("xdotool", "key", "--clearmodifiers", key),
+                       capture_output=True, text=True, env=env, timeout=15)
+    return r.returncode == 0
+
+
 def _key(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str, Any]:
     if not args.key:
         raise UiDriveError("key must not be empty")
-    if not deps.input.press_key(args.key):
-        raise UiDriveError("press_key returned false")
-    return {"key": args.key}
+    if not _xdo_key(args.display, args.key):
+        raise UiDriveError(f"xdotool key --clearmodifiers {args.key} failed")
+    return {"key": args.key, "clearmodifiers": True}
 
 
 def _read_clipboard(deps: SimpleNamespace) -> dict[str, Any]:
