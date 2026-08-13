@@ -17,11 +17,23 @@ from typing import Any
 from urllib.parse import urlparse
 
 
-TAEYS_HANDS = "/home/mira/taeys-hands"
+# The AT-SPI primitives live in the PUBLIC palios-taey/taeys-hands repo
+# (consultation_v2/: platforms_runtime, primitives, atspi, clipboard, input, interact,
+# firefox_chrome.yaml — all tracked there). Point TAEYS_HANDS_ROOT at your clone; the
+# default is this operator's checkout. A downloaded Taey sets the env var and this works
+# unmodified — no private path is on this dependency chain.
+TAEYS_HANDS = os.environ.get("TAEYS_HANDS_ROOT", "/home/mira/taeys-hands")
 if TAEYS_HANDS not in sys.path:
     sys.path.insert(0, TAEYS_HANDS)
 
-from consultation_v2.platforms_runtime import display_environment
+try:
+    from consultation_v2.platforms_runtime import display_environment
+except ImportError as exc:  # fail LOUD and actionable, never a bare traceback
+    sys.stderr.write(
+        f"ui_drive: cannot import consultation_v2 from {TAEYS_HANDS!r}: {exc}\n"
+        "Set TAEYS_HANDS_ROOT to a clone of https://github.com/palios-taey/taeys-hands\n"
+    )
+    raise
 
 # --- per-display dispatch-lock ----------------------------------------------------------------
 # Reuse the taeys-hands lock primitives so drive_chat and the taeys-hands side share ONE key
