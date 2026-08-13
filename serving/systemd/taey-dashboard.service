@@ -21,6 +21,14 @@ Environment=TAEY_COUNCIL_WAVE_TIMEOUT=900
 # council's synthesis step ConnectError'd there on the FIRST round ever to
 # reach synthesis (2026-08-11 19:56, round dcm-20260811T192954Z).
 Environment=THOR_PROXY=http://127.0.0.1:8766
+# THOR_RAW is the DIRECT serve (bypassing the proxy) — site-specific, so it is
+# substituted at install time from fleet.env's TAEY_THOR_RAW_URL and never
+# committed as a literal. Unset, it fell back to CHAT_BASE (localhost:8000 —
+# dead on this host), so the dashboard's vLLM status light probed a dead port and
+# showed RED while the serve was healthy the whole time. Same defect class as
+# THOR_PROXY above. A status light that lies is worse than no light: it reports
+# an outage that is not happening.
+Environment=THOR_RAW=@TAEY_THOR_RAW_URL@
 ExecStart=/usr/bin/python3 @TAEY_HOME@/.local/bin/uvicorn dashboard.app:app --host 0.0.0.0 --port 5001
 StandardOutput=journal
 StandardError=journal
