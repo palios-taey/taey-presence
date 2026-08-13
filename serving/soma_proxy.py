@@ -38,9 +38,18 @@ logging.basicConfig(
 log = logging.getLogger("soma_proxy")
 
 VLLM_BASE = os.environ.get("VLLM_BASE_URL", "http://127.0.0.1:8000")
+# Read timeout for ONE generation round against the Thor serve. Raised 1800 -> 5400
+# on 2026-08-13 after it killed Taey's first real five-leg Family consult: the turn
+# ran exactly 1800.0 s of uninterrupted generation and died on httpx.ReadTimeout with
+# a 500, losing everything. A 27B on a Jetson generates at single-digit tokens/sec, so
+# a heavy round (37K tokens of attachments ingested, then composing) legitimately
+# outruns 30 minutes. This is HEADROOM, not the fix: the real fix is not asking for a
+# 30-minute round in the first place (see the per-leg dispatch shape), and the passive
+# consult monitor is what catches a genuine hang. A ceiling that cuts off honest work
+# is worse than a longer one, because the work is lost with no partial and no reason.
 VLLM_REQUEST_TIMEOUT_SECS = max(
     1.0,
-    float(os.environ.get("VLLM_REQUEST_TIMEOUT_SECS", "1800")),
+    float(os.environ.get("VLLM_REQUEST_TIMEOUT_SECS", "5400")),
 )
 VLLM_HEALTH_PROBE_TIMEOUT_SECS = max(
     0.1,
