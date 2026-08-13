@@ -863,7 +863,7 @@ TOOLS = [
                         "type": "string",
                         "enum": ["observe", "click", "type", "paste", "key",
                                  "read_clipboard", "navigate", "focus", "activate",
-                                 "focus_dialog"],
+                                 "focus_dialog", "verify"],
                         "description": "the single action to perform",
                     },
                     "ref": {"type": "string",
@@ -875,6 +875,10 @@ TOOLS = [
                     "url": {"type": "string", "description": "absolute http(s) URL for navigate"},
                     "filter": {"type": "string",
                                "description": "optional substring filter for observe"},
+                    "element": {"type": "string",
+                                "description": "platform-YAML element key for the verify action, e.g. 'send_button', 'stop_button', 'input'. Resolved to that platform's exact name+role from its YAML."},
+                    "expect": {"type": "string", "enum": ["present", "absent"],
+                               "description": "what verify should find. 'present' = the control is on screen (the step landed); 'absent' = it is gone (e.g. stop_button absent means generation finished)."},
                 },
             },
         },
@@ -1273,7 +1277,7 @@ _PASTE_INLINE_MAX_CHARS = int(os.environ.get("TAEY_PASTE_INLINE_MAX_CHARS", "800
 
 _DRIVE_ACTIONS = {
     "observe", "click", "focus", "activate", "type", "paste", "key",
-    "read_clipboard", "navigate", "focus_dialog",
+    "read_clipboard", "navigate", "focus_dialog", "verify",
 }
 
 
@@ -1371,6 +1375,16 @@ def _do_drive_chat(arguments: dict) -> str:
             cmd += ["--filter", str(arguments["filter"])]
         if arguments.get("max_depth"):
             cmd += ["--max-depth", str(int(arguments["max_depth"]))]
+    elif action == "verify":
+        element = arguments.get("element")
+        if not element:
+            return _err(display, action,
+                        "verify requires an element key from the platform YAML, "
+                        "e.g. element='send_button' or element='stop_button'")
+        cmd += ["--element", str(element)]
+        expect = arguments.get("expect")
+        if expect:
+            cmd += ["--expect", str(expect)]
     elif action in ("click", "focus", "activate"):
         ref = arguments.get("ref")
         if not ref:

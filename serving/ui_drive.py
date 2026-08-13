@@ -572,6 +572,34 @@ def _element_spec(display: str, key: str) -> dict:
     return spec
 
 
+def _verify_element(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str, Any]:
+    """Did the previous step land? Resolve a YAML element key to its exact
+    {name, role} and report whether that control is on screen.
+
+    Exact match only — a substring hit on a control element is not evidence the
+    control is there. _snapshot collects only SHOWING nodes, so `present` means
+    present-and-on-screen and its absence means the control is not on screen.
+    """
+    spec = _element_spec(deps.display, args.element)
+    rows = _snapshot(deps, max_depth=getattr(args, "max_depth", None) or 20)
+    matches = [
+        row for row in rows
+        if row["role"] == spec["role"] and row["name"] == spec["name"]
+    ]
+    expect = getattr(args, "expect", None) or "present"
+    present = bool(matches)
+    return {
+        "element": args.element,
+        "name": spec["name"],
+        "role": spec["role"],
+        "present": present,
+        "count": len(matches),
+        "states": sorted({str(state) for row in matches for state in (row.get("states") or [])}),
+        "expected": expect,
+        "satisfied": (not present) if expect == "absent" else present,
+    }
+
+
 def _resolve_target(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str, Any]:
     element_key = getattr(args, "element", None)
     if element_key:
@@ -864,6 +892,12 @@ def _parser() -> argparse.ArgumentParser:
     _add_display(verify)
     verify.add_argument("--file", required=True, help="absolute path of the file that should be attached")
 
+    verify_element = commands.add_parser("verify")
+    _add_display(verify_element)
+    verify_element.add_argument("--element", required=True, help="platform-YAML element key to check for on screen")
+    verify_element.add_argument("--expect", choices=("present", "absent"), default="present")
+    verify_element.add_argument("--max-depth", type=int, default=20)
+
     read_clipboard = commands.add_parser("read-clipboard")
     _add_display(read_clipboard)
 
@@ -950,6 +984,9 @@ def _dispatch(args: argparse.Namespace, deps: SimpleNamespace) -> Any:
     if args.action == "read-clipboard":
         _renew_if_owner(deps.display, LOCK_TTL_DEFAULT)
         return _read_clipboard(deps)
+    if args.action == "verify":
+        _renew_if_owner(deps.display, LOCK_TTL_DEFAULT)  # a read, like observe — never guarded
+        return _verify_element(args, deps)
     if args.action in _LOCK_ACTION_OPS:
         _guard_action(deps.display, LOCK_TTL_DEFAULT)
     if args.action in {"click", "focus", "activate"}:
