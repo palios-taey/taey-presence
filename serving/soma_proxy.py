@@ -863,7 +863,8 @@ TOOLS = [
                         "type": "string",
                         "enum": ["observe", "click", "type", "paste", "key",
                                  "read_clipboard", "navigate", "focus", "activate",
-                                 "focus_dialog", "verify", "verify_attachment", "verify_composer"],
+                                 "focus_dialog", "verify", "verify_attachment", "verify_composer",
+                                 "scroll", "extract"],
                         "description": "the single action to perform",
                     },
                     "ref": {"type": "string",
@@ -877,6 +878,8 @@ TOOLS = [
                                "description": "optional substring filter for observe"},
                     "element": {"type": "string",
                                 "description": "platform-YAML element key, e.g. 'new_chat', 'send_button', 'stop_button', 'input'. Works for click/focus/activate/verify and is the PREFERRED way to name a target — it resolves to that platform's exact name+role from its own YAML, so no observe is needed first."},
+                    "sent_file": {"type": "string",
+                                  "description": "for extract: absolute path of the artifact you SENT. The extraction is refused if the clipboard matches it, which is how a prompt echo is caught."},
                     "file": {"type": "string",
                              "description": "absolute path of the file that should be attached (verify_attachment action)"},
                     "expect": {"type": "string", "enum": ["present", "absent"],
@@ -1280,6 +1283,7 @@ _PASTE_INLINE_MAX_CHARS = int(os.environ.get("TAEY_PASTE_INLINE_MAX_CHARS", "800
 _DRIVE_ACTIONS = {
     "observe", "click", "focus", "activate", "type", "paste", "key",
     "read_clipboard", "navigate", "focus_dialog", "verify", "verify_attachment", "verify_composer",
+    "scroll", "extract",
 }
 
 
@@ -1379,6 +1383,9 @@ def _do_drive_chat(arguments: dict) -> str:
             cmd += ["--filter", str(arguments["filter"])]
         if arguments.get("max_depth"):
             cmd += ["--max-depth", str(int(arguments["max_depth"]))]
+    elif action == "extract":
+        if arguments.get("sent_file"):
+            cmd += ["--sent-file", str(arguments["sent_file"])]
     elif action == "verify_composer":
         f = arguments.get("file")
         if not f:

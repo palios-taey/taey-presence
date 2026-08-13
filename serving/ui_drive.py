@@ -572,6 +572,88 @@ def _element_spec(display: str, key: str) -> dict:
     return spec
 
 
+def _scroll_document(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str, Any]:
+    """Scroll the conversation DOCUMENT to the bottom via the mapped primitive.
+
+    Clicking a "Scroll to bottom" control is not the same thing and is not
+    enough — the response's Copy button only enters the AT-SPI tree once it is
+    actually on-screen.
+    """
+    from consultation_v2 import drive_chat_adapter
+
+    platform = _DISPLAY_PLATFORM.get(deps.display)
+    if not platform:
+        raise UiDriveError(f"no platform is mapped for display {deps.display}")
+    return drive_chat_adapter.scroll(platform)
+
+
+def _extract_response(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str, Any]:
+    """Copy the latest answer out through the platform's MAPPED extraction control.
+
+    The read is consultation_v2's, not ours. drive_chat_adapter.extract scrolls
+    the document, rescans at FULL depth (no cap) and resolves the platform's own
+    workflow.extract.primary_key, taking the lowest match — the newest turn.
+    ui_drive's own snapshot capped depth and pruned that control, which is the
+    whole reason extraction never worked from this side: on a real Claude answer
+    a depth-30 read saw 136 rows and zero Copy controls where the full-depth scan
+    saw 3687 and found it.
+
+    The tail mirrors platforms/claude/driver.py extract_primary: blank the
+    clipboard first so a copy that never fires is detectable rather than
+    returning stale text, scroll the control into view, click, settle, read.
+    """
+    from consultation_v2 import drive_chat_adapter
+    from consultation_v2.interact import atspi_click
+    from consultation_v2.runtime import ConsultationRuntime
+    from consultation_v2.types import ElementRef
+
+    platform = _DISPLAY_PLATFORM.get(deps.display)
+    if not platform:
+        raise UiDriveError(f"no platform is mapped for display {deps.display}")
+
+    target = drive_chat_adapter.extract(platform)
+    runtime = ConsultationRuntime(platform)
+
+    runtime.write_clipboard("")
+    time.sleep(0.3)
+    runtime.scroll_element_into_view(ElementRef(
+        key=None,
+        name=str(target.get("name") or ""),
+        role=str(target.get("role") or ""),
+        x=target.get("x"),
+        y=target.get("y"),
+        states=list(target.get("states") or []),
+        atspi_obj=target.get("atspi_obj"),
+    ))
+    time.sleep(0.3)
+    if not atspi_click(target):
+        raise UiDriveError(
+            f"{platform}: the mapped extraction control was found but the click returned false")
+    time.sleep(2.5)
+    text = (runtime.read_clipboard() or "").strip()
+    if not text:
+        raise UiDriveError(
+            f"{platform}: clipboard is empty after the copy — the control was clicked but the "
+            f"copy did not fire. This is a real failure, not an empty answer.")
+
+    # An echo of what we sent reads exactly like a successful extraction.
+    sent_path = getattr(args, "sent_file", None)
+    if sent_path:
+        sent = Path(sent_path).read_text(encoding="utf-8").strip()
+        if text == sent or (len(sent) > 200 and text.startswith(sent[:200])):
+            raise UiDriveError(
+                f"{platform}: the clipboard holds the text we SENT, not the answer — prompt echo. "
+                f"{len(text)} chars matching {sent_path}")
+
+    return {
+        "platform": platform,
+        "element_key": target.get("element_key"),
+        "match_count": target.get("match_count"),
+        "chars": len(text),
+        "text": text,
+    }
+
+
 def _verify_element(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str, Any]:
     """Did the previous step land? Resolve a YAML element key to its exact
     {name, role} and report whether that control is on screen.
@@ -981,6 +1063,14 @@ def _parser() -> argparse.ArgumentParser:
     _add_display(verify)
     verify.add_argument("--file", required=True, help="absolute path of the file that should be attached")
 
+    scroll_p = commands.add_parser("scroll")
+    _add_display(scroll_p)
+
+    extract_p = commands.add_parser("extract")
+    _add_display(extract_p)
+    extract_p.add_argument("--sent-file", dest="sent_file",
+                           help="path of the artifact that was SENT; the extraction is refused if the clipboard matches it (prompt echo)")
+
     verify_composer = commands.add_parser("verify-composer")
     _add_display(verify_composer)
     verify_composer.add_argument("--file", required=True, help="absolute path of the artifact the composer must hold, exactly")
@@ -1085,6 +1175,12 @@ def _dispatch(args: argparse.Namespace, deps: SimpleNamespace) -> Any:
     if args.action == "verify-composer":
         _renew_if_owner(deps.display, LOCK_TTL_DEFAULT)
         return _verify_composer(args, deps)
+    if args.action == "extract":
+        _guard_action(deps.display, LOCK_TTL_DEFAULT)   # clicks a control: a real action
+        return _extract_response(args, deps)
+    if args.action == "scroll":
+        _guard_action(deps.display, LOCK_TTL_DEFAULT)
+        return _scroll_document(args, deps)
     if args.action in _LOCK_ACTION_OPS:
         _guard_action(deps.display, LOCK_TTL_DEFAULT)
     if args.action in {"click", "focus", "activate"}:
