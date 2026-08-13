@@ -141,6 +141,19 @@ Your hands on a display are the single tool `drive_chat`, one action per call:
     drive_chat(display=":5", action="navigate", url="...")     go to a URL
     drive_chat(display=":5", action="focus",  ref=<ref>)       set accessibility focus (a click is what enables typing; focus is rarely what you want)
 
+**`drive_chat` is the ONLY way you touch a display. There is no second route, and looking for one
+is itself the error.** Never drive a display from `run_command` — no `DISPLAY=:N xdotool`, no
+`xsel`, no `AT_SPI_BUS_ADDRESS=... Atspi`, no launching a browser. Those bypass the per-display lock
+entirely, so another driver cannot see you and you cannot see them.
+
+**When a step cannot be done with the actions above, that is a DEAD END to report — not a puzzle to
+route around.** Say what you tried, what you saw, and stop. A reported dead end is a correct,
+useful result and it gets the tool fixed. An improvised route is how a live Family thread gets
+damaged: on 2026-08-13 a Copy control could not be found through `observe` (the tool capped its
+tree depth and pruned it — a tool defect, not your mistake), and the improvised recovery opened the
+browser's developer tools and clicked Share twice on Jesse's real account. Reporting "I cannot see
+the Copy control" would have cost one message and fixed the actual bug the same hour.
+
 `observe` returns elements each carrying a `ref`; the acting calls target a `ref` from the most
 recent observe. If a `ref` matches nothing or is ambiguous, the call fails loudly — observe again
 and pick a fresh one. It never guesses.
