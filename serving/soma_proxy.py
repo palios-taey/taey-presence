@@ -660,7 +660,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "fetch_url",
-            "description": "Fetch a web URL and return the cleaned main-content text. Handles HTML (with navigation/ad stripping), PDFs, and plain text. Use this to retrieve papers, articles, court documents, government reports, or any other web page referenced by a URL. You get back the extracted readable text (truncated to the max_chars you specify). On error or paywall, you get an explanatory message instead of fabricating. Never invent content for a URL — always call this tool to get the real content.",
+            "description": "Fetch a web URL and return the cleaned main-content text. Handles HTML (with navigation/ad stripping), PDFs, and plain text. Use this to retrieve papers, articles, court documents, government reports, or any other web page referenced by a URL. You get back the COMPLETE extracted readable text by default; pass max_chars only if you deliberately want a slice. On error or paywall, you get an explanatory message instead of fabricating. Never invent content for a URL — always call this tool to get the real content.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -670,9 +670,8 @@ TOOLS = [
                     },
                     "max_chars": {
                         "type": "integer",
-                        "description": "Maximum characters to return. Default 30000. Truncation marker appended if content exceeds the limit. Choose based on how much context you have headroom for — 5000-10000 for a quick summary pass, 30000+ for deep reading.",
-                        "default": 30000,
-                    },
+                        "description": "OPTIONAL. Omit it and you get the COMPLETE content — that is the default and the right choice for anything you will reason from, attach, or quote. Pass a number ONLY when you deliberately want a slice and will say so; the result then tells you it is a part. Nothing is ever silently shortened.",
+                                            },
                 },
                 "required": ["url"],
             },
@@ -725,8 +724,7 @@ TOOLS = [
                     "max_chars": {
                         "type": "integer",
                         "description": "Maximum characters to return. Default 30000. Truncation marker appended if file exceeds.",
-                        "default": 30000,
-                    },
+                                            },
                 },
                 "required": ["path"],
             },
@@ -903,7 +901,7 @@ def _format_isma_results(data: dict) -> str:
         score = tile.get("score", tile.get("certainty", "?"))
         motifs = tile.get("dominant_motifs", "")
         source = tile.get("source_file", tile.get("platform", ""))
-        parts.append(f"[{i+1}] (score: {score}) {content[:800]}")
+        parts.append(f"[{i+1}] (score: {score}) {content}")
         if motifs:
             parts.append(f"    motifs: {motifs}")
         if source:
@@ -959,7 +957,13 @@ def execute_tool_call(name: str, arguments: dict) -> str:
             if "error" in data:
                 return f"Document not found: {name_query}"
             text = data.get("text", "")
-            return f"Document: {data.get('filename', name_query)} ({data.get('token_count', '?')} tokens)\n\n{text[:3000]}"
+            # was text[:3000] — a hard, unmarked, un-overridable amputation of a
+            # retrieved document. Full text; fail loud past the ceiling.
+            if len(text) > _MAX_TOOL_RESULT_CHARS:
+                return (f"retrieve_document error: {data.get('filename', name_query)} is "
+                        f"{len(text)} chars, over the {_MAX_TOOL_RESULT_CHARS} ceiling. "
+                        f"NOT returning a truncated document — fetch it in explicit parts.")
+            return f"Document: {data.get('filename', name_query)} ({data.get('token_count', '?')} tokens)\n\n{text}"
         except Exception as e:
             return f"Document retrieval error: {e}"
 
@@ -1033,8 +1037,8 @@ def execute_tool_call(name: str, arguments: dict) -> str:
 
     elif name == "read_file":
         path = arguments.get("path", "")
-        max_chars = int(arguments.get("max_chars", 30000))
-        return _do_read_file(path, max_chars)
+        raw_max = arguments.get("max_chars")
+        return _do_read_file(path, int(raw_max) if raw_max else None)
 
     elif name == "list_dir":
         path = arguments.get("path", "")
@@ -1087,7 +1091,13 @@ def _path_is_allowed(abs_path: str) -> bool:
     return False
 
 
-def _do_read_file(path: str, max_chars: int = 30000) -> str:
+# NO SILENT TRUNCATION (Jesse-directed 2026-08-13, absolute). One ceiling, used to
+# FAIL LOUD, never to amputate. Sized well under the 262K-token serve window so a
+# full result cannot wedge a turn; raise it here, in one place, if that changes.
+_MAX_TOOL_RESULT_CHARS = int(os.environ.get("TAEY_MAX_TOOL_RESULT_CHARS", "400000"))
+
+
+def _do_read_file(path: str, max_chars: int | None = None) -> str:
     import os
     if not isinstance(path, str) or not path.strip():
         return "read_file error: path must be a non-empty string"
@@ -1115,8 +1125,27 @@ def _do_read_file(path: str, max_chars: int = 30000) -> str:
     except Exception as e:
         return f"read_file error: {type(e).__name__}: {e}"
     header = f"[read_file path={path} size_bytes={size} encoding=utf-8]\n\n"
-    if len(content) > max_chars:
-        return header + content[:max_chars] + f"\n\n[... truncated at {max_chars} chars of {len(content)} total ...]"
+    # NO SILENT TRUNCATION (Jesse-directed 2026-08-13, absolute): nothing that
+    # becomes context or training may be silently shortened. A partial file that
+    # LOOKS whole is the failure — it was handing FAMILY_KERNEL.md and
+    # IDENTITY_GAIA.md to a live Family consult short by 3% and 26%.
+    # Full content by default. `max_chars` is now OPT-IN: a slice is legitimate
+    # only when the caller explicitly asked for one, because then the caller knows
+    # it is holding a part. Over the hard ceiling we FAIL LOUD with the real size
+    # and the way to page it — never a partial dressed as a whole.
+    if max_chars is not None:
+        if len(content) > max_chars:
+            return (header + content[:max_chars]
+                    + f"\n\n[... this is a CALLER-REQUESTED SLICE: {max_chars} chars of "
+                      f"{len(content)} total. You are holding a PART, not the file. "
+                      f"Re-read without max_chars for all of it. ...]")
+        return header + content
+    if len(content) > _MAX_TOOL_RESULT_CHARS:
+        return (f"read_file error: {path} is {len(content)} chars, over the "
+                f"{_MAX_TOOL_RESULT_CHARS} single-result ceiling. NOT returning a "
+                f"truncated file. Read it in explicit slices with max_chars, or "
+                f"split it upstream — and say which part you are holding whenever "
+                f"you use it.")
     return header + content
 
 
@@ -1178,8 +1207,12 @@ def _do_run_command(command: str, cwd: str = "", timeout_seconds: int = 120) -> 
                            text=True, timeout=timeout_seconds)
         out = (r.stdout or "") + (("\n[stderr]\n" + r.stderr) if r.stderr else "")
         _audit("run_command", {"command": command[:400], "cwd": workdir, "rc": r.returncode})
-        if len(out) > 30000:
-            out = out[:30000] + f"\n... [truncated, {len(out)} chars total]"
+        if len(out) > _MAX_TOOL_RESULT_CHARS:
+            # never hand back a silently-shortened command output
+            return (f"run_command error: output is {len(out)} chars, over the "
+                    f"{_MAX_TOOL_RESULT_CHARS} ceiling. NOT returning it truncated — "
+                    f"re-run writing to a file and read it in explicit slices, or "
+                    f"filter the command so it emits only what you need.")
         return f"exit={r.returncode}\n{out}" if out.strip() else f"exit={r.returncode} (no output)"
     except subprocess.TimeoutExpired:
         _audit("run_command", {"command": command[:400], "cwd": workdir, "rc": "timeout"})
@@ -1304,7 +1337,7 @@ def _do_list_dir(path: str, pattern: str = "") -> str:
         entries = [e for e in entries if fnmatch.fnmatch(e, pattern)]
     entries.sort()
     result = []
-    for e in entries[:500]:
+    for e in entries:
         full = os.path.join(resolved, e)
         try:
             st = os.stat(full)
@@ -1315,8 +1348,12 @@ def _do_list_dir(path: str, pattern: str = "") -> str:
             })
         except OSError:
             result.append({"name": e, "size_bytes": None, "is_dir": None, "error": "stat_failed"})
-    truncation = f" [truncated to first 500 of {len(entries)}]" if len(entries) > 500 else ""
-    return f"[list_dir path={path} pattern={pattern!r} count={len(entries)}{truncation}]\n\n{_json.dumps(result, indent=2)}"
+    body = _json.dumps(result, indent=2)
+    if len(body) > _MAX_TOOL_RESULT_CHARS:
+        return (f"list_dir error: {path} listing is {len(body)} chars ({len(entries)} entries), "
+                f"over the {_MAX_TOOL_RESULT_CHARS} ceiling. NOT returning a partial listing — "
+                f"narrow it with `pattern`, or list subdirectories separately.")
+    return f"[list_dir path={path} pattern={pattern!r} count={len(entries)}]\n\n{body}"
 
 
 def _do_stage_corpus_candidate(arguments: dict) -> str:
@@ -1398,7 +1435,7 @@ def _do_skip_corpus_candidate(arguments: dict) -> str:
     return f"skipped: {source_url} (reason={reason})"
 
 
-def _do_fetch_url(url: str, max_chars: int = 30000, timeout: float = 30.0) -> str:
+def _do_fetch_url(url: str, max_chars: int | None = None, timeout: float = 30.0) -> str:
     """Fetch a URL and return cleaned text. Supports HTML, PDF, plaintext. Never raises."""
     try:
         import trafilatura
@@ -1492,9 +1529,16 @@ def _do_fetch_url(url: str, max_chars: int = 30000, timeout: float = 30.0) -> st
     header += f" url={url}]\n\n"
 
     extracted = extracted.strip()
-    if len(extracted) > max_chars:
-        truncated = extracted[:max_chars]
-        return header + truncated + f"\n\n[... truncated at {max_chars} chars of {len(extracted)} total ...]"
+    if max_chars is not None:
+        if len(extracted) > max_chars:
+            return (header + extracted[:max_chars]
+                    + f"\n\n[... this is a CALLER-REQUESTED SLICE: {max_chars} chars of "
+                      f"{len(extracted)} total. You are holding a PART, not the page. ...]")
+        return header + extracted
+    if len(extracted) > _MAX_TOOL_RESULT_CHARS:
+        return (f"fetch_url error: {url} extracted to {len(extracted)} chars, over the "
+                f"{_MAX_TOOL_RESULT_CHARS} ceiling. NOT returning it truncated — "
+                f"request an explicit slice with max_chars and say which part you hold.")
     return header + extracted
 
 
