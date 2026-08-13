@@ -1277,6 +1277,75 @@ _DRIVE_ACTIONS = {
 }
 
 
+# ---------------------------------------------------------------------------
+# CONSULT MONITOR REGISTRATION (infra half of the contract with taeys-hands'
+# consult_monitor.py reader, which SCANs taey:*:active_session_ids).
+#
+# Why this exists: a consult outlives the turn that started it. Deep modes run
+# 10+ minutes and a worker's turn can end mid-flight, leaving a lane nobody
+# knows about. The reader can only see what we register. It is PASSIVE — it
+# notifies and records, it NEVER recovers or drives (that would be the banned
+# autonomous class).
+#
+# Contract: register at consult START, write last_seen on EVERY drive action
+# (age-since-start would false-flag a legitimately long consult; time-since-
+# last-action is the only non-false-flagging stall signal), deregister on
+# deliver. TTL backstop so a crashed driver cannot leak a record forever.
+# ---------------------------------------------------------------------------
+_MONITOR_TTL_SECS = int(os.environ.get("TAEY_CONSULT_MONITOR_TTL", "10800"))
+_DISPLAY_PLATFORM = {":2": "chatgpt", ":3": "claude", ":4": "gemini", ":5": "grok",
+                     ":6": "perplexity", ":13": "claude-cvp", ":21": "claude2",
+                     ":22": "gemini2", ":23": "grok2", ":24": "perplexity2"}
+
+
+def _monitor_node() -> str:
+    return os.environ.get("TAEY_SESSION_NAME") or os.environ.get("SEAT_ID") or "taey"
+
+
+def _monitor_touch(display: str, action: str) -> None:
+    """Register-on-first-action, then write last_seen on every action.
+
+    Registration is AUTOMATIC rather than a step the driver must remember: a
+    monitor you can forget to start is a monitor that is not there the one time
+    it mattered. The record self-expires (TTL) so a crashed driver cannot leak
+    it, and the reader's stall signal is time-since-last_seen. Never raises: a
+    monitoring write must not break the action it is observing."""
+    try:
+        client = _mira_redis or _redis
+        if client is None:
+            return
+        node = _monitor_node()
+        setkey = f"taey:{node}:active_session_ids"
+        now = time.time()
+        found = False
+        for session_key in list(client.smembers(setkey) or []):
+            raw = client.get(session_key)
+            if not raw:
+                client.srem(setkey, session_key)
+                continue
+            rec = json.loads(raw)
+            if str(rec.get("display") or "") != display:
+                continue
+            rec["last_seen"] = now
+            rec["last_action"] = action
+            client.set(session_key, json.dumps(rec), ex=_MONITOR_TTL_SECS)
+            found = True
+        if not found:
+            monitor_id = f"{node}-{display.lstrip(':')}-{int(now)}"
+            session_key = f"taey:{node}:active_session:{monitor_id}"
+            client.set(session_key, json.dumps({
+                "monitor_id": monitor_id, "display": display,
+                "platform": _DISPLAY_PLATFORM.get(display, "unknown"),
+                "requester": node, "mode": "supervised_step",
+                "timeout": _MONITOR_TTL_SECS,
+                "started_ts": now, "last_seen": now, "last_action": action,
+            }), ex=_MONITOR_TTL_SECS)
+            client.sadd(setkey, session_key)
+            log.info("consult monitor registered %s display=%s", monitor_id, display)
+    except Exception as exc:  # observation must never break execution
+        log.debug("monitor touch skipped: %s", exc)
+
+
 def _do_drive_chat(arguments: dict) -> str:
     import subprocess, json as _json
 
@@ -1355,6 +1424,7 @@ def _do_drive_chat(arguments: dict) -> str:
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
         _audit("drive_chat", {"display": display, "action": action, "rc": r.returncode})
+        _monitor_touch(display, action)  # stall signal = time since last action
         out = (r.stdout or "").strip()
         if out:
             return out  # ui_drive.py emits exactly one JSON object
