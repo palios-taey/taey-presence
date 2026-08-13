@@ -666,6 +666,27 @@ def _observe(args: argparse.Namespace, deps: SimpleNamespace) -> list[dict[str, 
     return [_public_element(row) for row in rows]
 
 
+def _element_centre(row: dict[str, Any], deps: SimpleNamespace) -> tuple[int, int] | None:
+    """Screen centre of an element, computed the way the engine does it
+    (consultation_v2/tree.py:204-209)."""
+    obj = row.get("atspi_obj")
+    if obj is None:
+        return None
+    try:
+        comp = obj.get_component_iface()
+        if not comp:
+            return None
+        rect = comp.get_extents(deps.Atspi.CoordType.SCREEN)
+    except Exception:
+        return None
+    if not rect or rect.x < 0 or rect.y < 0:
+        return None
+    return (
+        rect.x + (rect.width // 2 if rect.width else 0),
+        rect.y + (rect.height // 2 if rect.height else 0),
+    )
+
+
 def _element_action(
     action: str, args: argparse.Namespace, deps: SimpleNamespace
 ) -> dict[str, Any]:
@@ -675,9 +696,27 @@ def _element_action(
         "focus": deps.interact.atspi_focus,
         "activate": deps.interact.atspi_activate,
     }[action]
-    if not primitive(row):
+    if primitive(row):
+        return {"performed": True, "via": "atspi", "element": _public_element(row)}
+    if action != "click":
         raise UiDriveError(f"{action} primitive returned false")
-    return {"performed": True, "element": _public_element(row)}
+    # atspi_click documents "No fallback — caller decides alternatives", so the
+    # second path belongs here. Many web controls expose no AT-SPI action at all
+    # and legitimately return false; the canonical seat then clicks the element's
+    # centre with the pointer (consultation_v2/seat_actions.py click(), described
+    # in SEAT_SELFCONTAIN_MAPPING.md as "the same 2-path strategy act.py uses").
+    # One path was never the whole click.
+    centre = _element_centre(row, deps)
+    if centre is None:
+        raise UiDriveError(
+            f"click: {row['name']!r} exposes no AT-SPI action and has no on-screen "
+            f"bounds to click")
+    if not deps.input.click_at(int(centre[0]), int(centre[1])):
+        raise UiDriveError(
+            f"click: {row['name']!r} exposes no AT-SPI action and the pointer click "
+            f"at {centre} failed")
+    return {"performed": True, "via": "pointer", "at": list(centre),
+            "element": _public_element(row)}
 
 
 # GTK file-chooser titles Firefox uses, in the order worth trying.
