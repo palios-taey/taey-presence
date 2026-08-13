@@ -863,7 +863,7 @@ TOOLS = [
                         "type": "string",
                         "enum": ["observe", "click", "type", "paste", "key",
                                  "read_clipboard", "navigate", "focus", "activate",
-                                 "focus_dialog", "verify"],
+                                 "focus_dialog", "verify", "verify_attachment"],
                         "description": "the single action to perform",
                     },
                     "ref": {"type": "string",
@@ -877,6 +877,8 @@ TOOLS = [
                                "description": "optional substring filter for observe"},
                     "element": {"type": "string",
                                 "description": "platform-YAML element key, e.g. 'new_chat', 'send_button', 'stop_button', 'input'. Works for click/focus/activate/verify and is the PREFERRED way to name a target — it resolves to that platform's exact name+role from its own YAML, so no observe is needed first."},
+                    "file": {"type": "string",
+                             "description": "absolute path of the file that should be attached (verify_attachment action)"},
                     "expect": {"type": "string", "enum": ["present", "absent"],
                                "description": "what verify should find. 'present' = the control is on screen (the step landed); 'absent' = it is gone (e.g. stop_button absent means generation finished)."},
                 },
@@ -1277,7 +1279,7 @@ _PASTE_INLINE_MAX_CHARS = int(os.environ.get("TAEY_PASTE_INLINE_MAX_CHARS", "800
 
 _DRIVE_ACTIONS = {
     "observe", "click", "focus", "activate", "type", "paste", "key",
-    "read_clipboard", "navigate", "focus_dialog", "verify",
+    "read_clipboard", "navigate", "focus_dialog", "verify", "verify_attachment",
 }
 
 
@@ -1368,13 +1370,20 @@ def _do_drive_chat(arguments: dict) -> str:
                     f"unknown action {action!r}; valid: {sorted(_DRIVE_ACTIONS)}")
 
     sub = {"read_clipboard": "read-clipboard",
-           "focus_dialog": "focus-dialog"}.get(action, action)
+           "focus_dialog": "focus-dialog",
+           "verify_attachment": "verify-attachment"}.get(action, action)
     cmd = [UI_DRIVE_PYTHON, UI_DRIVE_SCRIPT, sub, "--display", display]
     if action == "observe":
         if arguments.get("filter"):
             cmd += ["--filter", str(arguments["filter"])]
         if arguments.get("max_depth"):
             cmd += ["--max-depth", str(int(arguments["max_depth"]))]
+    elif action == "verify_attachment":
+        f = arguments.get("file")
+        if not f:
+            return _err(display, action,
+                        "verify_attachment requires file=<absolute path that should be attached>")
+        cmd += ["--file", str(f)]
     elif action == "verify":
         element = arguments.get("element")
         if not element:
