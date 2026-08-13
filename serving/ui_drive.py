@@ -507,6 +507,36 @@ def _element_action(
     }[action]
     if not primitive(row):
         raise UiDriveError(f"{action} primitive returned false")
+    if action == "focus":
+        # VERIFY THE FOCUS ACTUALLY LANDED. atspi_focus returning true only means
+        # the grab_focus call was accepted, NOT that the element now holds keyboard
+        # focus — the two are different properties and the grab is racy in a web
+        # document. Proven consequence (2026-08-13): 'focus the attach button' came
+        # back performed:true while the COMPOSER still held focus, so the next
+        # `key space` typed a SPACE INTO THE COMPOSER, the menu never opened, and
+        # the whole attach ran to completion with every rc=0 and no file attached.
+        # A success flag not wired to the thing tested is the failure this catches.
+        time.sleep(0.35)
+        focused = False
+        try:
+            descriptor = _decode_ref(args.ref) if args.ref else None
+            depth = descriptor["max_depth"] if descriptor else args.max_depth
+            for candidate in _snapshot(deps, max_depth=depth):
+                if (candidate.get("role") == row.get("role")
+                        and candidate.get("name") == row.get("name")):
+                    if "focused" in (candidate.get("states") or []):
+                        focused = True
+                        break
+        except Exception as exc:
+            raise UiDriveError(
+                f"focus verification could not re-read the tree: {exc}") from exc
+        if not focused:
+            raise UiDriveError(
+                "focus did NOT land: the element does not report state 'focused' "
+                "after grab_focus. Keystrokes would go to whatever holds focus "
+                "instead — refusing to report success. Re-observe and retry.")
+        return {"performed": True, "focus_verified": True,
+                "element": _public_element(row)}
     return {"performed": True, "element": _public_element(row)}
 
 
