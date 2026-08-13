@@ -521,11 +521,21 @@ def _type_text(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str, Any
 
 
 def _paste(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str, Any]:
-    if not args.text:
-        raise UiDriveError("paste text must not be empty")
-    if not deps.input.clipboard_paste(args.text):
+    text = args.text
+    source = "text"
+    text_file = getattr(args, "text_file", None)
+    if text_file:
+        try:
+            with open(text_file, "r", encoding="utf-8") as fh:
+                text = fh.read()
+        except Exception as exc:  # fail loud, exact reason
+            raise UiDriveError(f"paste --text-file could not read {text_file!r}: {exc}")
+        source = "file"
+    if text is None or text == "":
+        raise UiDriveError("paste needs non-empty --text or a readable --text-file")
+    if not deps.input.clipboard_paste(text):
         raise UiDriveError("clipboard_paste returned false")
-    return {"pasted_chars": len(args.text)}
+    return {"pasted_chars": len(text), "source": source}
 
 
 def _key(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str, Any]:
@@ -595,7 +605,12 @@ def _parser() -> argparse.ArgumentParser:
 
     paste = commands.add_parser("paste")
     _add_display(paste)
-    paste.add_argument("--text", required=True)
+    paste.add_argument("--text")
+    # Paste EXACT bytes from a file instead of regenerated inline text. A large
+    # packet as --text forces the model to regenerate every character token-by-token
+    # (a 13K packet = ~20 min on a Jetson AND risks drift). --text-file lets the model
+    # pass a PATH; the tool reads and pastes the exact file bytes: instant + faithful.
+    paste.add_argument("--text-file", dest="text_file")
 
     key = commands.add_parser("key")
     _add_display(key)

@@ -857,7 +857,8 @@ TOOLS = [
                     },
                     "ref": {"type": "string",
                             "description": "element ref from a recent observe (for click/focus/activate)"},
-                    "text": {"type": "string", "description": "text to type or paste"},
+                    "text": {"type": "string", "description": "text to type or paste (use for SHORT input; for a large packet use text_file instead so you don't regenerate every character)"},
+                    "text_file": {"type": "string", "description": "absolute path to a file whose EXACT bytes are pasted (paste action only). Prefer this for any large/verbatim content — pass the path, not the content; the tool reads and pastes it. Instant and byte-perfect."},
                     "key": {"type": "string",
                             "description": "key to press, e.g. Return, ctrl+a, Delete"},
                     "url": {"type": "string", "description": "absolute http(s) URL for navigate"},
@@ -1289,10 +1290,20 @@ def _do_drive_chat(arguments: dict) -> str:
             return _err(display, action, f"{action} requires a ref from a recent observe")
         cmd += ["--ref", str(ref)]
     elif action in ("type", "paste"):
+        # Prefer text_file: the model passes a PATH and ui_drive pastes the exact
+        # file bytes. A large packet as inline `text` forces the model to regenerate
+        # every character (a 13K packet = ~20 min on a Jetson + drift risk). A path
+        # is a few tokens and byte-exact. `text` still works for short input.
+        text_file = arguments.get("text_file")
         text = arguments.get("text")
-        if text is None or text == "":
-            return _err(display, action, f"{action} requires non-empty text")
-        cmd += ["--text", str(text)]
+        if action == "paste" and text_file:
+            cmd += ["--text-file", str(text_file)]
+        elif text is not None and text != "":
+            cmd += ["--text", str(text)]
+        else:
+            return _err(display, action,
+                        f"{action} requires non-empty 'text'"
+                        + (" or 'text_file'" if action == "paste" else ""))
     elif action == "key":
         key = arguments.get("key")
         if not key:
