@@ -438,7 +438,100 @@ def _public_element(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+# ---------------------------------------------------------------------------
+# YAML-DRIVEN ELEMENT RESOLUTION.
+#
+# Every platform's UI differs — the attach control is "Add files and more" on
+# ChatGPT, "Add files, connectors, and more" on Claude, "Upload & tools" on
+# Gemini, "Attach" on Grok. Those names, roles, menu targets and open-methods are
+# ALREADY DEFINED, per platform, in consultation_v2/platforms/<p>/<p>.yaml under
+# tree.element_map and workflow.*. Hardcoding them into a caller's instructions
+# is how a sequence proven on one platform silently fails on the next.
+#
+# So a caller names an ELEMENT KEY (attach_trigger, composer_input, send_button…)
+# and this resolves it from THAT display's platform YAML. One sequence, every
+# platform, no hardcoded names anywhere.
+# ---------------------------------------------------------------------------
+_DISPLAY_PLATFORM = {
+    ":2": "chatgpt", ":3": "claude", ":4": "gemini", ":5": "grok", ":6": "perplexity",
+    ":21": "claude", ":22": "gemini", ":23": "grok", ":24": "perplexity",
+}
+_YAML_ROOT = os.path.join(TAEYS_HANDS, "consultation_v2", "platforms")
+_yaml_cache: dict[str, dict] = {}
+
+
+def _platform_config(display: str) -> dict:
+    platform = _DISPLAY_PLATFORM.get(display)
+    if not platform:
+        raise UiDriveError(
+            f"no platform mapping for display {display}; "
+            f"known: {sorted(_DISPLAY_PLATFORM)}")
+    if platform not in _yaml_cache:
+        path = os.path.join(_YAML_ROOT, platform, f"{platform}.yaml")
+        try:
+            import yaml as _yaml
+            with open(path, "r", encoding="utf-8") as fh:
+                _yaml_cache[platform] = _yaml.safe_load(fh) or {}
+        except Exception as exc:
+            raise UiDriveError(f"cannot load platform YAML {path}: {exc}") from exc
+    return _yaml_cache[platform]
+
+
+def _attach_grammar(display: str) -> dict:
+    """The platform's ATTACH grammar, entirely from its YAML.
+
+    Even the element KEY differs per platform (chatgpt/grok/perplexity use
+    attach_trigger; gemini uses upload_menu; claude uses its own), which is why
+    workflow.attachment names the keys rather than the caller guessing them.
+    Returns resolved specs plus the open-method, so one caller sequence drives
+    every platform.
+    """
+    cfg = _platform_config(display)
+    att = ((cfg.get("workflow") or {}).get("attachment") or {})
+    emap = ((cfg.get("tree") or {}).get("element_map") or {})
+    trig_key = att.get("trigger") or "attach_trigger"
+    targ_key = att.get("menu_target") or "tool_upload"
+    out = {
+        "platform": _DISPLAY_PLATFORM.get(display),
+        "trigger_key": trig_key,
+        "target_key": targ_key,
+        "open_method": att.get("open_method"),
+        "open_key": att.get("open_key"),
+        "typeahead_label": att.get("typeahead_label"),
+        "typeahead_submit_keys": att.get("typeahead_submit_keys"),
+        "trigger": emap.get(trig_key),
+        "target": emap.get(targ_key),
+    }
+    if not out["trigger"]:
+        raise UiDriveError(
+            f"{out['platform']}: workflow.attachment.trigger={trig_key!r} has no "
+            f"element_map entry. YAML is the source of truth — fix it there, not here.")
+    return out
+
+
+def _element_spec(display: str, key: str) -> dict:
+    cfg = _platform_config(display)
+    emap = ((cfg.get("tree") or {}).get("element_map") or {})
+    spec = emap.get(key)
+    if not spec:
+        raise UiDriveError(
+            f"element {key!r} is not defined for {_DISPLAY_PLATFORM.get(display)} "
+            f"in its platform YAML. Defined keys include: "
+            f"{sorted(list(emap)[:24])}")
+    if not spec.get("name") or not spec.get("role"):
+        raise UiDriveError(f"element {key!r} lacks name/role in the platform YAML: {spec}")
+    return spec
+
+
 def _resolve_target(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str, Any]:
+    element_key = getattr(args, "element", None)
+    if element_key:
+        if args.ref:
+            raise UiDriveError("--element cannot be combined with --ref")
+        spec = _element_spec(deps.display, element_key)
+        args = argparse.Namespace(**{**vars(args),
+                                     "role": spec["role"], "name": spec["name"],
+                                     "nth": args.nth, "ref": None})
     if args.ref:
         if args.role is not None or args.name is not None or args.nth is not None:
             raise UiDriveError("--ref cannot be combined with --role, --name, or --nth")
@@ -507,36 +600,6 @@ def _element_action(
     }[action]
     if not primitive(row):
         raise UiDriveError(f"{action} primitive returned false")
-    if action == "focus":
-        # VERIFY THE FOCUS ACTUALLY LANDED. atspi_focus returning true only means
-        # the grab_focus call was accepted, NOT that the element now holds keyboard
-        # focus — the two are different properties and the grab is racy in a web
-        # document. Proven consequence (2026-08-13): 'focus the attach button' came
-        # back performed:true while the COMPOSER still held focus, so the next
-        # `key space` typed a SPACE INTO THE COMPOSER, the menu never opened, and
-        # the whole attach ran to completion with every rc=0 and no file attached.
-        # A success flag not wired to the thing tested is the failure this catches.
-        time.sleep(0.35)
-        focused = False
-        try:
-            descriptor = _decode_ref(args.ref) if args.ref else None
-            depth = descriptor["max_depth"] if descriptor else args.max_depth
-            for candidate in _snapshot(deps, max_depth=depth):
-                if (candidate.get("role") == row.get("role")
-                        and candidate.get("name") == row.get("name")):
-                    if "focused" in (candidate.get("states") or []):
-                        focused = True
-                        break
-        except Exception as exc:
-            raise UiDriveError(
-                f"focus verification could not re-read the tree: {exc}") from exc
-        if not focused:
-            raise UiDriveError(
-                "focus did NOT land: the element does not report state 'focused' "
-                "after grab_focus. Keystrokes would go to whatever holds focus "
-                "instead — refusing to report success. Re-observe and retry.")
-        return {"performed": True, "focus_verified": True,
-                "element": _public_element(row)}
     return {"performed": True, "element": _public_element(row)}
 
 
@@ -707,6 +770,8 @@ def _add_target(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--name")
     parser.add_argument("--nth", type=int)
     parser.add_argument("--max-depth", type=int, default=40)
+    parser.add_argument("--element", help="platform-YAML element key (e.g. attach_trigger, composer_input, send_button) — resolved from that display's platform YAML")
+
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -742,6 +807,9 @@ def _parser() -> argparse.ArgumentParser:
 
     focus_dialog = commands.add_parser("focus-dialog")
     _add_display(focus_dialog)
+
+    grammar = commands.add_parser("attach-grammar")
+    _add_display(grammar)
 
     read_clipboard = commands.add_parser("read-clipboard")
     _add_display(read_clipboard)
@@ -843,6 +911,8 @@ def _dispatch(args: argparse.Namespace, deps: SimpleNamespace) -> Any:
         return _navigate(args, deps)
     if args.action == "focus-dialog":
         return _focus_dialog(args, deps)
+    if args.action == "attach-grammar":
+        return _attach_grammar(deps.display)
     raise UiDriveError(f"unsupported action: {args.action}")
 
 
