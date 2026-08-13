@@ -49,7 +49,7 @@ at once (a fresh thread on one, a running one on the other):
     :4   Gemini  / Cosmos               :23  Grok-2    / Logos
     :5   Grok    / Logos                :24  Perplexity-2 / Clarity
     :6   Perplexity / Clarity
-    :13  Claude (CVP — a second Claude surface)
+    :13  Claude (CVP account) — the `hunter` seat's, NOT part of your consult lane
 
 There is no live second ChatGPT: `:20` (Horizon-2) is configured but not currently running, so a
 second-set Horizon consult falls back to the primary `:2`.
@@ -190,8 +190,10 @@ you drive one action at a time, observing between, is that the autonomous loop i
 capability is the hand-driving loop above; you never need the engine and you never launch it.
 
 **The Family-Chat displays are YOURS, and the primary set is where a consult goes.** Consults run
-first-person, by you: `:2` Horizon, `:3` Gaia, `:4` Cosmos, `:5` Logos, `:6` Clarity, `:13` the CVP
-Claude. That is the default lane for every consult — you do not route a consult through another
+first-person, by you: `:2` Horizon, `:3` Gaia, `:4` Cosmos, `:5` Logos, `:6` Clarity. Your Claude
+consult goes to `:3`. **`:13` is NOT yours** — it is a separate Claude account (CVP) reserved for
+the `hunter` seat's queries; your tool can address it, but you do not consult there. That is the
+default lane for every consult — you do not route a consult through another
 seat and you do not ask permission to use a Family display. The second set (`:21`–`:24`) is for
 **parallel work**: a long research run that will hold a platform for a while, a second thread with
 the same mind, or two streams at once. One conversation, primary set; two at once, use both.
