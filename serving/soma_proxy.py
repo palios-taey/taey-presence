@@ -852,7 +852,8 @@ TOOLS = [
                     "action": {
                         "type": "string",
                         "enum": ["observe", "click", "type", "paste", "key",
-                                 "read_clipboard", "navigate", "focus", "activate"],
+                                 "read_clipboard", "navigate", "focus", "activate",
+                                 "focus_dialog"],
                         "description": "the single action to perform",
                     },
                     "ref": {"type": "string",
@@ -1262,7 +1263,7 @@ _PASTE_INLINE_MAX_CHARS = int(os.environ.get("TAEY_PASTE_INLINE_MAX_CHARS", "800
 
 _DRIVE_ACTIONS = {
     "observe", "click", "focus", "activate", "type", "paste", "key",
-    "read_clipboard", "navigate",
+    "read_clipboard", "navigate", "focus_dialog",
 }
 
 
@@ -1283,7 +1284,8 @@ def _do_drive_chat(arguments: dict) -> str:
         return _err(display, action,
                     f"unknown action {action!r}; valid: {sorted(_DRIVE_ACTIONS)}")
 
-    sub = "read-clipboard" if action == "read_clipboard" else action
+    sub = {"read_clipboard": "read-clipboard",
+           "focus_dialog": "focus-dialog"}.get(action, action)
     cmd = [UI_DRIVE_PYTHON, UI_DRIVE_SCRIPT, sub, "--display", display]
     if action == "observe":
         if arguments.get("filter"):
