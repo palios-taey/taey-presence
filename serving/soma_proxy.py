@@ -1254,6 +1254,12 @@ CHAT_DISPLAYS = tuple(
     d for d in (_env_chat_disp.split(",") if _env_chat_disp else _DEFAULT_CHAT_DISPLAYS)
     if d and d.strip() != ":0"
 )
+# Inline paste ceiling. Above this, content must come from a file on disk (see the
+# refusal in _do_drive_chat). Sized for a genuine one-liner or short question; a
+# consult packet, a review request, or anything with claims in it is far larger and
+# belongs in a file where it can be read back and proven.
+_PASTE_INLINE_MAX_CHARS = int(os.environ.get("TAEY_PASTE_INLINE_MAX_CHARS", "800"))
+
 _DRIVE_ACTIONS = {
     "observe", "click", "focus", "activate", "type", "paste", "key",
     "read_clipboard", "navigate",
@@ -1299,6 +1305,25 @@ def _do_drive_chat(arguments: dict) -> str:
         if action == "paste" and text_file:
             cmd += ["--text-file", str(text_file)]
         elif text is not None and text != "":
+            # SUBSTANTIAL CONTENT MUST COME FROM A FILE, NEVER FROM GENERATION.
+            # 2026-08-13: a worker seat, dispatched a consult leg, composed a
+            # 2,181-char "AUDIT PACKET: Taey-Ed V8" describing a repo that does not
+            # exist (fabricated file counts, commit SHA, and "53 open PRs") and SENT
+            # it into Jesse's live ChatGPT account. Nothing on disk contained that
+            # text — the model invented it wholesale at the one boundary that reaches
+            # the outside world.
+            # Root-cause shape (not a guard bolted on): anything substantial leaving
+            # this machine must be a reviewable artifact that exists on disk, so it
+            # can be diffed, cited, and proven. A path can be verified; a generation
+            # cannot. Short inline text stays allowed for genuine one-liners.
+            if action == "paste" and len(str(text)) > _PASTE_INLINE_MAX_CHARS:
+                return _err(display, action,
+                            f"paste refused: {len(str(text))} chars of inline text exceeds "
+                            f"the {_PASTE_INLINE_MAX_CHARS}-char inline limit. Content this "
+                            f"long must be a FILE: write it with write_file (or use the "
+                            f"existing file), then paste with text_file='<absolute path>'. "
+                            f"The tool pastes the exact bytes — so what is sent is verifiable "
+                            f"on disk rather than composed in the moment.")
             cmd += ["--text", str(text)]
         else:
             return _err(display, action,
