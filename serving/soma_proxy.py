@@ -836,7 +836,17 @@ TOOLS = [
                 "ref; click/focus/activate take a ref from the most recent observe. To put text "
                 "in a composer: observe -> CLICK the composer (a click is what lets it take "
                 "keystrokes) -> paste (for long text) or type. key='Return' sends. read_clipboard "
-                "returns what a Copy control placed on the clipboard."
+                "returns what a Copy control placed on the clipboard. "
+                "TO ATTACH A FILE — the reliable way to give a Chat a long packet, and PROVEN on "
+                "ChatGPT 2026-08-13. Never paste a long packet; attach it. The sequence, one call "
+                "each, observing between: (1) focus the attach control ('Add files and more') and "
+                "key='space' — focus+space, NOT click: a click opens a popup whose items are "
+                "unnamed and unreachable; (2) type the menu label, e.g. 'Add photos'; (3) "
+                "key='Down'; (4) key='Return' — the GTK file dialog opens; (5) "
+                "action='focus_dialog' — REQUIRED, because the dialog is a SEPARATE X11 window and "
+                "without activating it your keystrokes go to Firefox's address bar instead; (6) "
+                "key='ctrl+l'; (7) key='ctrl+a'; (8) type the FULL ABSOLUTE PATH; (9) key='Return'; "
+                "(10) observe and CONFIRM the filename chip is in the composer before you send."
             ),
             "parameters": {
                 "type": "object",
