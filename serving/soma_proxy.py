@@ -865,7 +865,7 @@ TOOLS = [
                         "enum": ["observe", "click", "type", "paste", "key",
                                  "read_clipboard", "navigate", "focus", "activate",
                                  "focus_dialog", "verify", "verify_attachment", "verify_composer",
-                                 "scroll", "extract"],
+                                 "scroll", "extract", "attach"],
                         "description": "the single action to perform",
                     },
                     "text": {"type": "string", "description": "text to type or paste (use for SHORT input; for a large packet use text_file instead so you don't regenerate every character)"},
@@ -875,6 +875,8 @@ TOOLS = [
                     "url": {"type": "string", "description": "absolute http(s) URL for navigate"},
                     "element": {"type": "string",
                                 "description": "platform-YAML element key, e.g. 'new_chat', 'send_button', 'stop_button', 'input'. Required for click/focus/activate/verify; resolved exactly through that platform's element_map."},
+                    "path": {"type": "string",
+                             "description": "for attach: absolute path of the file to attach. The whole menu->chooser sequence runs in one call."},
                     "sent_file": {"type": "string",
                                   "description": "for extract: absolute path of the artifact you SENT. The extraction is refused if the clipboard matches it, which is how a prompt echo is caught."},
                     "file": {"type": "string",
@@ -1280,7 +1282,7 @@ _PASTE_INLINE_MAX_CHARS = int(os.environ.get("TAEY_PASTE_INLINE_MAX_CHARS", "800
 _DRIVE_ACTIONS = {
     "observe", "click", "focus", "activate", "type", "paste", "key",
     "read_clipboard", "navigate", "focus_dialog", "verify", "verify_attachment", "verify_composer",
-    "scroll", "extract",
+    "scroll", "extract", "attach",
 }
 
 
@@ -1378,6 +1380,11 @@ def _do_drive_chat(arguments: dict) -> str:
     if action == "extract":
         if arguments.get("sent_file"):
             cmd += ["--sent-file", str(arguments["sent_file"])]
+    elif action == "attach":
+        path = arguments.get("path") or arguments.get("file")
+        if not path:
+            return _err(display, action, "attach requires path=<absolute path of the file to attach>")
+        cmd += ["--path", str(path)]
     elif action == "verify_composer":
         f = arguments.get("file")
         if not f:

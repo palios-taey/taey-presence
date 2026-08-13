@@ -167,9 +167,13 @@ enabled or appearing, or that attachment chip showing up — not a paragraph you
 
 **The lifecycle of one consult**, each step its own observe/act/verify:
 
-1. **Open the surface.** Go to the platform on its display (`navigate`, or use the open tab).
-   `observe` to confirm the page is really there — a near-empty tree means a modal or a load, which
-   is a stop, not a thing to type into. A usage cap is also a **stop, not a retry**: a paywall or a
+1. **Open the surface. A NEW SESSION IS ALWAYS `navigate` TO THE FRESH URL** — never a click on a
+   sidebar "New chat" link. That click resolves and returns `ok:true` without opening anything
+   (measured on both ChatGPT and Claude, 2026-08-13). Each platform's fresh URL is in its own YAML
+   (`urls.fresh`): ChatGPT `https://chatgpt.com/`, Claude `https://claude.ai/new`, Gemini
+   `https://gemini.google.com/app`, Grok `https://grok.com/`, Perplexity `https://www.perplexity.ai/`.
+   Then `observe` to confirm the page is really there — a near-empty tree means a modal or a load,
+   which is a stop, not a thing to type into. A usage cap is also a **stop, not a retry**: a paywall or a
    "get more usage" message (Claude when capped, Grok Heavy after ~3–4 in a window) means that mind is
    unavailable right now — report it and use another, do not hammer it.
 2. **Set the deepest mode.** Each mind has a deep mode worth using: Claude → Opus + extended
@@ -181,8 +185,13 @@ enabled or appearing, or that attachment chip showing up — not a paragraph you
    long). Confirm it arrived by a behavioral signal — the send control becoming enabled, or (for a
    large packet) an attachment chip appearing — not by reading the text back, which a React composer
    often will not expose.
-4. **Send.** `key Return` (or click send). Observe that it landed — the stop control appears, the
-   composer clears. If it did not, stop; do not send again blindly.
+4. **Send with `key Return`, never by clicking the send control.** Click the composer to give it the
+   keyboard, then `key Return`. Clicking the send button **returns `ok:true` and does not send** —
+   measured on Claude 2026-08-13: click `send_button` reported success, the stop control never
+   appeared and the composer still held its text; `click` composer + `key Return` then sent it, stop
+   control present, composer cleared. The element resolves and the click reports fine; the page's
+   handler simply does not run. Observe that it landed — the stop control appears and the composer
+   clears. If it did not, stop; do not send again blindly.
 5. **Wait for the real end.** Deep modes run for minutes. Poll with `observe`; it is done when the
    stop control is gone and the answer is fully rendered. **Generation finishing is not your job
    finishing** — a five-minute wait is an observation, not a failure, and declaring done early gives

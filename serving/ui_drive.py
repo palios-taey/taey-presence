@@ -272,6 +272,28 @@ def _scroll_document(args: argparse.Namespace, deps: SimpleNamespace) -> dict[st
     return drive_chat_adapter.scroll(platform)
 
 
+def _attach_file(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str, Any]:
+    """Attach a file through the platform's own driver, in ONE process.
+
+    Attach is a MENU sequence: open the trigger, pick the upload item, then the
+    GTK chooser. Decomposed into one drive_chat call per step it cannot work —
+    each call is a separate process, and the menu is gone by the next one. The
+    per-platform driver already does the whole sequence internally (e.g.
+    gemini/driver.py attach_files: Upload & tools -> menu_snap -> upload item ->
+    focus_file_dialog -> path), and drive_chat_adapter.attach exposes it. Call
+    that; never re-decompose it here.
+    """
+    from consultation_v2 import drive_chat_adapter
+
+    platform = _DISPLAY_PLATFORM.get(deps.display)
+    if not platform:
+        raise UiDriveError(f"no platform is mapped for display {deps.display}")
+    path = os.path.abspath(args.path)
+    if not os.path.isfile(path):
+        raise UiDriveError(f"attach: no such file: {path}")
+    return drive_chat_adapter.attach(platform, path)
+
+
 def _extract_response(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str, Any]:
     """Copy the latest answer out through the platform's MAPPED extraction control.
 
@@ -405,9 +427,15 @@ def _verify_composer(args: argparse.Namespace, deps: SimpleNamespace) -> dict[st
         raise UiDriveError(
             f"composer element {args.element!r} matched {len(matches)} elements; expected exactly one")
     try:
-        iface = matches[0]["atspi_obj"].get_text_iface()
-        count = int(iface.get_character_count()) if iface else 0
-        actual = (iface.get_text(0, count) if iface and count > 0 else "").strip()
+        # Atspi.Accessible.get_text() takes only self in this binding; the text
+        # interface is reached through Atspi.Text with the node as first argument.
+        import gi
+        gi.require_version("Atspi", "2.0")
+        from gi.repository import Atspi
+
+        node = matches[0]["atspi_obj"]
+        count = int(Atspi.Text.get_character_count(node))
+        actual = (Atspi.Text.get_text(node, 0, count) if count > 0 else "").strip()
     except Exception as exc:
         raise UiDriveError(f"composer text read failed: {exc}") from exc
     expected = Path(args.file).read_text(encoding="utf-8").strip()
@@ -670,6 +698,10 @@ def _parser() -> argparse.ArgumentParser:
     _add_display(verify)
     verify.add_argument("--file", required=True, help="absolute path of the file that should be attached")
 
+    attach_p = commands.add_parser("attach")
+    _add_display(attach_p)
+    attach_p.add_argument("--path", required=True, help="absolute path of the file to attach")
+
     scroll_p = commands.add_parser("scroll")
     _add_display(scroll_p)
 
@@ -786,6 +818,9 @@ def _dispatch(args: argparse.Namespace, deps: SimpleNamespace) -> Any:
     if args.action == "scroll":
         _guard_action(deps.display, LOCK_TTL_DEFAULT)
         return _scroll_document(args, deps)
+    if args.action == "attach":
+        _guard_action(deps.display, LOCK_TTL_DEFAULT)
+        return _attach_file(args, deps)
     if args.action in _LOCK_ACTION_OPS:
         _guard_action(deps.display, LOCK_TTL_DEFAULT)
     if args.action in {"click", "focus", "activate"}:
