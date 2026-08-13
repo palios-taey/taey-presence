@@ -477,6 +477,55 @@ def _platform_config(display: str) -> dict:
     return _yaml_cache[platform]
 
 
+def _attachment_name_matches(display_name: str, filename: str) -> bool:
+    """The engine's proven chip-name rule (chatgpt/driver.py::_attachment_name_matches).
+
+    Chips do NOT render as the plain filename: they carry suffixes like (7), and
+    long names are ELIDED with '...' in the middle. Matching on a literal filename
+    is why a verify can fail while the attachment is actually present — which is
+    exactly what happened on 2026-08-13: the chip was there, the check missed it,
+    and the caller "recovered" by navigating, destroying the attachment.
+    """
+    expected_path = os.path.abspath(filename)
+    expected_name = os.path.basename(filename)
+    displayed = display_name.split()[0] if display_name else ""
+    for expected in (expected_path, expected_name):
+        if display_name == expected or displayed == expected:
+            return True
+        if "..." in displayed:
+            prefix, suffix = displayed.split("...", 1)
+            if expected.startswith(prefix) and expected.endswith(suffix):
+                return True
+        # chips also render as name(N).ext for repeat uploads
+        stem, dot, ext = expected_name.rpartition(".")
+        if stem and displayed.startswith(stem) and displayed.endswith(ext):
+            return True
+    return False
+
+
+def _verify_attachment(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str, Any]:
+    """Is FILE attached? Chip in the composer, roles push button/panel, and the
+    file dialog closed — the engine's two-part verification, not a name guess."""
+    rows = _snapshot(deps, max_depth=getattr(args, "max_depth", None) or 20)
+    chips = [r for r in rows
+             if r.get("role") in ("push button", "panel")
+             and _attachment_name_matches(r.get("name") or r.get("text") or "", args.file)]
+    all_chips = [(r.get("role"), (r.get("name") or r.get("text") or "")[:60])
+                 for r in rows
+                 if r.get("role") in ("push button", "panel")
+                 and "." in (r.get("name") or "")[-6:]]
+    dialog_open = False
+    try:
+        _focus_dialog(argparse.Namespace(display=args.display), deps)
+        dialog_open = True
+    except Exception:
+        dialog_open = False
+    return {"file": args.file, "attached": bool(chips) and not dialog_open,
+            "chip": (chips[0].get("name") if chips else None),
+            "dialog_still_open": dialog_open,
+            "all_attachment_chips": all_chips}
+
+
 def _attach_grammar(display: str) -> dict:
     """The platform's ATTACH grammar, entirely from its YAML.
 
@@ -811,6 +860,10 @@ def _parser() -> argparse.ArgumentParser:
     grammar = commands.add_parser("attach-grammar")
     _add_display(grammar)
 
+    verify = commands.add_parser("verify-attachment")
+    _add_display(verify)
+    verify.add_argument("--file", required=True, help="absolute path of the file that should be attached")
+
     read_clipboard = commands.add_parser("read-clipboard")
     _add_display(read_clipboard)
 
@@ -913,6 +966,8 @@ def _dispatch(args: argparse.Namespace, deps: SimpleNamespace) -> Any:
         return _focus_dialog(args, deps)
     if args.action == "attach-grammar":
         return _attach_grammar(deps.display)
+    if args.action == "verify-attachment":
+        return _verify_attachment(args, deps)
     raise UiDriveError(f"unsupported action: {args.action}")
 
 
