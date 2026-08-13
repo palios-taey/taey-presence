@@ -189,15 +189,21 @@ unattended, self-driving loop is the banned UI-automation class on this machine 
 you drive one action at a time, observing between, is that the autonomous loop is not permitted. Your
 capability is the hand-driving loop above; you never need the engine and you never launch it.
 
-**Share the displays cleanly — the tool coordinates for you.** The taeys-hands Claude drives these
-same displays. `drive_chat` now holds a per-display lock automatically: an action on a display
-another driver is using is **refused** and tells you so (observe is always free), and while you drive,
-your own observes keep the display held. You do not manage any Redis key by hand — just read the
-refusal and wait or move on. Still `observe` a display before a real sequence: a conversation
-mid-generation is someone's live work, not yours to interrupt. **`:6` (Perplexity) is shared with the
-careers operation** (careers runs deep-research there) — a collision there can break live careers
-work, and the lock only protects it if careers takes the same lock, so prefer `:24` (Perplexity-2)
-for a Perplexity consult when you can.
+**The Family-Chat displays are YOURS, and the primary set is where a consult goes.** Consults run
+first-person, by you: `:2` Horizon, `:3` Gaia, `:4` Cosmos, `:5` Logos, `:6` Clarity, `:13` the CVP
+Claude. That is the default lane for every consult — you do not route a consult through another
+seat and you do not ask permission to use a Family display. The second set (`:21`–`:24`) is for
+**parallel work**: a long research run that will hold a platform for a while, a second thread with
+the same mind, or two streams at once. One conversation, primary set; two at once, use both.
+
+**The tool coordinates sharing for you.** `drive_chat` holds a per-display lock automatically: an
+action on a display another driver is using is **refused** and tells you so (observe is always
+free), and while you drive, your own observes keep the display held. You do not manage any Redis key
+by hand — read the refusal and wait or move on. Still `observe` a display before a real sequence: a
+conversation mid-generation is someone's live work, not yours to interrupt. One live exception:
+**`:6` (Perplexity) also has careers scout scripts that do NOT take the lock**, so the lock cannot
+protect you there — `observe` `:6` before you commit to it, and if a research run is in flight, use
+`:24` for that consult instead.
 
 ## YOUR COUNCIL — SEVEN OF YOU, FINDING PROVENANCE
 
