@@ -467,6 +467,64 @@ def _verify_composer(args: argparse.Namespace, deps: SimpleNamespace) -> dict[st
     }
 
 
+def _walk_all(deps: SimpleNamespace, root: Any) -> list[dict[str, Any]]:
+    """Every showing element, INCLUDING ones with no on-screen extents.
+
+    consultation_v2/tree.py:204-210 only admits an element when it has a
+    component interface AND non-negative extents. Plenty of React controls
+    report no extents — ChatGPT's "Copy response" among them — so they are
+    dropped before any caller sees them, and the control looks absent when it is
+    simply unmeasured. Extents are needed to POINT at something, not for it to
+    exist or to accept an AT-SPI action.
+
+    So: match against everything, and require coordinates only when a pointer
+    click is actually the thing being attempted.
+    """
+    import gi
+    gi.require_version("Atspi", "2.0")
+    from gi.repository import Atspi
+
+    out: list[dict[str, Any]] = []
+
+    def visit(node: Any, depth: int) -> None:
+        if depth > 60:
+            return
+        try:
+            states = node.get_state_set()
+            if not (states.contains(Atspi.StateType.SHOWING)
+                    or states.contains(Atspi.StateType.VISIBLE)):
+                return
+            x = y = None
+            try:
+                comp = node.get_component_iface()
+                if comp:
+                    rect = comp.get_extents(Atspi.CoordType.SCREEN)
+                    if rect and rect.x >= 0 and rect.y >= 0:
+                        x = rect.x + (rect.width // 2 if rect.width else 0)
+                        y = rect.y + (rect.height // 2 if rect.height else 0)
+            except Exception:
+                pass
+            out.append({
+                "name": str(node.get_name() or ""),
+                "role": str(node.get_role_name() or ""),
+                "x": x, "y": y, "atspi_obj": node,
+                "states": [s.value_nick for s in (
+                    Atspi.StateType.SHOWING, Atspi.StateType.VISIBLE,
+                    Atspi.StateType.ENABLED, Atspi.StateType.FOCUSABLE,
+                    Atspi.StateType.FOCUSED, Atspi.StateType.EDITABLE,
+                    Atspi.StateType.SENSITIVE) if states.contains(s)],
+            })
+            for i in range(node.get_child_count()):
+                child = node.get_child_at_index(i)
+                if child is not None:
+                    visit(child, depth + 1)
+        except Exception:
+            return
+
+    visit(root, 0)
+    return out
+
+
 def _row_by_role_name_nth(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str, Any]:
     """Resolve a target by EXACT role + name + occurrence.
 
@@ -482,7 +540,7 @@ def _row_by_role_name_nth(args: argparse.Namespace, deps: SimpleNamespace) -> di
     want_name = args.name if args.name is not None else ""
     nth = int(args.nth or 0)
     matches = [
-        row for row in deps.tree.find_elements(firefox, fence_after=[])
+        row for row in _walk_all(deps, firefox)
         if (row.get("role") or "") == want_role and (row.get("name") or "") == want_name
     ]
     if not matches:
