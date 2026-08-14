@@ -831,12 +831,13 @@ TOOLS = [
                 "Your hands on a Family-chat display. Perform EXACTLY ONE action, then call "
                 "again with action=observe to see the result before the next action — never "
                 "chain actions on an assumption. Displays: :2 chatgpt, :3 claude, :4 gemini, "
-                ":5 grok, :6 perplexity, :13 claude-cvp; and the second set :21 claude2, "
+                ":5 grok, :6 perplexity; and the second set :21 claude2, "
                 ":22 gemini2, :23 grok2, :24 perplexity2. observe returns elements each with a "
                 "ref; click/focus/activate take a ref from the most recent observe. To put text "
                 "in a composer: observe -> CLICK the composer (a click is what lets it take "
                 "keystrokes) -> paste (for long text) or type. key='Return' sends. read_clipboard "
-                "returns what a Copy control placed on the clipboard. "
+                "returns what a Copy control placed on the clipboard. extract runs the mapped "
+                "platform extraction driver and returns its response_text unchanged. "
                 "TO ATTACH A FILE — the reliable way to give a Chat a long packet, and PROVEN on "
                 "ChatGPT 2026-08-13. Never paste a long packet; attach it. The sequence, one call "
                 "each, observing between: (1) focus the attach control ('Add files and more') and "
@@ -855,7 +856,7 @@ TOOLS = [
                 "properties": {
                     "display": {
                         "type": "string",
-                        "enum": [":2", ":3", ":4", ":5", ":6", ":13",
+                        "enum": [":2", ":3", ":4", ":5", ":6",
                                  ":21", ":22", ":23", ":24"],
                         "description": "which Chat display to act on",
                     },
@@ -863,13 +864,14 @@ TOOLS = [
                         "type": "string",
                         "enum": ["observe", "click", "type", "paste", "key",
                                  "read_clipboard", "navigate", "focus", "activate",
-                                 "focus_dialog"],
+                                 "focus_dialog", "extract"],
                         "description": "the single action to perform",
                     },
                     "ref": {"type": "string",
                             "description": "element ref from a recent observe (for click/focus/activate)"},
                     "text": {"type": "string", "description": "text to type or paste (use for SHORT input; for a large packet use text_file instead so you don't regenerate every character)"},
                     "text_file": {"type": "string", "description": "absolute path to a file whose EXACT bytes are pasted (paste action only). Prefer this for any large/verbatim content — pass the path, not the content; the tool reads and pastes it. Instant and byte-perfect."},
+                    "sent_file": {"type": "string", "description": "for extract: absolute path to the exact sent artifact; extraction is refused if response_text matches it (prompt echo)"},
                     "key": {"type": "string",
                             "description": "key to press, e.g. Return, ctrl+a, Delete"},
                     "url": {"type": "string", "description": "absolute http(s) URL for navigate"},
@@ -1248,7 +1250,7 @@ def _do_run_command(command: str, cwd: str = "", timeout_seconds: int = 120) -> 
 # observe the tree, take exactly one action, observe again. It shells out to the
 # sibling serving/ui_drive.py under the AT-SPI interpreter (the displays live on this
 # workstation, where the proxy runs its tools), so the same proven primitives that drive
-# :2-:6/:13 and the second set :21-:24 are what Taey uses. The step-by-step discipline
+# :2-:6 and the second set :21-:24 are what Taey uses. The step-by-step discipline
 # lives in the model and the prompt; this surface performs one primitive and returns the
 # observed JSON. :0 (Jesse's monitor) and any non-chat display are REFUSED here, never
 # merely absent from the schema.
@@ -1258,7 +1260,7 @@ UI_DRIVE_SCRIPT = os.environ.get(
     "TAEY_UI_DRIVE_SCRIPT",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui_drive.py"),
 )
-_DEFAULT_CHAT_DISPLAYS = (":2", ":3", ":4", ":5", ":6", ":13", ":21", ":22", ":23", ":24")
+_DEFAULT_CHAT_DISPLAYS = (":2", ":3", ":4", ":5", ":6", ":21", ":22", ":23", ":24")
 _env_chat_disp = os.environ.get("TAEY_CHAT_DISPLAYS", "").strip()
 # :0 is Jesse's physical monitor and can never be a target, even via env override.
 CHAT_DISPLAYS = tuple(
@@ -1273,7 +1275,7 @@ _PASTE_INLINE_MAX_CHARS = int(os.environ.get("TAEY_PASTE_INLINE_MAX_CHARS", "800
 
 _DRIVE_ACTIONS = {
     "observe", "click", "focus", "activate", "type", "paste", "key",
-    "read_clipboard", "navigate", "focus_dialog",
+    "read_clipboard", "navigate", "focus_dialog", "extract",
 }
 
 
@@ -1420,6 +1422,10 @@ def _do_drive_chat(arguments: dict) -> str:
         if not url:
             return _err(display, action, "navigate requires a url")
         cmd += ["--url", str(url)]
+    elif action == "extract":
+        sent_file = arguments.get("sent_file")
+        if sent_file:
+            cmd += ["--sent-file", str(sent_file)]
 
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=90)

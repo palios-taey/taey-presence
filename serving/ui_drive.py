@@ -744,6 +744,46 @@ def _read_clipboard(deps: SimpleNamespace) -> dict[str, Any]:
     return {"text": text}
 
 
+def _extract_response(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str, Any]:
+    """Return the mapped platform driver's extraction result.
+
+    consultation_v2.drive_chat_adapter.extract() owns scrolling, locating and
+    activating the platform-specific extraction control. Its response_text is
+    the answer. Do not clear the clipboard, construct an ElementRef, click the
+    returned dict, or independently reinterpret the extraction result here.
+    """
+    from consultation_v2 import drive_chat_adapter
+
+    platform = _DISPLAY_PLATFORM.get(deps.display)
+    if not platform:
+        raise UiDriveError(
+            f"no platform mapping for display {deps.display}; "
+            f"known: {sorted(_DISPLAY_PLATFORM)}"
+        )
+
+    result = drive_chat_adapter.extract(platform)
+    text = str(result.get("response_text") or "")
+    if not text.strip():
+        raise UiDriveError(f"{platform}: mapped extraction returned empty response_text")
+
+    sent_path = getattr(args, "sent_file", None)
+    if sent_path:
+        path = Path(sent_path).expanduser().resolve()
+        if not path.is_file():
+            raise UiDriveError(f"sent file is not a file: {path}")
+        sent = path.read_text(encoding="utf-8").strip()
+        extracted = text.strip()
+        if extracted == sent or (
+            len(sent) > 200 and extracted.startswith(sent[:200])
+        ):
+            raise UiDriveError(
+                f"{platform}: extracted text matches the sent artifact "
+                f"(prompt echo): {path}"
+            )
+
+    return result
+
+
 def _navigate(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str, Any]:
     parsed = urlparse(args.url)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
@@ -814,6 +854,14 @@ def _parser() -> argparse.ArgumentParser:
     read_clipboard = commands.add_parser("read-clipboard")
     _add_display(read_clipboard)
 
+    extract = commands.add_parser("extract")
+    _add_display(extract)
+    extract.add_argument(
+        "--sent-file",
+        dest="sent_file",
+        help="exact sent artifact; reject extraction if the answer is a prompt echo",
+    )
+
     navigate = commands.add_parser("navigate")
     _add_display(navigate)
     navigate.add_argument("--url", required=True)
@@ -823,7 +871,10 @@ def _parser() -> argparse.ArgumentParser:
 
 # Action ops mutate the display and must HOLD the per-display lock; observe/read-clipboard are
 # reads that only RENEW the lease when we already own it — a non-owner read never locks or renews.
-_LOCK_ACTION_OPS = {"click", "focus", "activate", "type", "paste", "key", "navigate", "focus-dialog"}
+_LOCK_ACTION_OPS = {
+    "click", "focus", "activate", "type", "paste", "key", "navigate",
+    "focus-dialog", "extract",
+}
 
 
 def _renew_if_owner(display: str, ttl: int) -> bool:
@@ -899,6 +950,8 @@ def _dispatch(args: argparse.Namespace, deps: SimpleNamespace) -> Any:
         return _read_clipboard(deps)
     if args.action in _LOCK_ACTION_OPS:
         _guard_action(deps.display, LOCK_TTL_DEFAULT)
+    if args.action == "extract":
+        return _extract_response(args, deps)
     if args.action in {"click", "focus", "activate"}:
         return _element_action(args.action, args, deps)
     if args.action == "type":
