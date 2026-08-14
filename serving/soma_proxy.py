@@ -855,7 +855,8 @@ TOOLS = [
                 "in a composer: observe -> CLICK the composer (a click is what lets it take "
                 "keystrokes) -> paste (for long text) or type. key='Return' sends. read_clipboard "
                 "returns what a Copy control placed on the clipboard. extract runs the mapped "
-                "platform extraction driver and returns its response_text unchanged. "
+                "platform extraction driver and returns its response_text unchanged unless "
+                "output_file is supplied, which returns an artifact receipt without the body. "
                 "TO ATTACH A FILE — the reliable way to give a Chat a long packet, and PROVEN on "
                 "ChatGPT 2026-08-13. Never paste a long packet; attach it. The sequence, one call "
                 "each, observing between: (1) focus the attach control ('Add files and more') and "
@@ -890,6 +891,7 @@ TOOLS = [
                     "text": {"type": "string", "description": "text to type or paste (use for SHORT input; for a large packet use text_file instead so you don't regenerate every character)"},
                     "text_file": {"type": "string", "description": "absolute path to a file whose EXACT bytes are pasted (paste action only). Prefer this for any large/verbatim content — pass the path, not the content; the tool reads and pastes it. Instant and byte-perfect."},
                     "sent_file": {"type": "string", "description": "for extract: absolute path to the exact sent artifact; extraction is refused if response_text matches it (prompt echo)"},
+                    "output_file": {"type": "string", "description": "absolute destination path for captured content (extract or read_clipboard only); the file must not already exist"},
                     "key": {"type": "string",
                             "description": "key to press, e.g. Return, ctrl+a, Delete"},
                     "url": {"type": "string", "description": "absolute http(s) URL for navigate"},
@@ -1383,9 +1385,19 @@ def _do_drive_chat(arguments: dict) -> str:
         return _err(display, action,
                     f"unknown action {action!r}; valid: {sorted(_DRIVE_ACTIONS)}")
 
+    output_file = arguments.get("output_file")
+    if output_file is not None:
+        if action not in {"extract", "read_clipboard"}:
+            return _err(display, action,
+                        "output_file is valid only for extract and read_clipboard")
+        if not isinstance(output_file, str) or not output_file:
+            return _err(display, action, "output_file must be a non-empty string")
+
     sub = {"read_clipboard": "read-clipboard",
            "focus_dialog": "focus-dialog"}.get(action, action)
     cmd = [UI_DRIVE_PYTHON, UI_DRIVE_SCRIPT, sub, "--display", display]
+    if output_file is not None:
+        cmd += ["--output-file", output_file]
     if action == "observe":
         if arguments.get("filter"):
             cmd += ["--filter", str(arguments["filter"])]

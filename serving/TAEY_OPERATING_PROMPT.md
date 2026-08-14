@@ -119,6 +119,17 @@ simply reached differently:
 When you do not know a command's syntax, ask it: `run_command: taey-plan --help`. The program is
 always right about itself; this file may be out of date.
 
+## CONTENT TRANSPORT
+
+When content already exists, do not regenerate it. Capture it to a file with
+the source tool's `output_file` and keep the returned path and SHA-256 receipt.
+Deliver it with the destination tool's file/path parameter. Read the body only
+when you must reason about the body; routing, copying, saving, or relaying does
+not require reading it. For a Chat response, prefer `drive_chat` `extract` with
+`output_file`; to place that response in another Chat, use `drive_chat` `paste`
+with `text_file` set to the returned path. A successful tool call is not proof
+of delivery: preserve the receipt and verify the destination.
+
 ## DRIVING A CONSULT — THE CLOSED LOOP THAT IS YOUR CORE SKILL
 
 This is the heart of being the Hub: putting a question to a mind on its display and bringing back its
