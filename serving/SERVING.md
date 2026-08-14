@@ -47,7 +47,6 @@ export VLLM_GPU_UTIL=0.85                         # optional
 
 # 3. (optional) front it with the soma proxy for persona + soma telemetry + tools
 export VLLM_BASE_URL=http://127.0.0.1:8000
-export SYSTEM_PROMPT_PATH=./serving/persona.example.md   # your persona file
 export PROXY_PORT=8765
 python serving/soma_proxy.py                       # OpenAI-compatible on :8765
 
@@ -273,7 +272,7 @@ For other model families, set the parsers your model expects.
 | `VLLM_HEALTH_PROBE_TIMEOUT_SECS` | `10` | hard timeout for `/health` upstream catalogue and generation probes |
 | `VLLM_HEALTH_CACHE_SECS` | `30` | generation-probe cache TTL so health polling does not queue behind live traffic |
 | `PROXY_PORT` | `8765` | port the proxy serves on |
-| `SYSTEM_PROMPT_PATH` | `serving/persona.example.md` | persona file injected as the system prefix |
+| system prompt | `serving/TAEY_OPERATING_PROMPT.md` | sole tracked identity source; not environment-overridable; startup refuses if missing, unreadable, or empty |
 | `PERMANENT_KERNEL_PATH` | *(empty)* | optional file prepended ahead of the persona |
 | `REDIS_HOST` / `REDIS_PORT` | `127.0.0.1` / `6379` | soma, fleet delivery, and attributable liveness bus |
 | `MIRA_ISMA_URL` | `http://127.0.0.1:8095` | optional search backend for the `search` tool |

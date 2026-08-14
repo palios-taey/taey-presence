@@ -20,6 +20,7 @@ import operator
 import re
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 
 import asyncio
@@ -72,11 +73,12 @@ PROXY_PORT = int(os.environ.get("PROXY_PORT", "8765"))
 # multi-step work legitimately needs more; the loop already stops when there
 # are no calls.
 MAX_TOOL_ROUNDS = int(os.environ.get("MAX_TOOL_ROUNDS", "60"))
-# Persona/system prompt: ships a generic example so the proxy works out of the box.
-# Point SYSTEM_PROMPT_PATH at your own persona file to give the model an identity.
-SYSTEM_PROMPT_PATH = os.environ.get(
-    "SYSTEM_PROMPT_PATH",
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "persona.example.md"),
+# One identity source. Every soma-proxy process loads the tracked operating
+# prompt beside this file. An environment variable must never redirect Taey's
+# identity to a staging checkout, placeholder persona, or other mutable source.
+SYSTEM_PROMPT_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "TAEY_OPERATING_PROMPT.md",
 )
 # Optional second always-on prefix (e.g. a constitution/kernel). Empty = none.
 # Set PERMANENT_KERNEL_PATH to a file to prepend it ahead of the persona.
@@ -103,6 +105,22 @@ _ecosystem_http: Optional[httpx.Client] = None
 _system_prompt: str = ""
 _permanent_kernel: str = ""
 _static_system_prefix: str = ""
+
+
+def _read_canonical_system_prompt() -> str:
+    """Read Taey's sole system-prompt source or refuse startup."""
+    path = Path(SYSTEM_PROMPT_PATH)
+    if not path.is_file():
+        raise RuntimeError(
+            f"canonical system prompt is missing or not a regular file: {path}"
+        )
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise RuntimeError(f"canonical system prompt is unreadable: {path}") from exc
+    if not text.strip():
+        raise RuntimeError(f"canonical system prompt is empty: {path}")
+    return text
 _last_send: dict[str, float] = {}
 _request_context: contextvars.ContextVar[dict] = contextvars.ContextVar(
     "taey_request_context", default={},
@@ -219,12 +237,12 @@ async def startup():
     else:
         log.warning("Permanent kernel not found at %s", PERMANENT_KERNEL_PATH)
 
-    if os.path.exists(SYSTEM_PROMPT_PATH):
-        with open(SYSTEM_PROMPT_PATH) as f:
-            _system_prompt = f.read()
-        log.info("System prompt loaded from %s (%d chars)", SYSTEM_PROMPT_PATH, len(_system_prompt))
-    else:
-        log.warning("System prompt not found at %s", SYSTEM_PROMPT_PATH)
+    _system_prompt = _read_canonical_system_prompt()
+    log.info(
+        "Canonical system prompt loaded from %s (%d chars)",
+        SYSTEM_PROMPT_PATH,
+        len(_system_prompt),
+    )
 
     _static_system_prefix = _permanent_kernel
     if _static_system_prefix:
@@ -2856,6 +2874,9 @@ async def _chat_completions_for_turn(
 
 
 def main():
+    # Preflight before uvicorn binds a socket. The startup hook repeats this
+    # validation for ASGI launchers that import `app` instead of calling main().
+    _read_canonical_system_prompt()
     log.info("Starting soma proxy on port %d -> vLLM at %s", PROXY_PORT, VLLM_BASE)
     uvicorn.run(app, host="0.0.0.0", port=PROXY_PORT, log_level="info")
 

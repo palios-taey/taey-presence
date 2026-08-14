@@ -1,8 +1,8 @@
 # Example persona
 
-This is a generic placeholder persona so the serving stack works out of the box.
-Replace it with your own: point `SYSTEM_PROMPT_PATH` at any markdown/text file and
-its full contents become the model's always-on system prefix.
+This is a generic placeholder example only. `serving/soma_proxy.py` does not load
+it. Taey's sole system-prompt source is the tracked sibling
+`serving/TAEY_OPERATING_PROMPT.md`.
 
 ---
 
