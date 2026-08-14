@@ -881,6 +881,12 @@ TOOLS = [
                                   "description": "for extract: absolute path of the artifact you SENT. The extraction is refused if the clipboard matches it, which is how a prompt echo is caught."},
                     "file": {"type": "string",
                              "description": "absolute path of the file that should be attached (verify_attachment action)"},
+                    "role": {"type": "string",
+                             "description": "exact AT-SPI role, for click/focus/activate on an element the YAML does not key. Pair with name and nth."},
+                    "name": {"type": "string",
+                             "description": "exact accessible name for role-based targeting; may be the empty string (Perplexity's composer is nameless)."},
+                    "nth": {"type": "integer",
+                            "description": "which occurrence within that exact role+name group, from the nth field observe returns. Default 0."},
                     "expect": {"type": "string", "enum": ["present", "absent"],
                                "description": "what verify should find. 'present' = the control is on screen (the step landed); 'absent' = it is gone (e.g. stop_button absent means generation finished)."},
                 },
@@ -1380,6 +1386,9 @@ def _do_drive_chat(arguments: dict) -> str:
     if action == "extract":
         if arguments.get("sent_file"):
             cmd += ["--sent-file", str(arguments["sent_file"])]
+    elif action == "read_clipboard":
+        if arguments.get("path"):
+            cmd += ["--path", str(arguments["path"])]
     elif action == "attach":
         path = arguments.get("path") or arguments.get("file")
         if not path:
@@ -1413,9 +1422,19 @@ def _do_drive_chat(arguments: dict) -> str:
         element = arguments.get("element")
         if element:
             cmd += ["--element", str(element)]
+        elif arguments.get("role"):
+            # No YAML key for this element (or the YAML keys it structurally,
+            # which a per-element matcher cannot resolve). Exact role+name+nth
+            # is then the only way to act — Perplexity's composer is a nameless
+            # entry, so name="" is a legitimate exact target.
+            cmd += ["--role", str(arguments["role"])]
+            cmd += ["--name", str(arguments.get("name", ""))]
+            if arguments.get("nth") is not None:
+                cmd += ["--nth", str(int(arguments["nth"]))]
         else:
             return _err(display, action,
-                        f"{action} requires element=<platform YAML key, e.g. 'new_chat'>")
+                        f"{action} requires element=<platform YAML key>, or "
+                        f"role=/name=/nth= for an element the YAML does not key")
     elif action in ("type", "paste"):
         # Prefer text_file: the model passes a PATH and ui_drive pastes the exact
         # file bytes. A large packet as inline `text` forces the model to regenerate

@@ -141,6 +141,31 @@ Your hands on a display are the single tool `drive_chat`, one action per call:
     drive_chat(display=":5", action="navigate", url="...")     go to a URL
     drive_chat(display=":5", action="focus",  ref=<ref>)       set accessibility focus (a click is what enables typing; focus is rarely what you want)
 
+**HOW TO ACT ON ANY CONTROL, INCLUDING ONE THE YAML DOES NOT NAME.** The accessibility tree is the
+truth and everything on these sites is in it — they are major platforms under accessibility law, not
+hand-rolled pages. If you cannot act on something, you are addressing it wrong; it is not missing.
+
+  1. `observe` and READ the tree. Every element comes back with its exact `name`, `role`, and `nth`
+     (which occurrence it is within that same name+role group), plus `element` — the platform's YAML
+     key — when the YAML names it.
+  2. If it has a YAML key, use it: `click element="send_button"`. That is always preferred.
+  3. If it has NO key, or the key is ambiguous, address it exactly as the tree reported it:
+     `click role="push button" name="Copy" nth=0`. The name is matched EXACTLY — including the empty
+     string, which is a real and legitimate target: Perplexity's composer is a nameless entry and its
+     own YAML says so.
+  4. A click tries the accessibility action first and then a real pointer click at the element's
+     coordinates. The result tells you which fired (`via: atspi` or `via: pointer`). Many controls on
+     these sites only respond to the pointer — that is normal, not a failure.
+
+**Harvest a response straight to disk: `read_clipboard path="/abs/path.md"`.** The tool writes the
+bytes itself and returns the character count and a sha256. Never read a long answer back and then
+retype it into `write_file` — that makes you regenerate every character, which is slow and drifts.
+
+**Worked example, 2026-08-13, after the packaged extract had failed twice on Perplexity:**
+`observe` showed `Copy` (push button, nth 0). `click role="push button" name="Copy" nth=0` fired,
+then `read_clipboard path=...` wrote 1,471 characters with a hash. Nothing was hidden and nothing
+needed fixing — the control simply had to be addressed as the tree described it.
+
 **`drive_chat` is the ONLY way you touch a display. There is no second route, and looking for one
 is itself the error.** Never drive a display from `run_command` — no `DISPLAY=:N xdotool`, no
 `xsel`, no `AT_SPI_BUS_ADDRESS=... Atspi`, no launching a browser. Those bypass the per-display lock

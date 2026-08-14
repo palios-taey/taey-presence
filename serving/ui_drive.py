@@ -391,20 +391,33 @@ def _observe(args: argparse.Namespace, deps: SimpleNamespace) -> list[dict[str, 
         raise UiDriveError(f"Firefox not found for {platform or deps.display}")
     rows = deps.tree.find_elements(firefox, fence_after=[])
     element_map = ((_platform_config(deps.display).get("tree") or {}).get("element_map") or {})
-    return [
-        {
+    # Every row carries `nth`: its occurrence within its own (role, name) group.
+    # Without it an element that has no YAML key is UNADDRESSABLE — observe can
+    # see it and nothing can act on it. That is not hypothetical: Perplexity's
+    # composer is a NAMELESS entry (its YAML says so outright), so role+name
+    # alone is ambiguous and there is no key to fall back on. role+name+nth is
+    # still exact matching — no substring, no guessing — it just says WHICH of
+    # the identical matches you mean.
+    occurrences: dict[tuple[str, str], int] = {}
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        role = row.get("role") or ""
+        name = row.get("name") or ""
+        nth = occurrences.get((role, name), 0)
+        occurrences[(role, name)] = nth + 1
+        out.append({
             "element": next(
                 (key for key, spec in element_map.items()
                  if deps.snapshot.matches_spec(row, spec)),
                 None,
             ),
-            "name": row.get("name") or "",
-            "role": row.get("role") or "",
+            "name": name,
+            "role": role,
+            "nth": nth,
             "text": row.get("text") or "",
             "states": list(row.get("states") or []),
-        }
-        for row in rows
-    ]
+        })
+    return out
 
 
 def _verify_composer(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str, Any]:
@@ -454,6 +467,34 @@ def _verify_composer(args: argparse.Namespace, deps: SimpleNamespace) -> dict[st
     }
 
 
+def _row_by_role_name_nth(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str, Any]:
+    """Resolve a target by EXACT role + name + occurrence.
+
+    For elements the platform YAML does not key — and for the ones it keys
+    structurally, which a per-element matcher cannot resolve — this is the only
+    way to act at all. Name is matched exactly, including the empty string.
+    """
+    platform = _DISPLAY_PLATFORM.get(deps.display)
+    firefox = deps.routing.find_firefox_for_platform(platform) if platform else None
+    if firefox is None:
+        raise UiDriveError(f"Firefox not found for {platform or deps.display}")
+    want_role = args.role or ""
+    want_name = args.name if args.name is not None else ""
+    nth = int(args.nth or 0)
+    matches = [
+        row for row in deps.tree.find_elements(firefox, fence_after=[])
+        if (row.get("role") or "") == want_role and (row.get("name") or "") == want_name
+    ]
+    if not matches:
+        raise UiDriveError(
+            f"no element with role={want_role!r} name={want_name!r} on {deps.display}")
+    if nth >= len(matches):
+        raise UiDriveError(
+            f"role={want_role!r} name={want_name!r} has {len(matches)} matches; "
+            f"occurrence {nth} does not exist")
+    return matches[nth]
+
+
 def _element_action(
     action: str, args: argparse.Namespace, deps: SimpleNamespace
 ) -> dict[str, Any]:
@@ -461,14 +502,39 @@ def _element_action(
     firefox = deps.routing.find_firefox_for_platform(platform) if platform else None
     if firefox is None:
         raise UiDriveError(f"Firefox not found for {platform or deps.display}")
-    spec = _element_spec(deps.display, args.element)
-    rows = deps.tree.find_elements(firefox, fence_after=[])
-    matches = [row for row in rows if deps.snapshot.matches_spec(row, spec)]
-    if len(matches) != 1:
+    if getattr(args, "element", None):
+        spec = _element_spec(deps.display, args.element)
+        rows = deps.tree.find_elements(firefox, fence_after=[])
+        matches = [row for row in rows if deps.snapshot.matches_spec(row, spec)]
+        if len(matches) != 1:
+            raise UiDriveError(
+                f"element {args.element!r} matched {len(matches)} elements; expected exactly one")
+        row = matches[0]
+        by_key = True
+    elif getattr(args, "role", None) is not None:
+        row = _row_by_role_name_nth(args, deps)
+        by_key = False
+    else:
         raise UiDriveError(
-            f"element {args.element!r} matched {len(matches)} elements; expected exactly one")
-    row = matches[0]
+            f"{action} needs a target: --element <YAML key>, or --role/--name/--nth "
+            f"for an element the YAML does not key")
     actions = deps.SeatActions(deps.display, deps.ConsultationRuntime(platform))
+    if not by_key:
+        # Resolved positionally: act on THIS row. Re-finding by name would be
+        # ambiguous, and for a nameless element meaningless.
+        if action == "focus":
+            performed, via = deps.interact.atspi_focus(row), "atspi"
+        else:
+            performed, via = deps.interact.atspi_click(row), "atspi"
+            if not performed and row.get("x") is not None and row.get("y") is not None:
+                performed = deps.input.click_at(int(row["x"]), int(row["y"]))
+                via = "pointer"
+        if not performed:
+            raise UiDriveError(
+                f"{action} on role={args.role!r} name={args.name!r} nth={args.nth} did not fire")
+        return {"performed": True, "via": via,
+                "element": {"name": row.get("name") or "", "role": row.get("role") or "",
+                            "nth": int(args.nth or 0)}}
     if action == "click":
         performed = actions.click(str(row.get("name") or ""), row.get("role"))
         via = "seat_actions"
@@ -622,6 +688,26 @@ def _key(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str, Any]:
     return {"key": args.key, "clearmodifiers": True}
 
 
+def _read_clipboard_to_file(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str, Any]:
+    """Write the clipboard straight to a file.
+
+    Round-tripping a harvested answer through the model — read it, then hand it
+    back for write_file — makes the model REGENERATE every character. That is
+    slow, it drifts, and it is the same boundary that produced a fabricated
+    packet on 2026-08-13. The tool has the bytes; the tool writes them.
+    """
+    text = deps.clipboard.read() or ""
+    if not text.strip():
+        raise UiDriveError("clipboard is empty — nothing to write")
+    path = Path(os.path.abspath(args.path))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    import hashlib
+    return {"path": str(path), "chars": len(text),
+            "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            "head": text[:120], "tail": text[-120:]}
+
+
 def _read_clipboard(deps: SimpleNamespace) -> dict[str, Any]:
     platform = _DISPLAY_PLATFORM.get(deps.display)
     if not platform:
@@ -653,9 +739,17 @@ def _add_display(parser: argparse.ArgumentParser) -> None:
 def _add_target(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--element",
-        required=True,
-        help="platform-YAML element key (e.g. attach_trigger, input, send_button)",
+        help="platform-YAML element key (e.g. attach_trigger, input, send_button). "
+             "Preferred. Omit it only for an element the YAML does not key.",
     )
+    # For elements the YAML does not key — and the ones it keys STRUCTURALLY,
+    # which a per-element matcher cannot resolve — exact role+name+nth is the
+    # only way to act. Perplexity's composer is a nameless entry, so --name ""
+    # is a legitimate, exact target.
+    parser.add_argument("--role", help="exact AT-SPI role, used with --name/--nth")
+    parser.add_argument("--name", help="exact accessible name; may be the empty string")
+    parser.add_argument("--nth", type=int, default=0,
+                        help="which occurrence within that exact role+name group (default 0)")
 
 
 
@@ -722,6 +816,7 @@ def _parser() -> argparse.ArgumentParser:
 
     read_clipboard = commands.add_parser("read-clipboard")
     _add_display(read_clipboard)
+    read_clipboard.add_argument("--path", help="write the clipboard to this file instead of returning it, so the text is never regenerated by a model")
 
     navigate = commands.add_parser("navigate")
     _add_display(navigate)
@@ -805,6 +900,8 @@ def _dispatch(args: argparse.Namespace, deps: SimpleNamespace) -> Any:
         return _observe(args, deps)
     if args.action == "read-clipboard":
         _renew_if_owner(deps.display, LOCK_TTL_DEFAULT)
+        if getattr(args, "path", None):
+            return _read_clipboard_to_file(args, deps)
         return _read_clipboard(deps)
     if args.action == "verify":
         _renew_if_owner(deps.display, LOCK_TTL_DEFAULT)  # a read, like observe — never guarded
