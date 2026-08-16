@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import json
 import os
 import re
@@ -733,7 +734,60 @@ def _key(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str, Any]:
     return {"key": args.key, "clearmodifiers": True}
 
 
-def _read_clipboard(deps: SimpleNamespace) -> dict[str, Any]:
+def _write_output_artifact(text: str, output_file: str) -> dict[str, Any]:
+    if not isinstance(output_file, str) or not output_file:
+        raise UiDriveError("output_file must be a non-empty string")
+    path = Path(output_file)
+    if not path.is_absolute():
+        raise UiDriveError(f"output_file must be an absolute path: {output_file!r}")
+    if path.is_symlink():
+        raise UiDriveError(f"output_file must not be a symlink: {path}")
+    if os.path.lexists(path):
+        raise UiDriveError(f"output_file already exists; refusing overwrite: {path}")
+    if not path.parent.is_dir():
+        raise UiDriveError(f"output_file parent directory does not exist: {path.parent}")
+    if not isinstance(text, str):
+        raise UiDriveError("artifact content must be a string")
+
+    payload = text.encode("utf-8")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+
+    try:
+        fd = os.open(path, flags, 0o600)
+    except FileExistsError as exc:
+        raise UiDriveError(f"output_file already exists; refusing overwrite: {path}") from exc
+    except OSError as exc:
+        raise UiDriveError(f"could not create output_file {path}: {exc}") from exc
+
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "wb") as handle:
+            fd = -1
+            written = handle.write(payload)
+            if written != len(payload):
+                raise UiDriveError(
+                    f"short write to output_file {path}: {written} of {len(payload)} bytes"
+                )
+            handle.flush()
+            os.fsync(handle.fileno())
+    except Exception:
+        if fd >= 0:
+            os.close(fd)
+        raise
+
+    return {
+        "output_file": str(path),
+        "bytes": len(payload),
+        "chars": len(text),
+        "sha256": hashlib.sha256(payload).hexdigest(),
+    }
+
+
+def _read_clipboard(
+    deps: SimpleNamespace, output_file: str | None = None
+) -> dict[str, Any]:
     lock = deps.clipboard.acquire_clipboard_lock()
     try:
         text = deps.clipboard.read()
@@ -741,6 +795,8 @@ def _read_clipboard(deps: SimpleNamespace) -> dict[str, Any]:
         deps.clipboard.release_clipboard_lock(lock)
     if text is None:
         raise UiDriveError("clipboard read returned no text")
+    if output_file is not None:
+        return _write_output_artifact(text, output_file)
     return {"text": text}
 
 
@@ -781,7 +837,12 @@ def _extract_response(args: argparse.Namespace, deps: SimpleNamespace) -> dict[s
                 f"(prompt echo): {path}"
             )
 
-    return result
+    output_file = getattr(args, "output_file", None)
+    if output_file is None:
+        return result
+
+    receipt = _write_output_artifact(text, output_file)
+    return {**{key: value for key, value in result.items() if key != "response_text"}, **receipt}
 
 
 def _navigate(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str, Any]:
@@ -853,6 +914,7 @@ def _parser() -> argparse.ArgumentParser:
 
     read_clipboard = commands.add_parser("read-clipboard")
     _add_display(read_clipboard)
+    read_clipboard.add_argument("--output-file", dest="output_file")
 
     extract = commands.add_parser("extract")
     _add_display(extract)
@@ -861,6 +923,7 @@ def _parser() -> argparse.ArgumentParser:
         dest="sent_file",
         help="exact sent artifact; reject extraction if the answer is a prompt echo",
     )
+    extract.add_argument("--output-file", dest="output_file")
 
     navigate = commands.add_parser("navigate")
     _add_display(navigate)
@@ -947,7 +1010,7 @@ def _dispatch(args: argparse.Namespace, deps: SimpleNamespace) -> Any:
         return _observe(args, deps)
     if args.action == "read-clipboard":
         _renew_if_owner(deps.display, LOCK_TTL_DEFAULT)
-        return _read_clipboard(deps)
+        return _read_clipboard(deps, getattr(args, "output_file", None))
     if args.action in _LOCK_ACTION_OPS:
         _guard_action(deps.display, LOCK_TTL_DEFAULT)
     if args.action == "extract":
