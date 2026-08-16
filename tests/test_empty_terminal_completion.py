@@ -8,7 +8,7 @@ from fastapi import HTTPException
 from serving import soma_proxy
 
 
-class EmptyTerminalCompletionTests(unittest.TestCase):
+class MissingTerminalAnswerTests(unittest.TestCase):
     def test_receipt_contains_shape_and_hashes_but_not_body(self):
         payload = {
             "id": "completion-1",
@@ -33,7 +33,7 @@ class EmptyTerminalCompletionTests(unittest.TestCase):
             upstream_status=200,
         )
 
-        self.assertEqual(receipt["error"], "upstream_terminal_completion_empty")
+        self.assertEqual(receipt["error"], "upstream_terminal_answer_missing")
         self.assertEqual(receipt["finish_reason"], "length")
         self.assertEqual(receipt["tool_call_count"], 0)
         self.assertEqual(receipt["content"]["chars"], 0)
@@ -42,14 +42,15 @@ class EmptyTerminalCompletionTests(unittest.TestCase):
         self.assertNotIn("completion-1", serialized)
         self.assertNotIn("242000 characters", serialized)
 
-    def test_empty_probe_fails_before_a_second_upstream_generation(self):
+    def test_thinking_only_probe_fails_without_becoming_a_deliverable_answer(self):
+        reasoning = "Internal analysis that did not produce an answer."
         payload = {
             "choices": [{
                 "finish_reason": "stop",
                 "message": {
                     "role": "assistant",
                     "content": None,
-                    "reasoning": None,
+                    "reasoning": reasoning,
                     "tool_calls": [],
                 },
             }],
@@ -93,6 +94,8 @@ class EmptyTerminalCompletionTests(unittest.TestCase):
         self.assertEqual(event, "upstream_invalid_completion")
         self.assertEqual(receipt["finish_reason"], "stop")
         self.assertEqual(receipt["usage"]["completion_tokens"], 50)
+        self.assertEqual(receipt["reasoning"]["chars"], len(reasoning))
+        self.assertNotIn(reasoning, soma_proxy.json.dumps(receipt))
 
 
 if __name__ == "__main__":

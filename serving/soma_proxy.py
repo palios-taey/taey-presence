@@ -2549,7 +2549,7 @@ def _invalid_completion_receipt(
     )
     return {
         "ok": False,
-        "error": "upstream_terminal_completion_empty",
+        "error": "upstream_terminal_answer_missing",
         "upstream_status": upstream_status,
         "response_type": type(payload).__name__,
         "response_keys": sorted(str(key) for key in response),
@@ -2685,20 +2685,20 @@ async def _chat_completions_for_turn(
                     or message.get("reasoning_content")
                     or ""
                 )
-                if not answer and not thinking:
+                if not answer:
                     receipt = _invalid_completion_receipt(
                         payload,
                         upstream_status=resp.status_code,
                     )
                     _audit("upstream_invalid_completion", receipt)
                     log.error(
-                        "Upstream terminal completion was empty: %s",
+                        "Upstream terminal completion had no assistant answer: %s",
                         json.dumps(receipt, sort_keys=True),
                     )
                     raise HTTPException(
                         status_code=502,
                         detail={
-                            "error": "upstream_terminal_completion_empty",
+                            "error": "upstream_terminal_answer_missing",
                             "turn_id": turn.turn_id,
                         },
                     )
@@ -2771,7 +2771,7 @@ async def _chat_completions_for_turn(
             prompt_tokens = 0
             outcome = "stream_complete"
             try:
-                if resolved_answer or resolved_thinking:
+                if resolved_answer:
                     completion_id = f"chatcmpl-{turn.turn_id}"
                     for i in range(0, len(resolved_thinking), 240):
                         yield ("data: " + json.dumps({
