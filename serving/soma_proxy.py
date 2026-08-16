@@ -10,8 +10,10 @@ Clients hit this proxy on port 8765.
 This proxy forwards to vLLM on port 8000.
 """
 import os
+import stat
 import sys
 import time
+import hashlib
 import json
 import ast
 import contextvars
@@ -523,17 +525,10 @@ async def execute_tool_call_async(
     _audit("tool_start", {"name": name, "arguments": arguments})
     try:
         result = await asyncio.to_thread(execute_tool_call, name, arguments)
-        _audit("tool_end", {"name": name, "result_chars": len(str(result)), "ok": True})
+        _audit("tool_end", _tool_receipt(name, arguments, result, ok=True))
         return result
     except Exception as exc:
-        _audit(
-            "tool_end",
-            {
-                "name": name,
-                "ok": False,
-                "error": f"{type(exc).__name__}: {exc}",
-            },
-        )
+        _audit("tool_end", _tool_receipt(name, arguments, exc, ok=False))
         raise
     finally:
         _request_context.reset(token)
@@ -1208,11 +1203,154 @@ TOOL_AUDIT_PATH = os.environ.get(
 )
 
 
+# ---------------------------------------------------------------------------
+# TOOL RECEIPTS
+#
+# The log could not answer "did it work". tool_end recorded result_chars and
+# discarded the outcome, so an attempt and its result were the same event: a
+# `type` call was read from the audit and reported as text having been entered
+# when the page showed it never landed.
+#
+# The fix is NOT to persist every body. Content-returning tools hand back file
+# contents, database rows and whole Chat answers; writing those into a durable
+# log manufactures a second copy of the very material the artifact transport
+# exists to keep out of the model, and widens disclosure well beyond arguments.
+# So the default is METADATA ONLY. A tool opts in to a structured receipt that
+# proves the outcome without reproducing the content.
+# ---------------------------------------------------------------------------
+
+# Results that ARE content by definition. Never persist their bodies.
+_CONTENT_RETURNING = frozenset({
+    "run_command", "read_file", "retrieve_document", "search_isma",
+    "fetch_url", "list_dir", "check_body_state",
+})
+
+_SECRET_RE = re.compile(
+    r"(?i)(api[_-]?key|secret|token|password|passwd|bearer|authorization)"
+    r"([\"\'\s:=]+)(\S{8,})"
+)
+
+
+def _redact(text: str) -> str:
+    return _SECRET_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}[REDACTED]", text)
+
+
+def _digest(body: str) -> dict:
+    """Prove WHICH bytes came back without keeping them."""
+    return {
+        "result_chars": len(body),
+        "result_sha256": hashlib.sha256(body.encode("utf-8", "replace")).hexdigest(),
+    }
+
+
+def _drive_chat_receipt(arguments: dict, body: str) -> dict:
+    """drive_chat is the tool whose outcome is a small non-content verdict --
+    did the element resolve, did the click fire, which path carried it. Those
+    are exactly the fields that separate an attempt from a result, and none of
+    them are Chat content. extract/read_clipboard are excluded because their
+    result IS the answer body; they get a digest only.
+    """
+    action = str(arguments.get("action") or "")
+    receipt = {"action": action}
+    if action in {"extract", "read_clipboard"}:
+        return receipt
+    try:
+        parsed = json.loads(body)
+    except Exception:
+        return receipt
+    if not isinstance(parsed, dict):
+        return receipt
+    receipt["tool_ok"] = parsed.get("ok")
+    if parsed.get("error"):
+        receipt["tool_error"] = _redact(str(parsed["error"]))[:300]
+    res = parsed.get("result")
+    if isinstance(res, dict):
+        for key in ("performed", "via", "present", "count", "satisfied",
+                    "attached", "match", "matched_title", "output_file",
+                    "sha256", "chars", "bytes", "element", "role", "nth"):
+            if key in res:
+                receipt[key] = res[key]
+    return receipt
+
+
+def _tool_receipt(name, arguments, result, *, ok):
+    """A receipt proving what happened, carrying no more content than it must.
+
+    `arguments` is required, not optional: policy is per-tool and, for
+    drive_chat, per-action. Without it the builder cannot tell a click verdict
+    from an extracted Chat answer.
+    """
+    if isinstance(result, BaseException):
+        body = f"{type(result).__name__}: {result}"
+    elif isinstance(result, str):
+        body = result
+    else:
+        body = str(result)
+
+    detail = {"name": name, "ok": ok}
+    detail.update(_digest(body))
+
+    if not ok:
+        # Exceptions carry the same disclosure risk as results: a failing
+        # run_command puts the command's output, and any credential in it,
+        # into the exception message.
+        detail["error"] = _redact(body)[:300]
+        return detail
+
+    if name == "drive_chat" and isinstance(arguments, dict):
+        detail.update(_drive_chat_receipt(arguments, body))
+    elif name not in _CONTENT_RETURNING:
+        detail["result_preview"] = _redact(body)[:200]
+    return detail
+
+
+# The audit holds command arguments, error text and outcome verdicts. It was
+# created by a bare open() and inherited the process umask -- observed 0664,
+# world-readable. It is opened 0600 and an existing file is tightened on first
+# write, so a log that already leaked its mode does not stay that way.
+_AUDIT_MAX_BYTES = int(os.environ.get("TAEY_AUDIT_MAX_BYTES", str(64 * 1024 * 1024)))
+_AUDIT_KEEP = int(os.environ.get("TAEY_AUDIT_KEEP", "5"))
+
+
+def _audit_rotate_if_needed(path: str) -> None:
+    """Bound the audit on disk. Without this it grows without limit -- it is
+    already 5MB from a few days of driving -- and an unbounded log is one that
+    eventually gets deleted wholesale, losing the history it existed to keep."""
+    try:
+        if os.path.getsize(path) < _AUDIT_MAX_BYTES:
+            return
+    except OSError:
+        return
+    try:
+        oldest = f"{path}.{_AUDIT_KEEP}"
+        if os.path.exists(oldest):
+            os.remove(oldest)
+        for n in range(_AUDIT_KEEP - 1, 0, -1):
+            src, dst = f"{path}.{n}", f"{path}.{n + 1}"
+            if os.path.exists(src):
+                os.replace(src, dst)
+        os.replace(path, f"{path}.1")
+    except OSError as exc:
+        log.error("tool audit rotate failed path=%s: %s", path, exc)
+
+
+def _audit_open(path: str):
+    """Append with 0600 from creation, never via umask."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    try:
+        if stat.S_IMODE(os.fstat(fd).st_mode) != 0o600:
+            os.fchmod(fd, 0o600)
+    except OSError:
+        pass
+    return os.fdopen(fd, "a", encoding="utf-8")
+
+
 def _audit(tool: str, detail: dict) -> None:
     try:
         import json as _j, time as _t
         context = dict(_request_context.get())
-        with open(TOOL_AUDIT_PATH, "a", encoding="utf-8") as f:
+        _audit_rotate_if_needed(TOOL_AUDIT_PATH)
+        with _audit_open(TOOL_AUDIT_PATH) as f:
             f.write(_j.dumps({"ts": _t.strftime("%Y-%m-%dT%H:%M:%SZ", _t.gmtime()),
                               **context, "tool": tool, **detail}) + "\n")
     except Exception as exc:

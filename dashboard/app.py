@@ -202,6 +202,64 @@ def _read_session_events(session_id: str) -> list[dict]:
     return events
 
 
+# ---------------------------------------------------------------------------
+# CANONICAL TRANSCRIPT EVENTS
+#
+# Two writers produced the same event type under two schemas: the seat wrote
+# `context_content`, this dashboard wrote `content`. Measured on the live
+# transcript: 13 UI ingress events, 0 with context_content, 13 with content --
+# so every reader following the seat's schema saw an empty prompt body,
+# including for the operator's own production assignment. Nothing was lost; it
+# was unreadable, which is worse because it looks like absence.
+#
+# These constructors are the single place either field is set. New call sites go
+# through them so a third schema cannot appear by accident.
+#
+# LIFECYCLE JOIN KEY: `event_id` identifies one prompt-to-outcome lifecycle and
+# is carried unchanged from ingress through attempt to every outcome, terminal
+# or not. `attempt_id` distinguishes retries within that lifecycle. Joining on
+# anything else (source, timestamp proximity) is guesswork.
+# ---------------------------------------------------------------------------
+
+
+def _ingress_event(*, event_id, correlation_id, source, kind, body, **extra):
+    """One canonical ingress shape. `content` and `context_content` are the same
+    bytes because readers of both schemas must agree; they are written here and
+    nowhere else."""
+    text = "" if body is None else str(body)
+    event = {
+        "event_type": "executive_ingress",
+        "event_id": event_id,
+        "correlation_id": correlation_id,
+        "source": source,
+        "source_id": extra.pop("source_id", event_id),
+        "kind": kind,
+        "role": extra.pop("role", "user"),
+        "content": text,
+        "context_content": text,
+    }
+    event.update(extra)
+    return event
+
+
+def _turn_attempt_event(*, event_id, correlation_id, attempt_id, source, kind, prompt, **extra):
+    """A turn that records only its outcome cannot be observed while it runs:
+    no start, so no duration, and an in-flight turn is indistinguishable from no
+    turn at all. Observed 2026-08-16 -- the transcript showed no turn opened
+    since 21:43 while work ran continuously from 21:55."""
+    event = {
+        "event_type": "turn_attempt",
+        "event_id": event_id,
+        "correlation_id": correlation_id,
+        "attempt_id": attempt_id,
+        "source": source,
+        "kind": kind,
+        "prompt": "" if prompt is None else str(prompt),
+    }
+    event.update(extra)
+    return event
+
+
 def _append_session_event(session_id: str, event: dict) -> None:
     path = _session_file(session_id)
     _require_private_session_directory()
@@ -1892,21 +1950,29 @@ async def chat_session_append(session_id: str, request: Request):
     if not content:
         raise HTTPException(status_code=400, detail="message content is required")
     event_id = str(body.get("event_id") or uuid.uuid4().hex)
-    _append_session_event(
-        session_id,
-        {
-            "event_type": "executive_ingress"
-            if role == "user"
-            else "turn_outcome",
+    correlation_id = str(body.get("correlation_id") or event_id)
+    source = str(body.get("source") or "ui")
+    if role == "user":
+        event = _ingress_event(
+            event_id=event_id,
+            correlation_id=correlation_id,
+            source=source,
+            kind="user_prompt",
+            body=content,
+            role=role,
+        )
+    else:
+        event = {
+            "event_type": "turn_outcome",
             "event_id": event_id,
-            "correlation_id": str(body.get("correlation_id") or event_id),
-            "source": str(body.get("source") or "ui"),
-            "kind": "user_prompt" if role == "user" else "assistant_reply",
+            "correlation_id": correlation_id,
+            "source": source,
+            "kind": "assistant_reply",
             "role": role,
             "content": content,
-            "ok": True if role == "assistant" else None,
-        },
-    )
+            "ok": True,
+        }
+    _append_session_event(session_id, event)
     return {"ok": True, "event_id": event_id}
 
 
@@ -1978,20 +2044,18 @@ async def chat_session_council_amendment(
     try:
         _append_session_event(
             session_id,
-            {
-                "event_type": "executive_ingress",
-                "event_id": amendment["revision_id"],
-                "correlation_id": round_id,
-                "round_id": round_id,
-                "prompt_revision": amendment["prompt_revision"],
-                "revision_id": amendment["revision_id"],
-                "source": "ui",
-                "source_id": amendment["revision_id"],
-                "kind": "user_amendment",
-                "role": "user",
-                "content": message,
-                "council_protocol": "taey-native-dcm/v1",
-            },
+            _ingress_event(
+                event_id=amendment["revision_id"],
+                correlation_id=round_id,
+                source="ui",
+                kind="user_amendment",
+                body=message,
+                source_id=amendment["revision_id"],
+                round_id=round_id,
+                prompt_revision=amendment["prompt_revision"],
+                revision_id=amendment["revision_id"],
+                council_protocol="taey-native-dcm/v1",
+            ),
         )
     except Exception as exc:
         _native_council.ledger(session_id, round_id).append(
@@ -2053,20 +2117,18 @@ async def chat_session_stream(session_id: str, request: Request):
             )
             _append_session_event(
                 session_id,
-                {
-                    "event_type": "executive_ingress",
-                    "event_id": amendment["revision_id"],
-                    "correlation_id": active_council["round_id"],
-                    "round_id": active_council["round_id"],
-                    "prompt_revision": amendment["prompt_revision"],
-                    "revision_id": amendment["revision_id"],
-                    "source": "ui",
-                    "source_id": amendment["revision_id"],
-                    "kind": "user_amendment",
-                    "role": "user",
-                    "content": message.strip(),
-                    "council_protocol": "taey-native-dcm/v1",
-                },
+                _ingress_event(
+                    event_id=amendment["revision_id"],
+                    correlation_id=active_council["round_id"],
+                    source="ui",
+                    kind="user_amendment",
+                    body=message.strip(),
+                    source_id=amendment["revision_id"],
+                    round_id=active_council["round_id"],
+                    prompt_revision=amendment["prompt_revision"],
+                    revision_id=amendment["revision_id"],
+                    council_protocol="taey-native-dcm/v1",
+                ),
             )
         except CouncilTransportFailure as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -2109,28 +2171,40 @@ async def chat_session_stream(session_id: str, request: Request):
     ][-(TAEY_SESSION_MAX_TURNS * 2):]
     event_id = uuid.uuid4().hex
     correlation_id = event_id
+    mode = (
+        "taey-native-dcm"
+        if use_council
+        else "proxy"
+        if use_proxy
+        else "raw"
+    )
     _append_session_event(
         session_id,
-        {
-            "event_type": "executive_ingress",
-            "event_id": event_id,
-            "correlation_id": correlation_id,
-            "source": "ui",
-            "source_id": event_id,
-            "kind": "user_prompt",
-            "role": "user",
-            "content": message.strip(),
-            "mode": (
-                "taey-native-dcm"
-                if use_council
-                else "proxy"
-                if use_proxy
-                else "raw"
-            ),
-            "council_enabled": use_council,
-            "council_skipped_by_user": not use_council,
-            "council_opt_out_source": council_opt_out_source,
-        },
+        _ingress_event(
+            event_id=event_id,
+            correlation_id=correlation_id,
+            source="ui",
+            kind="user_prompt",
+            body=message.strip(),
+            mode=mode,
+            council_enabled=use_council,
+            council_skipped_by_user=not use_council,
+            council_opt_out_source=council_opt_out_source,
+        ),
+    )
+    # Opened with the SAME event_id as the ingress -- that is the lifecycle join
+    # key, and every outcome for this prompt carries it unchanged.
+    _append_session_event(
+        session_id,
+        _turn_attempt_event(
+            event_id=event_id,
+            correlation_id=correlation_id,
+            attempt_id=uuid.uuid4().hex,
+            source="ui",
+            kind="user_prompt",
+            prompt=message.strip(),
+            mode=mode,
+        ),
     )
     if use_council:
         try:
