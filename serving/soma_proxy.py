@@ -886,6 +886,7 @@ TOOLS = [
                                  "focus_dialog", "extract"],
                         "description": "the single action to perform",
                     },
+                    "element": {"type": "string", "description": "platform-YAML element key for click/focus/activate, e.g. 'toggle_menu', 'send_button', 'input'. PREFERRED over ref: it resolves to that platform's exact name+role from its own YAML, so no observe is needed first."},
                     "ref": {"type": "string",
                             "description": "element ref from a recent observe (for click/focus/activate)"},
                     "text": {"type": "string", "description": "text to type or paste (use for SHORT input; for a large packet use text_file instead so you don't regenerate every character)"},
@@ -1404,10 +1405,24 @@ def _do_drive_chat(arguments: dict) -> str:
         if arguments.get("max_depth"):
             cmd += ["--max-depth", str(int(arguments["max_depth"]))]
     elif action in ("click", "focus", "activate"):
+        # ui_drive already resolves --element (a platform-YAML key) to that
+        # platform's exact {name, role}. Requiring a ref here meant every click
+        # had to be preceded by a full-tree observe purely to obtain one, so the
+        # tool surface exposed LESS than the layer beneath it and a caller told
+        # to "use the YAML key" had nowhere to put it. A key is stable across
+        # renders; a ref is not.
+        element = arguments.get("element")
         ref = arguments.get("ref")
-        if not ref:
-            return _err(display, action, f"{action} requires a ref from a recent observe")
-        cmd += ["--ref", str(ref)]
+        if element and ref:
+            return _err(display, action, "pass element=<YAML key> or ref=<from observe>, not both")
+        if element:
+            cmd += ["--element", str(element)]
+        elif ref:
+            cmd += ["--ref", str(ref)]
+        else:
+            return _err(display, action,
+                        f"{action} requires element=<platform YAML key, e.g. 'toggle_menu'> "
+                        f"or ref=<from a recent observe>")
     elif action in ("type", "paste"):
         # Prefer text_file: the model passes a PATH and ui_drive pastes the exact
         # file bytes. A large packet as inline `text` forces the model to regenerate
