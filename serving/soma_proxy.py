@@ -13,6 +13,7 @@ import os
 import sys
 import time
 import json
+import hashlib
 import ast
 import contextvars
 import logging
@@ -2512,6 +2513,58 @@ def _upstream_headers(turn: TurnContext) -> dict[str, str]:
     }
 
 
+def _text_receipt(value: object) -> dict[str, object]:
+    """Describe completion text without persisting the text itself."""
+    if not isinstance(value, str):
+        return {"type": type(value).__name__, "chars": 0, "bytes": 0}
+    encoded = value.encode("utf-8", "replace")
+    return {
+        "type": "str",
+        "chars": len(value),
+        "bytes": len(encoded),
+        "sha256": hashlib.sha256(encoded).hexdigest(),
+    }
+
+
+def _invalid_completion_receipt(
+    payload: object,
+    *,
+    upstream_status: int,
+) -> dict[str, object]:
+    """Return a content-free receipt for an unusable upstream completion."""
+    response = payload if isinstance(payload, dict) else {}
+    choices = response.get("choices")
+    choice = choices[0] if isinstance(choices, list) and choices else {}
+    choice = choice if isinstance(choice, dict) else {}
+    message = choice.get("message")
+    message = message if isinstance(message, dict) else {}
+    tool_calls = message.get("tool_calls")
+    usage = response.get("usage")
+    usage = usage if isinstance(usage, dict) else {}
+    usage_keys = (
+        "prompt_tokens",
+        "completion_tokens",
+        "total_tokens",
+        "reasoning_tokens",
+    )
+    return {
+        "ok": False,
+        "error": "upstream_terminal_completion_empty",
+        "upstream_status": upstream_status,
+        "response_type": type(payload).__name__,
+        "response_keys": sorted(str(key) for key in response),
+        "choice_count": len(choices) if isinstance(choices, list) else 0,
+        "choice_keys": sorted(str(key) for key in choice),
+        "finish_reason": choice.get("finish_reason"),
+        "message_keys": sorted(str(key) for key in message),
+        "tool_call_count": len(tool_calls) if isinstance(tool_calls, list) else 0,
+        "content": _text_receipt(message.get("content")),
+        "reasoning": _text_receipt(message.get("reasoning")),
+        "reasoning_content": _text_receipt(message.get("reasoning_content")),
+        "usage": {key: usage.get(key) for key in usage_keys if key in usage},
+    }
+
+
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request):
     raw_body = await request.json()
@@ -2615,7 +2668,8 @@ async def _chat_completions_for_turn(
                     if _attempt == 2:
                         raise
                     log.warning("upstream dropped a pooled connection; retrying once")
-            choice = (resp.json().get("choices") or [{}])[0]
+            payload = resp.json()
+            choice = (payload.get("choices") or [{}])[0]
             message = choice.get("message", {}) or {}
             tool_calls = message.get("tool_calls") or []
             # GATE ON TOOL CALLS ONLY, NOT ON finish_reason. Measured 2026-07-28: this build
@@ -2625,6 +2679,29 @@ async def _chat_completions_for_turn(
             # From the user's side that is indistinguishable from the model refusing to answer.
             # If there are calls to make, make them; finish_reason is not load-bearing here.
             if not tool_calls:
+                answer = message.get("content") or ""
+                thinking = (
+                    message.get("reasoning")
+                    or message.get("reasoning_content")
+                    or ""
+                )
+                if not answer and not thinking:
+                    receipt = _invalid_completion_receipt(
+                        payload,
+                        upstream_status=resp.status_code,
+                    )
+                    _audit("upstream_invalid_completion", receipt)
+                    log.error(
+                        "Upstream terminal completion was empty: %s",
+                        json.dumps(receipt, sort_keys=True),
+                    )
+                    raise HTTPException(
+                        status_code=502,
+                        detail={
+                            "error": "upstream_terminal_completion_empty",
+                            "turn_id": turn.turn_id,
+                        },
+                    )
                 # THE LOOP EXITS BECAUSE THIS PROBE PRODUCED THE FINAL ANSWER. Keep it.
                 #
                 # Discarding it and re-requesting the same messages with stream=True was a defect:
@@ -2639,7 +2716,7 @@ async def _chat_completions_for_turn(
                 # The answer already exists here. Regenerating it was never necessary, costs a
                 # second inference, and reopens a failure mode that cannot happen if we simply
                 # return what the tool loop concluded.
-                resolved_answer = message.get("content") or ""
+                resolved_answer = answer
                 # Keep the REASONING too. ep3 splits its output: reasoning lands in
                 # `reasoning_content` and the answer in `content`. Capturing only the answer meant
                 # that on any turn using tools -- which is most real work -- thinking was generated,
@@ -2652,8 +2729,7 @@ async def _chat_completions_for_turn(
                 # wrong key returned empty forever, so every turn reported "no thinking this turn" while the
                 # model was in fact thinking. Both names are accepted here so a build that renames it again
                 # does not silently blank the panel a second time.
-                resolved_thinking = (message.get("reasoning")
-                                     or message.get("reasoning_content") or "")
+                resolved_thinking = thinking
                 break
             rounds += 1
             log.info("Stream tool calls (round %d): %s", rounds,
