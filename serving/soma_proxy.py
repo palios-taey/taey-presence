@@ -13,7 +13,6 @@ import os
 import sys
 import time
 import json
-import hashlib
 import ast
 import contextvars
 import logging
@@ -2515,6 +2514,8 @@ def _upstream_headers(turn: TurnContext) -> dict[str, str]:
 
 def _text_receipt(value: object) -> dict[str, object]:
     """Describe completion text without persisting the text itself."""
+    import hashlib
+
     if not isinstance(value, str):
         return {"type": type(value).__name__, "chars": 0, "bytes": 0}
     encoded = value.encode("utf-8", "replace")
