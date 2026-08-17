@@ -1,0 +1,45 @@
+worktree under test: /home/mira/.peer-worktrees/infra-codex-vslice-collect
+HEAD: 812ae8298cbd313e9e737899f35a05911e22ba16
+
+##### T-HAPPY — happy path, exit asserted, fields compared INDEPENDENTLY #####
+  PASS: happy path exited 0 (asserted, not just printed)
+    h1.txt sha_ok=True byte_ok=True
+    h2.bin sha_ok=True byte_ok=True
+  PASS: every sha256 reproduces from disk
+  PASS: every byte count reproduces from disk
+
+##### T-D1 — WRITE-TIME BINDING (frozen requirement 6) #####
+Mutate an already-hashed file DURING the run, before the manifest is written.
+    exit=0  manifest=63c1dd951ffedf6f7fd968ad4efa39b8ed584f162f46e715114ee184f8de9201
+            disk    =4a8d8134f29b0b7b60c126f5532bc9f5d9bb73037373cf6fb872d81f1dcefdfd
+  FAIL: exit 0 with manifest NOT matching disk at write time (DEF-1)
+
+##### T-ALIAS — output path aliases a declared artifact (DEF-2) #####
+  PASS: refused output path that aliases a declared artifact
+
+##### T-D4 — CONCURRENT SAME-SIZE REWRITE DURING HASH (residual) #####
+  FAIL: recorded a mixed/stale digest with exit 0 (DEF-5 residual)
+
+##### T-REG — NON-REGULAR FILES (DEF-6, informational) #####
+  PASS: FIFO rejected
+  PASS: /dev/zero rejected
+
+##### T-PERM — DIRECTORY, UNREADABLE, DANGLING SYMLINK #####
+  PASS: directory rejected
+  PASS: unreadable file rejected
+  PASS: dangling symlink rejected
+
+##### T-MISSING — failure must not touch a prior manifest #####
+  PASS: missing file -> non-zero exit
+  PASS: prior manifest content unchanged
+  PASS: prior manifest mtime unchanged
+
+##### T-ERR — ERROR CONTRACT (DEF-4: bare RuntimeError leaks a traceback?) #####
+  PASS: error path honored the ERROR contract
+
+##### T-ENTRY — setup.py console script actually resolves (DEF-11) #####
+  PASS: installed console script taey-delegate works
+
+===== v2 TOTAL: 14 passed, 2 failed =====
+NOTE: on 7538c98f, T-D1 and T-ALIAS are EXPECTED TO FAIL. Passes there would mean
+      this instrument stopped working, not that the defects were fixed.
