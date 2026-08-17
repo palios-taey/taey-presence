@@ -1,0 +1,56 @@
+{
+  "work_order_id": "vertical-slice-2026-08-17-taey-delegate-collect",
+  "frozen": true,
+  "target_repo": "palios-taey/claude-code-fleet-orchestrator",
+  "target_checkout": "/home/mira/claude-code-fleet-orchestrator",
+  "baseline_commit": "a027c7f73f5e9309eb3e6664a9e3ea6114b2e31d",
+  "isolation": "disposable worktree; never build in the live checkout",
+
+  "objective": "Implement `taey-delegate collect`. The script must physically read the disk to construct `artifacts.json` (exists/bytes/sha256). It must fail if a file is missing. The model must not generate the manifest.",
+
+  "why_this_exists": "On 2026-08-17 a production turn reported 'PHASE 1 COMPLETE' with an Artifact Inventory table listing three files under /tmp/careers_revloop_source_extract_20260816T194343Z/ with 'SHA-256' values of 40, 32, and 16 hex characters. The directory did not exist, no tool call in the entire audit had ever created it, and SHA-256 is always 64 hex characters. The manifest was produced by the model instead of by the filesystem. This work order removes the model from that path.",
+
+  "requirements": [
+    "Every field in artifacts.json is derived by reading the filesystem: os.path.exists, os.path.getsize, and hashlib.sha256 over the file bytes.",
+    "No value in artifacts.json may originate from model output, an argument string, or a cached record.",
+    "A missing, unreadable, or zero-byte file is a hard failure: non-zero exit, no artifacts.json written. Partial manifests are not permitted.",
+    "Every sha256 emitted is exactly 64 lowercase hex characters. Reject and fail on any other length rather than emitting it.",
+    "Manifest write is atomic: write to a temp path on the same filesystem, fsync, then rename.",
+    "The command re-verifies each file immediately before writing the manifest so the recorded state matches the state at write time.",
+    "Exit code 0 only when every declared artifact was found, hashed, and recorded."
+  ],
+
+  "artifacts_json_schema": {
+    "generated_at": "ISO-8601 UTC, taken from the clock at run time",
+    "tool_version": "string",
+    "artifacts": [
+      {
+        "path": "absolute path as read",
+        "exists": "boolean, from os.path.exists",
+        "bytes": "integer, from os.path.getsize",
+        "sha256": "64 lowercase hex chars, computed over the file bytes"
+      }
+    ]
+  },
+
+  "acceptance_tests": [
+    "Happy path: given N real files, artifacts.json lists N entries; each sha256 independently reproduces under `sha256sum`; each bytes independently reproduces under `wc -c`.",
+    "Missing-file path: delete one declared file, re-run, assert non-zero exit AND that no artifacts.json was written or modified.",
+    "Anti-fabrication path: point the tool at a path that never existed, assert it fails rather than emitting a plausible entry.",
+    "Hash-shape path: assert every emitted sha256 matches ^[0-9a-f]{64}$.",
+    "Byte-fidelity path: append one byte to a file after a successful run, re-run, assert both bytes and sha256 change."
+  ],
+
+  "out_of_scope": [
+    "No changes to taey-presence.",
+    "No prompt changes.",
+    "No service restarts.",
+    "No changes to the live checkout; all work happens in the disposable worktree."
+  ],
+
+  "completion_evidence_required": [
+    "commit SHA in the worktree",
+    "raw output of the acceptance tests, not a summary",
+    "an artifacts.json produced by an actual run, with at least one sha256 independently reproduced by `sha256sum` in the supervisor's own shell"
+  ]
+}
