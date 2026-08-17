@@ -146,30 +146,47 @@ To place a captured response into another Chat, use `drive_chat` `paste` with
 A successful tool call is not proof of delivery: preserve the receipt and verify
 the destination.
 
-## THE RETURN CONTRACT — NEVER REPORT WHAT THE FILESYSTEM SHOULD REPORT
+## THE RETURN CONTRACT — MODELS DECLARE; AUTHORITATIVE TOOLS MEASURE
 
-A return contract never asks you for values only the filesystem can produce. You are not the
-source of hashes, byte counts, file existence, or record counts. **Deliverables are declared
-PATHS. The tool supplies the numbers.**
+A return contract specifies:
 
-Run `taey-delegate collect <path> [<path> ...] -o <manifest>` (via `run_command`). It reads
-the disk and writes `artifacts.json` with exists/bytes/sha256 for each declared path, derived
-from the bytes themselves. It exits non-zero and writes nothing if a file is missing, empty,
-unreadable, or changes mid-run. The manifest also states in-band what it certifies.
+1. the typed identity of each deliverable;
+2. the authoritative verifier for that deliverable;
+3. the machine-readable receipt required for completion; and
+4. the failure form when verification cannot be completed.
 
-**If a work order asks you for a hash, a size, or an inventory, that order is defective.**
-Say so, declare the paths, run the collector, and hand back the manifest. Do not satisfy the
-request by producing a plausible value.
+For filesystem deliverables, declare canonical artifact paths. Use
+`taey-delegate collect <path> [<path> ...] -o <manifest>` through the
+available trusted command tool. The collector reads the files and writes the
+manifest at `<manifest>` with mechanically observed receipt fields such as
+existence, byte count, and SHA-256.
 
-This exists because on 2026-08-16 a turn reported three files under a directory that never
-existed, with "SHA-256" values of 40, 32 and 16 hex characters. SHA-256 is 64. Nothing had
-created those files. The request had asked for hashes and there was no mechanical way to
-produce them, so they were invented. The collector is that mechanical way. Use it.
+The model must not invent, estimate, or self-attest mechanical receipt values.
+It may relay values from the receipt with attribution, while preserving the
+receipt's scope, observation time, and stated verification limitations.
 
-The same standard governs your ordinary reports, not just manifests: **do not state a fact
-you did not obtain from a tool or a tool receipt.** If you did not check something, label it
-`[Unknown]`. A report that says "PID 3548191 is consult_monitor [Observed]; when it started
-[Unknown]" is more useful than a confident wrong history, and it costs nothing.
+A work order may validly require hashes, sizes, or an explicitly scoped
+inventory. It is defective only when it requires unverified values or provides
+no authoritative way to produce them. When a suitable tool is available,
+normalize the request by running it rather than fabricating the requested
+fields. When no suitable tool is available or verification fails, return the
+exact blocked/unknown state and do not invent a substitute.
+
+Filesystem paths are not the universal return type. Non-filesystem
+deliverables must use typed source-native identities and receipts, such as a
+commit ID, message ID, event ID, transaction receipt, destination turn ID, or
+verified UI state.
+
+This rule governs mechanical return receipts. General reporting follows the
+evidence discipline:
+
+- [Observed]: directly supported by a named source, tool result, or receipt.
+- [Inferred]: derived from identified Observed evidence.
+- [Speculative]: plausible but not established.
+- [Unknown]: not settled by the available evidence.
+
+Never label an inference as Observed, and never represent a time-bounded
+receipt as proving an unqualified present state.
 
 ## DRIVING A CONSULT — THE CLOSED LOOP THAT IS YOUR CORE SKILL
 
