@@ -260,6 +260,59 @@ def _turn_attempt_event(*, event_id, correlation_id, attempt_id, source, kind, p
     return event
 
 
+def _ui_model_history(
+    events: list[dict],
+    *,
+    current_event_id: str | None = None,
+) -> list[dict[str, str]]:
+    """Build model history from completed UI lifecycles, plus the current prompt.
+
+    Fleet and seat outcomes share the transcript for provenance, but they are not
+    turns in the operator's UI conversation. Selecting bare role/content rows
+    admitted fleet assistant replies without their context-only ingress rows,
+    producing consecutive assistant messages and an invented conversation.
+    """
+    completed: dict[str, str] = {}
+    for event in events:
+        event_id = str(event.get("event_id") or "")
+        if (
+            event_id
+            and event.get("event_type") == "turn_outcome"
+            and event.get("source") == "taey"
+            and event.get("kind") == "assistant_reply"
+            and event.get("role") == "assistant"
+            and event.get("ok") is True
+            and isinstance(event.get("content"), str)
+            and event.get("content")
+        ):
+            completed[event_id] = str(event["content"])
+
+    history: list[dict[str, str]] = []
+    seen_ingress: set[str] = set()
+    for event in events:
+        event_id = str(event.get("event_id") or "")
+        if (
+            not event_id
+            or event_id in seen_ingress
+            or event.get("event_type") != "executive_ingress"
+            or event.get("source") != "ui"
+            or event.get("kind") != "user_prompt"
+            or event.get("role") != "user"
+            or not isinstance(event.get("content"), str)
+            or not event.get("content")
+        ):
+            continue
+        seen_ingress.add(event_id)
+        if event_id != current_event_id and event_id not in completed:
+            continue
+        history.append({"role": "user", "content": str(event["content"])})
+        if event_id in completed:
+            history.append(
+                {"role": "assistant", "content": completed[event_id]}
+            )
+    return history
+
+
 def _append_session_event(session_id: str, event: dict) -> None:
     path = _session_file(session_id)
     _require_private_session_directory()
@@ -2160,15 +2213,9 @@ async def chat_session_stream(session_id: str, request: Request):
             },
         )
 
-    executive_context = [
-        {
-            "role": event["role"],
-            "content": str(event["content"]),
-        }
-        for event in _read_session_events(session_id)
-        if event.get("role") in {"user", "assistant"}
-        and event.get("content")
-    ][-(TAEY_SESSION_MAX_TURNS * 2):]
+    executive_context = _ui_model_history(
+        _read_session_events(session_id)
+    )[-(TAEY_SESSION_MAX_TURNS * 2):]
     event_id = uuid.uuid4().hex
     correlation_id = event_id
     mode = (
@@ -2244,14 +2291,10 @@ async def chat_session_stream(session_id: str, request: Request):
             },
         )
 
-    history = [
-        {
-            "role": event["role"],
-            "content": str(event["content"]),
-        }
-        for event in _read_session_events(session_id)
-        if event.get("role") in {"user", "assistant"} and event.get("content")
-    ][-(TAEY_SESSION_MAX_TURNS * 2):]
+    history = _ui_model_history(
+        _read_session_events(session_id),
+        current_event_id=event_id,
+    )[-(TAEY_SESSION_MAX_TURNS * 2):]
     if (
         prompt_opt_out
         and history
