@@ -93,3 +93,59 @@ The correction has a trap in it: a test for an irreducible window FAILS every po
 implementation, so it must be a **characterization probe, not a gate**. Wiring it as a gate
 would recreate the original T-D1 error - a red that accuses code of not doing the
 impossible. It is added as non-gating and labelled.
+
+---
+
+# ADDENDUM 2026-08-17 — authority correction
+
+*Appended, not rewritten. The original text above stands as written so the error and its
+correction both survive.*
+
+## The contradiction
+
+The heading above reads **"Options, for the work-order owner to decide (NOT infra's call)"**
+(`ADJUDICATION.md:63`). `AMENDMENT_1_requirement_6.md:3` then reads **"Decided by: infra
+(supervisor)"**. Both are in this tree. They cannot both be right, and external review
+(Horizon) caught it.
+
+## What actually happened
+
+The adjudication was written first, and at that moment infra genuinely believed the
+requirement-6 contract question belonged to a work-order owner. Infra then escalated it to
+Jesse, who correctly identified the escalation itself as the defect: the question was
+invented by the AI seats, and handing it back was an offload-to-the-human violation of fleet
+rule 7. Infra then decided it, amended the requirement, and applied it.
+
+So the sequence was: *declined → correctly refused the decline → decided.* The two lines are
+snapshots of opposite sides of that correction, and neither was updated to reference the
+other.
+
+## The authority line, as it should have read
+
+> **Requirement 6 was decided by Jesse** — who ruled that the escalation was itself the
+> defect — **informed by a synthesis authored by Claude Chat (Fable 5 Max) of four
+> independent responses (Horizon, Grok, Perplexity, Gemini), routed by Jesse**; recorded and
+> applied by infra.
+
+## Provenance of the source artifacts — stated at the strength it actually has
+
+Ruling 1 of the synthesis directs that source artifacts be hashed. **They cannot be, and
+this is recorded rather than smoothed:** the four independent responses and the synthesis
+arrived in conversation via Jesse. They are not byte-exact artifacts in this tree, so no
+hash can be computed over them and their content is **[Unknown]** to this record. What is
+**[Observed]** is Jesse's own account of the routing chain, quoted above.
+
+This gap is architectural, not clerical, and it is the exact gap the next slice closes: once
+Taey carries Chat responses over the receipted relay (`extract` with `output_file`, path plus
+SHA-256 receipt), Chat artifacts land in-tree with hashes **by construction** instead of by a
+human copying text. Until that lands, any record of a Chat judgment is a paraphrase, and this
+record says so.
+
+## One correction rejected on the evidence
+
+Horizon's list flagged the sentence *"No requirement was weakened to let existing code pass"*
+as overstated. **That flag is not sustained.** The qualifier "to let existing code pass" is
+accurate: requirements 1–5 and 7 were untouched, and the amendment was not authored to
+accommodate the implementation. The sentence stands.
+
+See `AMENDMENT_1_requirement_6.md` addendum for the adjacent sentence that *is* corrected.

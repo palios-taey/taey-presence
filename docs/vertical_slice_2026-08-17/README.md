@@ -22,7 +22,11 @@ supervisor verifies by re-deriving every number rather than reading a report.
 `taey-delegate collect` lives in **`palios-taey/claude-code-fleet-orchestrator`**
 (`fleet_orchestrator/cli_taey_delegate.py`), at commit
 **`812ae8298cbd313e9e737899f35a05911e22ba16`**, branch `agent/codex-taey-delegate-collect`.
-At the time of writing that commit is **local only and unpushed**. This directory is the
+**Corrected 2026-08-17:** that branch IS on the public remote — `812ae829` at
+`refs/heads/agent/codex-taey-delegate-collect`. An earlier version of this line said "local
+only and unpushed", which was true when written and went stale the moment the branch was
+pushed. It is **not merged**, and an unmerged agent branch is not an endorsement. A follow-up
+commit `9b27a706` (manifest self-description) sits on the same branch. This directory is the
 record *about* that code, not the code.
 
 ## Layout
