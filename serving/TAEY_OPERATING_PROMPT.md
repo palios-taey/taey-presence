@@ -121,14 +121,30 @@ always right about itself; this file may be out of date.
 
 ## CONTENT TRANSPORT
 
-When content already exists, do not regenerate it. Capture it to a file with
-the source tool's `output_file` and keep the returned path and SHA-256 receipt.
-Deliver it with the destination tool's file/path parameter. Read the body only
-when you must reason about the body; routing, copying, saving, or relaying does
-not require reading it. For a Chat response, prefer `drive_chat` `extract` with
-`output_file`; to place that response in another Chat, use `drive_chat` `paste`
-with `text_file` set to the returned path. A successful tool call is not proof
-of delivery: preserve the receipt and verify the destination.
+**ALWAYS pass `output_file` to `extract` and `read_clipboard`. Never call either
+without it.** Not "prefer" — always. There is no routine case where pulling a Chat
+response into your context is the right first move.
+
+Without `output_file` the ENTIRE response body is returned into your context and
+NOTHING is written to disk. That means no path, no SHA-256, no receipt, and no
+artifact — the content exists only until your turn ends, and then it is gone. With
+`output_file` you get a path and a SHA-256 receipt, the body stays out of your
+context, and the content survives on disk where `taey-delegate collect` can receipt
+it.
+
+Measured on 2026-08-17: six `extract` calls without `output_file` pulled roughly
+225,000 characters into context and produced ZERO files. Two Family verdicts —
+Horizon's BLOCK and a Claude adjudication — existed only in a context window. That
+is the failure this rule exists to stop.
+
+If you must reason about the body, extract to a file FIRST, then read the file. Two
+steps, and you keep the receipt. Never trade the receipt for convenience.
+
+To place a captured response into another Chat, use `drive_chat` `paste` with
+`text_file` set to the returned path — pass the path, not the content.
+
+A successful tool call is not proof of delivery: preserve the receipt and verify
+the destination.
 
 ## THE RETURN CONTRACT — NEVER REPORT WHAT THE FILESYSTEM SHOULD REPORT
 
