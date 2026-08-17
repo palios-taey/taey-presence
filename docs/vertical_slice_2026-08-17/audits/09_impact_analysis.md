@@ -62,3 +62,52 @@ The index is shared infrastructure owned by conductor, keyed by repo. Re-analyzi
 a worktree path risks re-pointing or polluting the index the whole fleet reads. If a
 worktree-aware index is genuinely wanted, that is a conductor decision, raised as its
 own task, not a side effect of this repair.
+
+---
+
+# ADDENDUM — the module-level bound (added after this analysis failed a second time)
+
+**Why this addendum exists.** The analysis above enumerated a SNAPSHOT of three symbols as
+they existed at `7538c98`. The repair at `812ae829` added eight more, and the implementing
+peer hit the same GitNexus boundary again on `_write_manifest_transaction` and
+`_assert_artifacts_stable` — correctly full-stopping and correctly noting that this document
+did not cover them.
+
+**That recurrence is the tell.** A per-symbol enumeration must be redone every time the file
+grows a function. That is the patch shape: it works once and silently expires. The root-cause
+answer is a bound at the level of the module, which does not expire.
+
+## The bound
+
+Measured references to `cli_taey_delegate`:
+
+| scope | count | what they are |
+|---|---:|---|
+| live checkout | **0** | nothing |
+| worktree, excluding the file itself | **2** | the identical late-bound string `_run_callable("fleet_orchestrator.cli_taey_delegate:main")` at `script_entrypoints.py:79`, plus a stale copy of that same string in a `build/lib/` artifact |
+
+**Nothing anywhere imports this module's namespace.** The only route in is `main`, through a
+string resolved at call time.
+
+> **Therefore every symbol defined in `fleet_orchestrator/cli_taey_delegate.py` has a blast
+> radius bounded by that file — including symbols that do not exist yet.**
+
+The 14 defined at `812ae829`, recorded so the enumeration exists even though the bound makes
+it unnecessary: `ArtifactCollectionError`, `OpenArtifact`, `_resolved_path`, `_fingerprint`,
+`_artifact_from_open_file`, `_assert_output_is_distinct`, `_open_artifact`,
+`collect_artifacts`, `_assert_artifacts_stable`, `_write_manifest_transaction`, `cmd_collect`,
+`build_parser`, `main`.
+
+## The single external contract
+
+`main`'s behaviour and its exit codes. That is what the console-script entrypoint depends on.
+A change to *that* requires fresh impact evidence; a change to anything else inside the module
+does not.
+
+## What did NOT change
+
+`easy_setup.py` remains off-limits — MEDIUM risk, 8 direct callers reaching install/uninstall,
+settings persistence, hook-transaction reconciliation and the Claude permission guard. And
+`npx gitnexus analyze` still must not be run inside a worktree: the index is shared
+infrastructure keyed by repo, and re-analyzing from a worktree path risks re-pointing what the
+whole fleet reads.

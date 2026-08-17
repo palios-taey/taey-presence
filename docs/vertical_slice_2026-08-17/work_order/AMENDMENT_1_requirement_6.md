@@ -65,7 +65,9 @@ one layer up.
    that is deliberately NOT a gate, since a gate no implementation can pass is the same
    false-red error that opened this slice.
 3. **Follow-up, non-blocking:** the manifest should state its own guarantee in-band, so a
-   downstream reader cannot over-read it. Dispatched separately.
+   downstream reader cannot over-read it. Dispatched as `task-2a134b90` (infra-codex),
+   with the requirement that the claim be DERIVED from what the code actually did rather than
+   hardcoded, since a claim string that can drift from behaviour rebuilds the original defect.
 4. **Operational note for real use:** the production case is a delegated work product that no
    competing process is rewriting. The window is unreachable in practice there. That is a
    property of the deployment, not of the tool, and is stated rather than assumed.
