@@ -1,0 +1,50 @@
+{
+  "artifacts": [
+    {
+      "bytes": 1212,
+      "exists": true,
+      "path": "/home/mira/taey_runs/probe1_packet.md",
+      "sha256": "f3209956a16e93138de9df88b8e85a0cd0eb4ab3dc4d946b04b112b2f3eb615c"
+    },
+    {
+      "bytes": 152,
+      "exists": true,
+      "path": "/home/mira/taey_runs/probe1_chat_response.txt",
+      "sha256": "2b681d6c676d34c8573714ce6aa56d829416d414baa341276a7cde36f2442c00"
+    }
+  ],
+  "generated_at": "2026-08-17T20:22:42.859141Z",
+  "tool_version": "1.9.0",
+  "verification": {
+    "artifact_count": 2,
+    "certified_state": {
+      "instantaneous": false,
+      "scope": "verified_window",
+      "window_ends_after": "descriptor_and_path_fingerprint_sweep",
+      "window_ends_before": "same_filesystem_atomic_rename_with_directory_fsync"
+    },
+    "methods": [
+      {
+        "artifact_count": 2,
+        "method": "held_open_descriptors"
+      },
+      {
+        "artifact_count": 2,
+        "method": "reread_and_rehash_after_collection"
+      },
+      {
+        "artifact_count": 2,
+        "method": "descriptor_and_path_fingerprint_sweep"
+      }
+    ],
+    "residual_window": {
+      "between": [
+        "descriptor_and_path_fingerprint_sweep",
+        "same_filesystem_atomic_rename_with_directory_fsync"
+      ],
+      "exists": true,
+      "irreducible_without_filesystem_snapshot": true
+    },
+    "tool_version": "1.9.0"
+  }
+}
