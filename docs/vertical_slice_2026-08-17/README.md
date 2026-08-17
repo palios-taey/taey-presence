@@ -62,17 +62,22 @@ rather than a file, so unlike the other three there is no verbatim artifact to p
 | 2 | Grok | code ACCEPT with residuals C1–C4; **instrument REJECT** |
 | 2 | Codex (gpt-5.5) | code FAIL — post-final-check/pre-rename gap; harness blind to it |
 
-## The open decision
+## The requirement-6 decision — DECIDED
 
-Frozen requirement 6 asks that the manifest reflect *"the state at write time."* The measured
-window between the final stability check and the rename is **~3.7us median, 7.8us max**, and
+Frozen requirement 6 asked that the manifest reflect *"the state at write time."* The measured
+window between the final stability check and the rename is **3.06–7.80us, median 3.7us**, and
 it is **irreducible**: `fstat`/`stat` and `rename` are separate syscalls and POSIX offers no
-compound atomic for "verify N files and rename". Every implementation certifying mutable
-files has this window.
+compound atomic for "verify N files and rename". Every implementation certifying mutable files
+has this window.
 
-So the defect is in the work order, not only in the code. Options in `ADJUDICATION.md`:
-restate the guarantee as *state observed at time T*, constrain inputs to be quiesced during
-collection, or accept and document. The first two are root-cause shapes.
+The defect was therefore in the work order, not only in the code, and it has been
+**amended** — see `work_order/AMENDMENT_1_requirement_6.md`. The manifest certifies *the state
+observed during a verified window ending immediately before commit*, and the residual interval
+is measured and published rather than claimed away.
+
+**Commit `812ae829` satisfies the amended work order and is accepted on the code.** No
+requirement was weakened to let it pass; only the physically unsatisfiable clause was
+corrected, and the replacement is more specific, not less.
 
 ## What went wrong on the supervising side
 
