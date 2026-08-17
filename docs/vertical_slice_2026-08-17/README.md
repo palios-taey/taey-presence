@@ -36,7 +36,7 @@ record *about* that code, not the code.
 | `README.md` | this file |
 | `ADJUDICATION.md` | **start here** — two lenses split, and how it was resolved |
 | `COSMOS_SURVEY_PACKET.md` | the read-only forensics that opened the slice |
-| `work_order/01_probe_a_relay.md` | Phase 1 relay canary (Taey drove it; passed) |
+| `work_order/01_probe_a_relay.md` | Phase 1 relay canary — **UNVERIFIED: no receipt in this tree** |
 | `work_order/02_frozen_work_order.json` | **frozen** requirements for the collector |
 | `work_order/03_claude_supervisor_prompt.md` | the supervisor procedure followed |
 | `work_order/04_dispatch_brief.md` | brief handed to the implementing peer |
@@ -56,6 +56,21 @@ record *about* that code, not the code.
 
 The round-2 Codex verdict is summarised in `ADJUDICATION.md`; it arrived as a notification
 rather than a file, so unlike the other three there is no verbatim artifact to preserve.
+
+## Probe A status — UNVERIFIED
+
+The Phase 1 relay was reported as passing on 2026-08-17, and infra independently re-hashed
+the extracted file at the time. But **no receipt set for it exists in this tree**, and a pass
+label without receipts is the failure this record documents, in miniature.
+
+A re-run was dispatched to Taey on 2026-08-17. Taey drove `:2` step-by-step — observe, click,
+observe, click, paste, observe, key, observe — and called `extract` twice, but **no artifact
+appeared at the declared path**, so the re-run produced no receipt either.
+
+Per the review ruling, the label is therefore **UNVERIFIED — no receipt in this tree**, rather
+than a pass carried on a report. The relay is load-bearing for the UI objective, so this is
+recorded as an open gap to close with receipts, not as a defect claim about the relay itself:
+whether the relay works is **[Unknown]** to this record.
 
 ## Verdict history
 
