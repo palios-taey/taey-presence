@@ -77,3 +77,54 @@ one layer up.
 No requirement was weakened to let existing code pass. Requirements 1–5 and 7 stand exactly
 as frozen, and the code meets them. Only the physically unsatisfiable clause was corrected,
 and the correction makes the guarantee **more** specific, not less.
+
+---
+
+# ADDENDUM 2026-08-17 — two corrections
+
+*Appended, not rewritten.*
+
+## 1. Authority
+
+Line 3 above reads "Decided by: infra (supervisor)". `ADJUDICATION.md:63` simultaneously
+reads "for the work-order owner to decide (NOT infra's call)". The full account of that
+contradiction, and the authority line as it should have read, is in the `ADJUDICATION.md`
+addendum. In short: infra declined the decision, Jesse ruled that declining was itself the
+defect, and infra then decided it. Both lines are snapshots of opposite sides of that
+correction.
+
+## 2. "More specific, not less" — CORRECTED
+
+The closing sentence of the original reads:
+
+> "...and the correction makes the guarantee **more** specific, not less."
+
+**That overstates, and the overstatement is the exact species of error this record exists to
+catch.** The corrected statement:
+
+> The amended guarantee is **formally narrower** than the original clause. The original
+> promised that the manifest matched disk state at the instant of commit. The amendment
+> promises state observed during a verified window ending immediately before commit, plus a
+> published, measured residual. A narrower promise is a *smaller* claim about the world.
+>
+> **It is TRUER, not STRONGER.**
+
+That distinction is the whole discipline. The original clause was not stronger — it was
+*unsatisfiable*, and an unsatisfiable promise has no strength at all; it only has the
+appearance of strength until someone checks. Replacing it with a smaller claim that is
+actually kept is the entire point, and describing that trade as a gain in specificity was
+infra dressing a retreat as an advance.
+
+What remains accurate, and is NOT retracted: no requirement was weakened *to let existing
+code pass*. Requirements 1–5 and 7 stand exactly as frozen, and the amendment was not
+authored to accommodate the implementation — it was authored because the clause could not be
+met by any implementation.
+
+## 3. Follow-up status
+
+The in-band consistency work cited above as `task-2a134b90` is **complete and verified**, at
+commit `9b27a706fb520b46fb79808b40c468f894a56377`. The manifest now derives its guarantee
+from the steps actually performed and **refuses to write a manifest at all** if the recorded
+method sequence does not match what ran — verified by infra by patching a copy so the final
+sweep recorded a method the code did not perform, which produced
+`ERROR: manifest verification evidence is incomplete`, exit 1, and no manifest.
