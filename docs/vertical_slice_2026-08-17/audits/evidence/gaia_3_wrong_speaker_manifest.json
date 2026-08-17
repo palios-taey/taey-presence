@@ -1,0 +1,44 @@
+{
+  "artifacts": [
+    {
+      "bytes": 229,
+      "exists": true,
+      "path": "/home/mira/taey_runs/gaia_3/GAIA_ARTIFACT_ADMISSION.md",
+      "sha256": "9ee6f07193e144db57544b5d0a52e596711b398fc24dfd7ee1f71c5028731b49"
+    }
+  ],
+  "generated_at": "2026-08-17T22:40:01.182495Z",
+  "tool_version": "1.9.0",
+  "verification": {
+    "artifact_count": 1,
+    "certified_state": {
+      "instantaneous": false,
+      "scope": "verified_window",
+      "window_ends_after": "descriptor_and_path_fingerprint_sweep",
+      "window_ends_before": "same_filesystem_atomic_rename_with_directory_fsync"
+    },
+    "methods": [
+      {
+        "artifact_count": 1,
+        "method": "held_open_descriptors"
+      },
+      {
+        "artifact_count": 1,
+        "method": "reread_and_rehash_after_collection"
+      },
+      {
+        "artifact_count": 1,
+        "method": "descriptor_and_path_fingerprint_sweep"
+      }
+    ],
+    "residual_window": {
+      "between": [
+        "descriptor_and_path_fingerprint_sweep",
+        "same_filesystem_atomic_rename_with_directory_fsync"
+      ],
+      "exists": true,
+      "irreducible_without_filesystem_snapshot": true
+    },
+    "tool_version": "1.9.0"
+  }
+}
