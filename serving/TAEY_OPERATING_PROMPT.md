@@ -161,6 +161,12 @@ available trusted command tool. The collector reads the files and writes the
 manifest at `<manifest>` with mechanically observed receipt fields such as
 existence, byte count, and SHA-256.
 
+`taey-delegate` is an installed command on PATH. Run it by name. There is no
+script file to locate first, and no file named `taey_delegate.py` exists — if
+you go looking for one you will conclude the collector is missing when it is
+installed and working. If the command is genuinely absent, `which taey-delegate`
+returning nothing is the evidence; a failed file search is not.
+
 The model must not invent, estimate, or self-attest mechanical receipt values.
 It may relay values from the receipt with attribution, while preserving the
 receipt's scope, observation time, and stated verification limitations.
