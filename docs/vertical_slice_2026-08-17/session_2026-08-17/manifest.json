@@ -1,0 +1,164 @@
+{
+  "artifacts": [
+    {
+      "bytes": 1212,
+      "exists": true,
+      "path": "/home/mira/taey_runs/session_report/artifacts/carry2_manifest.json",
+      "sha256": "34906d401f92d24665b97e86eb5021b948e1a4651214bc0ae68f8b2141964a88"
+    },
+    {
+      "bytes": 19290,
+      "exists": true,
+      "path": "/home/mira/taey_runs/session_report/artifacts/connection_request_INFRA-CARRY-2026-08-17-01.json",
+      "sha256": "7e81d6651f9205186f9928f5d4396789bd3833ab67ff62f78c85163cfa877775"
+    },
+    {
+      "bytes": 152,
+      "exists": true,
+      "path": "/home/mira/taey_runs/session_report/artifacts/probe1_chat_response.txt",
+      "sha256": "2b681d6c676d34c8573714ce6aa56d829416d414baa341276a7cde36f2442c00"
+    },
+    {
+      "bytes": 1179,
+      "exists": true,
+      "path": "/home/mira/taey_runs/session_report/artifacts/probe1_manifest.json",
+      "sha256": "a2a4ee8e4152c4545ed5c895a7469af2c77e39520f94f61f4a33b873f2477558"
+    },
+    {
+      "bytes": 1212,
+      "exists": true,
+      "path": "/home/mira/taey_runs/session_report/artifacts/probe1_packet.md",
+      "sha256": "f3209956a16e93138de9df88b8e85a0cd0eb4ab3dc4d946b04b112b2f3eb615c"
+    },
+    {
+      "bytes": 1380,
+      "exists": true,
+      "path": "/home/mira/taey_runs/session_report/artifacts/probe1_roundtrip_manifest.json",
+      "sha256": "47ed37a10b4f6588dea875ae0df3b5901187c90a8151ed73e01432c398a83382"
+    },
+    {
+      "bytes": 2138,
+      "exists": true,
+      "path": "/home/mira/taey_runs/session_report/instructions/carry_real.md",
+      "sha256": "67488dd0ef640cea40c826c3bc488e984c88f463d2e59b45ef6a00c9dfb1bf81"
+    },
+    {
+      "bytes": 2317,
+      "exists": true,
+      "path": "/home/mira/taey_runs/session_report/instructions/dirfsync_brief.md",
+      "sha256": "6defd6abc6b0934b91816d0d3c7acf763b533d1a4e2d56934a867a21b70b66f4"
+    },
+    {
+      "bytes": 1929,
+      "exists": true,
+      "path": "/home/mira/taey_runs/session_report/instructions/grok_spec_ask.md",
+      "sha256": "6337cf7d59b651128225bc0db0d44cba2c0a8823afc7bb5df364e54f17903f00"
+    },
+    {
+      "bytes": 11788,
+      "exists": true,
+      "path": "/home/mira/taey_runs/session_report/instructions/grok_spec_seat_ack.md",
+      "sha256": "f265c15e4ce5d4e4fcab1fc91297336be8b6d8f4a146371626341f2ce153be65"
+    },
+    {
+      "bytes": 6121,
+      "exists": true,
+      "path": "/home/mira/taey_runs/session_report/instructions/orch_plan_as_ingested.md",
+      "sha256": "b161ec27fa752dc5e5d9d73a02f22c4a1f6597589aaa7e3be7e314636a3d4608"
+    },
+    {
+      "bytes": 2224,
+      "exists": true,
+      "path": "/home/mira/taey_runs/session_report/instructions/seat_ack_brief.md",
+      "sha256": "e369e83f9f801b3f384c5406077d4e2f33ebd7e6f05dcb6bb5050473b4bf9d1b"
+    },
+    {
+      "bytes": 1377,
+      "exists": true,
+      "path": "/home/mira/taey_runs/session_report/instructions/taey_horizon.md",
+      "sha256": "f628734084bed2454b0e3571f49408cf8e95f7d3442b45d397b9771378141b7a"
+    },
+    {
+      "bytes": 2000,
+      "exists": true,
+      "path": "/home/mira/taey_runs/session_report/instructions/timeout_brief.md",
+      "sha256": "b07759ddaf0533dfeb024c5efc9bb6a0c7f855cf75a23e4e53c91870b8333e69"
+    },
+    {
+      "bytes": 39691,
+      "exists": true,
+      "path": "/home/mira/taey_runs/session_report/logs/dirfsync-c2617b4-strace.raw.log",
+      "sha256": "1ae2c318de155d2d62edc823ad09657f69e0e62ef2cdf19c4c70cfb017f0ae27"
+    },
+    {
+      "bytes": 2324,
+      "exists": true,
+      "path": "/home/mira/taey_runs/session_report/logs/r5_grok_c2617b4_acceptance.txt",
+      "sha256": "5c85cfc2bf9c2826af49d39f70976c8d1ade1580ce78a9e454963662a3ed7894"
+    },
+    {
+      "bytes": 2324,
+      "exists": true,
+      "path": "/home/mira/taey_runs/session_report/logs/shipgate-95d8378-acceptance.raw.log",
+      "sha256": "cb6329349006121e0e7504117d4fda04fb605ceaad84108c27d8518cdf25c58c"
+    },
+    {
+      "bytes": 3877,
+      "exists": true,
+      "path": "/home/mira/taey_runs/session_report/logs/task-fc737533-audit-report.md",
+      "sha256": "f0630ebdfa63bab834cbed5d337a6d307805749f7c2ca380e6348afcaeec29ac"
+    },
+    {
+      "bytes": 7561,
+      "exists": true,
+      "path": "/home/mira/taey_runs/session_report/logs/vslice_grok_audit_task-03d54456.md",
+      "sha256": "c922f8cdce44c9379cb09d86810508f5777c9f919f1a265ab5630df2dbfe4210"
+    },
+    {
+      "bytes": 7654,
+      "exists": true,
+      "path": "/home/mira/taey_runs/session_report/logs/vslice_grok_reaudit_task-661bf6a7.md",
+      "sha256": "ce25df5b42d80fbe36d0588c4e220aa66e9fbe7e3aeefd78ba429b67df9bc6cf"
+    },
+    {
+      "bytes": 10758,
+      "exists": true,
+      "path": "/home/mira/taey_runs/session_report/REPORT.md",
+      "sha256": "45d95029cd5cc6d3ba6f5c5d0c31361324b4c53a5094911dc271cc4eea519e4e"
+    }
+  ],
+  "generated_at": "2026-08-17T20:56:48.744776Z",
+  "tool_version": "1.9.0",
+  "verification": {
+    "artifact_count": 21,
+    "certified_state": {
+      "instantaneous": false,
+      "scope": "verified_window",
+      "window_ends_after": "descriptor_and_path_fingerprint_sweep",
+      "window_ends_before": "same_filesystem_atomic_rename_with_directory_fsync"
+    },
+    "methods": [
+      {
+        "artifact_count": 21,
+        "method": "held_open_descriptors"
+      },
+      {
+        "artifact_count": 21,
+        "method": "reread_and_rehash_after_collection"
+      },
+      {
+        "artifact_count": 21,
+        "method": "descriptor_and_path_fingerprint_sweep"
+      }
+    ],
+    "residual_window": {
+      "between": [
+        "descriptor_and_path_fingerprint_sweep",
+        "same_filesystem_atomic_rename_with_directory_fsync"
+      ],
+      "exists": true,
+      "irreducible_without_filesystem_snapshot": true
+    },
+    "tool_version": "1.9.0"
+  }
+}
