@@ -1,0 +1,44 @@
+{
+  "artifacts": [
+    {
+      "bytes": 18896,
+      "exists": true,
+      "path": "/home/mira/taey_runs/horizon_review/HORIZON_VERDICT.md",
+      "sha256": "16a34dc301fc3b7b2477019552870859ce7b62fa87fc552958367c3b8af7da1d"
+    }
+  ],
+  "generated_at": "2026-08-17T22:21:42.418177Z",
+  "tool_version": "1.9.0",
+  "verification": {
+    "artifact_count": 1,
+    "certified_state": {
+      "instantaneous": false,
+      "scope": "verified_window",
+      "window_ends_after": "descriptor_and_path_fingerprint_sweep",
+      "window_ends_before": "same_filesystem_atomic_rename_with_directory_fsync"
+    },
+    "methods": [
+      {
+        "artifact_count": 1,
+        "method": "held_open_descriptors"
+      },
+      {
+        "artifact_count": 1,
+        "method": "reread_and_rehash_after_collection"
+      },
+      {
+        "artifact_count": 1,
+        "method": "descriptor_and_path_fingerprint_sweep"
+      }
+    ],
+    "residual_window": {
+      "between": [
+        "descriptor_and_path_fingerprint_sweep",
+        "same_filesystem_atomic_rename_with_directory_fsync"
+      ],
+      "exists": true,
+      "irreducible_without_filesystem_snapshot": true
+    },
+    "tool_version": "1.9.0"
+  }
+}
