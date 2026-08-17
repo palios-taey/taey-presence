@@ -2704,6 +2704,53 @@ def _invalid_completion_receipt(
     }
 
 
+async def _wait_for_downstream_disconnect(request: Request) -> None:
+    while True:
+        message = await request.receive()
+        if message["type"] == "http.disconnect":
+            return
+
+
+async def _run_while_downstream_connected(request: Request, operation, turn: TurnContext):
+    operation_task = asyncio.create_task(operation)
+    disconnect_task = asyncio.create_task(_wait_for_downstream_disconnect(request))
+    try:
+        done, _ = await asyncio.wait(
+            {operation_task, disconnect_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if operation_task in done:
+            return await operation_task
+
+        await disconnect_task
+        log.warning(
+            "Downstream disconnected; cancelling active inference "
+            "turn=%s event=%s correlation=%s",
+            turn.turn_id,
+            turn.event_id,
+            turn.correlation_id,
+        )
+        operation_task.cancel()
+        try:
+            await operation_task
+        except asyncio.CancelledError:
+            pass
+        raise HTTPException(
+            status_code=499,
+            detail="downstream disconnected during inference",
+        )
+    finally:
+        for task in (operation_task, disconnect_task):
+            if not task.done():
+                task.cancel()
+        for task in (operation_task, disconnect_task):
+            if not task.done():
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+
+
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request):
     raw_body = await request.json()
@@ -2719,7 +2766,11 @@ async def chat_completions(request: Request):
         except LivenessUnavailable as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
         started = open_turns >= 0
-        response = await _chat_completions_for_turn(body, turn, started)
+        response = await _run_while_downstream_connected(
+            request,
+            _chat_completions_for_turn(body, turn, started),
+            turn,
+        )
         if started and not isinstance(response, StreamingResponse):
             await _end_turn(turn, "nonstream_complete")
         return response
