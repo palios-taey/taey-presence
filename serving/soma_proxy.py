@@ -837,37 +837,24 @@ TOOLS = [
         "function": {
             "name": "drive_chat",
             "description": (
-                "Your hands on a Family-chat display. Perform EXACTLY ONE action, then call "
-                "again with action=observe to see the result before the next action — never "
+                "Your hands on a Family-chat display. Platform YAML is the only mutable UI "
+                "authority and the fresh accessibility tree is the runtime oracle. Perform "
+                "EXACTLY ONE action per call. Observe before acting; after every action, observe "
+                "again and independently verify its result before deciding the next action. Never "
                 "chain actions on an assumption. Displays: :2 chatgpt, :3 claude, :4 gemini, "
-                ":5 grok, :6 perplexity; and the second set :21 claude2, "
-                ":22 gemini2, :23 grok2, :24 perplexity2. observe returns elements each with a "
-                "ref; click/focus/activate take a ref from the most recent observe. To put text "
-                "in a composer: observe -> CLICK the composer (a click is what lets it take "
-                "keystrokes) -> paste (for long text) or type. key='Return' sends. read_clipboard "
-                "returns what a Copy control placed on the clipboard. extract runs the mapped "
-                "platform extraction driver and returns its response_text unchanged unless "
-                "output_file is supplied, which returns an artifact receipt without the body. "
-                "TO ATTACH A FILE — the reliable way to give a Chat a long packet. Never paste a "
-                "long packet; attach it. HOW THE CHOOSER OPENS IS PER-PLATFORM; the rest of the "
-                "sequence is identical everywhere. "
-                "ON CLAUDE (:3, :21) USE key='ctrl+u' — it opens the GTK file chooser directly. "
-                "The menu route below does NOT work there: its menu label is ChatGPT's, so on "
-                "claude.ai nothing opens and focus_dialog then correctly fails with 'no GTK file "
-                "dialog window found'. Measured 2026-08-18: ctrl+u opened the chooser and the "
-                "chips landed; the menu route looped without ever opening it. "
-                "ON CHATGPT (:2) use the menu route, PROVEN 2026-08-13: (1) focus the attach "
-                "control ('Add files and more') and key='space' — focus+space, NOT click: a click "
-                "opens a popup whose items are unnamed and unreachable; (2) type the menu label, "
-                "e.g. 'Add photos'; (3) key='Down'; (4) key='Return'. "
-                "ON ANY OTHER PLATFORM try ctrl+u first, then the menu route. "
-                "THEN, IDENTICAL ON EVERY PLATFORM, one call each, observing between: (5) "
-                "action='focus_dialog' — REQUIRED, because the dialog is a SEPARATE X11 window and "
-                "without activating it your keystrokes go to Firefox's address bar instead, which "
-                "NAVIGATES THE PAGE TO THE FILE and destroys the chat surface; (6) "
-                "key='ctrl+l'; (7) key='ctrl+a'; (8) type the FULL ABSOLUTE PATH; (9) key='Return'; "
-                "(10) observe and CONFIRM the filename chip is in the composer before you send. "
-                "NEVER click a chip to send — clicking a chip REMOVES it. Send with key='Return'."
+                ":5 grok, :6 perplexity; and the second set :21 claude2, :22 gemini2, :23 grok2, "
+                ":24 perplexity2. Resolve controls, chooser opening, attachment, composer input, "
+                "submission, generation monitoring, and extraction from that display's YAML and "
+                "the newly observed tree, one primitive at a time; do not use remembered labels, "
+                "shortcuts, coordinates, URLs, chooser routes, or send recipes. observe returns "
+                "elements with refs. A mapped element that appears absent requires an unfiltered "
+                "observation and filter diagnosis first. If filtering is correct and the live tree "
+                "shows a changed name or role, stop for an exact platform-YAML update. Missing or "
+                "ambiguous mappings fail loudly: do not retry blindly, substitute pixels, or "
+                "invent a fallback. read_clipboard returns what the verified Copy control placed "
+                "on the clipboard. extract runs the mapped platform extraction driver and returns "
+                "response_text unchanged unless output_file is supplied, which returns an artifact "
+                "receipt without the body."
             ),
             "parameters": {
                 "type": "object",
@@ -887,18 +874,18 @@ TOOLS = [
                                  "focus_dialog", "extract"],
                         "description": "the single action to perform",
                     },
-                    "element": {"type": "string", "description": "platform-YAML element key for click/focus/activate, e.g. 'toggle_menu', 'send_button', 'input'. PREFERRED over ref: it resolves to that platform's exact name+role from its own YAML, so no observe is needed first."},
+                    "element": {"type": "string", "description": "platform-YAML element key for click/focus/activate. Use only after a fresh observe confirms the intended live control; the key does not replace observation."},
                     "ref": {"type": "string",
-                            "description": "element ref from a recent observe (for click/focus/activate)"},
+                            "description": "element ref from the immediately preceding fresh observe (for click/focus/activate)"},
                     "text": {"type": "string", "description": "text to type or paste (use for SHORT input; for a large packet use text_file instead so you don't regenerate every character)"},
                     "text_file": {"type": "string", "description": "absolute path to a file whose EXACT bytes are pasted (paste action only). Prefer this for any large/verbatim content — pass the path, not the content; the tool reads and pastes it. Instant and byte-perfect."},
                     "sent_file": {"type": "string", "description": "for extract: absolute path to the exact sent artifact; extraction is refused if response_text matches it (prompt echo)"},
                     "output_file": {"type": "string", "description": "absolute destination path for captured content (extract or read_clipboard only); the file must not already exist"},
                     "key": {"type": "string",
                             "description": "key to press, e.g. Return, ctrl+a, Delete"},
-                    "url": {"type": "string", "description": "absolute http(s) URL for navigate"},
+                    "url": {"type": "string", "description": "absolute http(s) URL for navigate, taken from the active platform YAML rather than memory"},
                     "filter": {"type": "string",
-                               "description": "optional substring filter for observe"},
+                               "description": "optional substring filter for observe; a filtered absence is never evidence that an element is missing, so repeat unfiltered before acting"},
                 },
             },
         },
