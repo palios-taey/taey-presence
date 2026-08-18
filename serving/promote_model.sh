@@ -79,7 +79,7 @@ SERVE_PORT="${TAEY_SERVE_PORT:-8000}"
 NODE1_CONSUMERS="${TAEY_NODE1_CONSUMERS:-}"
 NODE2_CONSUMERS="${TAEY_NODE2_CONSUMERS:-}"
 UNIT="${TAEY_SERVE_UNIT:-taey-ep3.service}"
-SERVED_NAME_LIST="${TAEY_SERVED_NAME:-ep3}"
+SERVED_NAME_LIST="${TAEY_SERVED_NAME:?set TAEY_SERVED_NAME to the complete space-separated stable alias set}"
 read -r -a SERVED_ALIASES <<< "$SERVED_NAME_LIST"
 PRIMARY_ALIAS="${TAEY_PRIMARY_SERVED_NAME:-${SERVED_ALIASES[0]:-}}"
 PROMOTION_DROPIN="zzzz-active-model.conf"
@@ -128,6 +128,23 @@ generates() {  # <host> -> proof the weights load AND produce tokens
     | python3 -c 'import sys,json;print(json.load(sys.stdin)["choices"][0]["message"]["content"].strip())' 2>/dev/null || true
 }
 
+assert_no_identity_conflicts() {  # <ssh> <host> -> no unowned drop-in assigns model identity
+  local ssh_t="$1" host="$2" conflicts
+  if ! conflicts="$(ssh -o ConnectTimeout=10 "$ssh_t" "
+    for f in /etc/systemd/system/$UNIT.d/*.conf; do
+      [ -f \"\$f\" ] || continue
+      b=\$(basename \"\$f\")
+      case \"\$b\" in '$PROMOTION_DROPIN'|'$LEGACY_PROMOTION_DROPIN') continue ;; esac
+      grep -Eq '^[[:space:]]*Environment[[:space:]]*=\"?TAEY_(MODEL_PATH|SERVED_NAME)=' \"\$f\" && printf '%s\\n' \"\$b\"
+    done
+    exit 0
+  " 2>/dev/null)"; then
+    die "$host: could not inspect systemd model-identity drop-ins"
+  fi
+  [ -z "$conflicts" ] \
+    || die "$host: these unowned sibling drop-ins assign model path or served names: $conflicts"
+}
+
 assert_dropin_convention() {  # <ssh> <host> <expected-host-path> -> exact owned identity, no override
   # WHY THIS EXISTS SEPARATELY FROM THE ROOT CHECK. served_root() already proves the promoted
   # WEIGHTS are what the alias opened, so a sibling drop-in that clobbers TAEY_MODEL_PATH is
@@ -140,7 +157,7 @@ assert_dropin_convention() {  # <ssh> <host> <expected-host-path> -> exact owned
   #
   # Checked on the EFFECTIVE merged env, not only the files: an adapter injected from the unit
   # itself or an env file would satisfy a file census and still reach the serve.
-  local ssh_t="$1" host="$2" expected_path="$3" effective_env identity_file expected_file lora conflicts siblings
+  local ssh_t="$1" host="$2" expected_path="$3" effective_env identity_file expected_file lora siblings
 
   if ! effective_env="$(ssh -o ConnectTimeout=10 "$ssh_t" \
             "systemctl show $UNIT -p Environment --value" 2>/dev/null)"; then
@@ -164,18 +181,7 @@ assert_dropin_convention() {  # <ssh> <host> <expected-host-path> -> exact owned
   [ "$identity_file" = "$expected_file" ] \
     || die "$host: $PROMOTION_DROPIN does not exactly match the promoted path and stable aliases"
 
-  if ! conflicts="$(ssh -o ConnectTimeout=10 "$ssh_t" "
-    for f in /etc/systemd/system/$UNIT.d/*.conf; do
-      [ -f \"\$f\" ] || continue
-      b=\$(basename \"\$f\")
-      [ \"\$b\" = '$PROMOTION_DROPIN' ] && continue
-      grep -Eq '^Environment=\"?TAEY_(MODEL_PATH|SERVED_NAME)=' \"\$f\" && printf '%s\\n' \"\$b\"
-    done
-    exit 0
-  " 2>/dev/null)"; then
-    die "$host: could not inspect systemd model-identity drop-ins after promotion"
-  fi
-  [ -z "$conflicts" ] || die "$host: these sibling drop-ins also assign model path or served names and can override promotion: $conflicts"
+  assert_no_identity_conflicts "$ssh_t" "$host"
 
   siblings="$(ssh -o ConnectTimeout=10 "$ssh_t" \
                 "ls /etc/systemd/system/$UNIT.d/ 2>/dev/null | grep -v '^${PROMOTION_DROPIN}$'" \
@@ -209,6 +215,8 @@ manifest() {  # <ssh> <dir> -> one digest over every file's name+content, or NOT
 
 drift_check() {  # $1 = "deep" to additionally compare per-file content manifests
   local deep="${1:-}" alias r1 r2 resolved_root=""
+  assert_no_identity_conflicts "$NODE1_SSH" "$NODE1_HOST"
+  assert_no_identity_conflicts "$NODE2_SSH" "$NODE2_HOST"
   for alias in "${SERVED_ALIASES[@]}"; do
     r1="$(served_root "$NODE1_HOST" "$alias")"; r2="$(served_root "$NODE2_HOST" "$alias")"
     printf '  node1 %s -> %s\n  node2 %s -> %s\n' "$alias" "${r1:-UNRESOLVED}" "$alias" "${r2:-UNRESOLVED}"
@@ -290,6 +298,7 @@ restore() {  # <node-label> — bring the pinned consumers back and PROVE they c
 promote_node() {  # <ssh> <models-dir> <host> <model-name> <node-label>
   local ssh_t="$1" models="$2" host="$3" model="$4" label="$5"
   log "promoting $host -> $model (maintenance window opens for ${label}'s consumers)"
+  assert_no_identity_conflicts "$ssh_t" "$host"
   quiesce "$label"
   ssh -o ConnectTimeout=10 "$ssh_t" "test -d '$models/$model'" \
     || die "$host: $models/$model missing — copy the weights before promoting"
