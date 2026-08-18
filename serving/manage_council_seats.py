@@ -151,7 +151,6 @@ def _seat_environment(seat: SeatConfig, sessions_root: Path) -> dict[str, str]:
         ),
         "TAEY_MODEL": os.environ.get("TAEY_MODEL", "ep3"),
         "TAEY_SEAT_MAX_TURNS": os.environ.get("TAEY_SEAT_MAX_TURNS", "60"),
-        "TAEY_SEAT_TIMEOUT": os.environ.get("TAEY_SEAT_TIMEOUT", "1800"),
         "NOTIFY_KEY_PREFIX": os.environ.get("NOTIFY_KEY_PREFIX", "taey"),
         "REDIS_HOST": os.environ.get("REDIS_HOST", "127.0.0.1"),
         "REDIS_PORT": os.environ.get("REDIS_PORT", "6379"),

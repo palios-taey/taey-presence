@@ -268,7 +268,7 @@ For other model families, set the parsers your model expects.
 | env | default | meaning |
 |-----|---------|---------|
 | `VLLM_BASE_URL` | `http://127.0.0.1:8000` | the raw vLLM endpoint to front |
-| `VLLM_REQUEST_TIMEOUT_SECS` | `1800` | upstream inference timeout; aligned with council-seat and wave deadlines |
+| `VLLM_REQUEST_TIMEOUT_SECS` | `5400` | timeout for one upstream inference request; it does not cap the complete multi-round Taey turn |
 | `VLLM_HEALTH_PROBE_TIMEOUT_SECS` | `10` | hard timeout for `/health` upstream catalogue and generation probes |
 | `VLLM_HEALTH_CACHE_SECS` | `30` | generation-probe cache TTL so health polling does not queue behind live traffic |
 | `PROXY_PORT` | `8765` | port the proxy serves on |
@@ -283,13 +283,14 @@ For other model families, set the parsers your model expects.
 | `TAEY_TURN_LEASE_SECS` | `120` | active-turn lease; expiry is archived as an abandoned turn |
 | `TAEY_TURN_HEARTBEAT_SECS` | `30` | lease-renewal interval, capped at one-third of the lease |
 
-`VLLM_REQUEST_TIMEOUT_SECS`, the dashboard's `TAEY_COUNCIL_WAVE_TIMEOUT`,
-and each worker's `TAEY_SEAT_TIMEOUT` all default to 1800 seconds. Keep these
-three deadlines aligned when overriding them. When an amendment supersedes an
-active council wave, the coordinator records each old-revision contribution as
+The durable seat has no fixed elapsed-time deadline for a complete proxy turn.
+`VLLM_REQUEST_TIMEOUT_SECS` applies to one upstream inference request, while the
+dashboard's `TAEY_COUNCIL_WAVE_TIMEOUT` applies to council-wave coordination.
+Neither is a tool-round or whole-consultation limit. When an amendment supersedes
+an active council wave, the coordinator records each old-revision contribution as
 stale and waits for every dispatched request to drain before sending the
-replacement revision. A wave that cannot drain by the common deadline fails the
-round instead of overlapping revisions on the shared model.
+replacement revision. A wave that cannot drain by its coordination deadline fails
+the round instead of overlapping revisions on the shared model.
 
 Redis is required by default because a proxy that serves while unable to report
 concurrent open turns is unsafe for fleet wake routing. Set
@@ -318,11 +319,15 @@ service restart.
 | `TAEY_EXECUTIVE_EVENT_LOG` | `$TAEY_SESSIONS_DIR/<conversation>.jsonl` (default `~/taey_sessions/main.jsonl`) | fsync'd UI/fleet conversation and outcome truth |
 | `TAEY_SEAT_EVENT_LOG` | *(unset)* | backward-compatible alias used only when `TAEY_EXECUTIVE_EVENT_LOG` is unset |
 | `TAEY_SEAT_MAX_TURNS` | `60` | maximum context turns reconstructed from the canonical log |
-| `TAEY_SEAT_TIMEOUT` | `1800` | proxy request timeout in seconds |
 | `TAEY_COUNCIL_ROLE_ID` | *(empty)* | stable semantic role; required and seat-mapped by `taey_council_seat.py` |
 | `TAEY_COUNCIL_SHARED_PROMPT_PATH` | *(empty)* | shared supporting-seat contract; required by `taey_council_seat.py` |
 | `TAEY_COUNCIL_ROLE_PROMPT_PATH` | *(empty)* | seat-specific role prompt; required by `taey_council_seat.py` |
 | `TAEY_COUNCIL_SESSIONS_DIR` | `$TAEY_SESSIONS_DIR/council` | private transcript root used by the council launcher |
+
+The seat's proxy request has no fixed elapsed-time deadline. It ends on a natural
+terminal response, an explicit cancellation, a downstream failure, or process
+shutdown—not because a legitimate manual consultation crossed an arbitrary wall
+clock.
 
 The seat consumes all three fleet-notify sources (`inbox`, `notifications`, and
 `orch`). One item at a time moves atomically to a source-specific processing

@@ -71,10 +71,6 @@ MIRA_REDIS_PORT = int(os.environ.get("MIRA_REDIS_PORT", "6379"))
 MIRA_DASHBOARD_URL = os.environ.get("MIRA_DASHBOARD_URL", "http://127.0.0.1:5001")
 MIRA_ISMA_URL = os.environ.get("MIRA_ISMA_URL", "http://127.0.0.1:8095")
 PROXY_PORT = int(os.environ.get("PROXY_PORT", "8765"))
-# 8 rounds took Taey's tools away mid-task and forced a text answer. Real
-# multi-step work legitimately needs more; the loop already stops when there
-# are no calls.
-MAX_TOOL_ROUNDS = int(os.environ.get("MAX_TOOL_ROUNDS", "60"))
 # One identity source. Every soma-proxy process loads the tracked operating
 # prompt beside this file. An environment variable must never redirect Taey's
 # identity to a staging checkout, placeholder persona, or other mutable source.
@@ -2850,7 +2846,7 @@ async def _chat_completions_for_turn(
         # -- and only the FINAL answer is streamed. Streaming stops being a special case: it changes
         # how the last response is delivered, never whether tools work.
         rounds = 0
-        while rounds < MAX_TOOL_ROUNDS:
+        while True:
             probe = dict(body)
             probe["stream"] = False
             # RETRY ONCE ON A DROPPED POOLED CONNECTION. httpx keeps connections alive; after an
@@ -2957,13 +2953,6 @@ async def _chat_completions_for_turn(
                     "tool_call_id": tc.get("id", ""),
                     "content": result,
                 })
-        if rounds >= MAX_TOOL_ROUNDS:
-            # Cap reached: force prose rather than streaming another unexecuted tool call, which
-            # would reproduce the empty-reply symptom this whole block exists to remove.
-            log.warning("Stream tool cap hit (%d); forcing final text response", MAX_TOOL_ROUNDS)
-            body.pop("tools", None)
-            body["tool_choice"] = "none"
-
     if is_stream:
         async def stream_and_measure():
             context_token = _request_context.set(_turn_payload(turn))
@@ -3094,15 +3083,6 @@ async def _chat_completions_for_turn(
                     if held_response_format is not None:
                         result = await _final_answer()
                         total_tokens += result.get("usage", {}).get("completion_tokens", 0)
-                    break
-
-                if round_num >= MAX_TOOL_ROUNDS:
-                    log.warning(
-                        "Tool round cap hit (%d); forcing final text response",
-                        MAX_TOOL_ROUNDS,
-                    )
-                    result = await _final_answer()
-                    total_tokens += result.get("usage", {}).get("completion_tokens", 0)
                     break
 
                 # Execute tool calls

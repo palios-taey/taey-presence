@@ -33,7 +33,6 @@ KEY_PREFIX = os.environ.get("NOTIFY_KEY_PREFIX", "taey")
 REDIS_HOST = os.environ.get("REDIS_HOST", "127.0.0.1")
 REDIS_PORT = int(os.environ.get("REDIS_PORT", "6379"))
 MAX_TURNS = max(1, int(os.environ.get("TAEY_SEAT_MAX_TURNS", "60")))
-TIMEOUT = max(1, int(os.environ.get("TAEY_SEAT_TIMEOUT", "1800")))
 MODEL = os.environ.get("TAEY_MODEL", "ep3")
 CONVERSATION_ID = os.environ.get("TAEY_CONVERSATION_ID", "main")
 _SEAT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
@@ -508,7 +507,7 @@ class ProxyClient:
             },
         )
         try:
-            with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
+            with urllib.request.urlopen(request) as response:
                 raw = response.read()
                 response_headers = response.headers
         except urllib.error.HTTPError as exc:
