@@ -41,10 +41,11 @@ GPU_UTIL="${VLLM_GPU_UTIL:-0.85}"
 MAX_NUM_SEQS="${VLLM_MAX_NUM_SEQS:-8}"
 MAX_CUDAGRAPH="${VLLM_MAX_CUDAGRAPH:-8}"
 MAX_BATCHED_TOKENS="${VLLM_MAX_BATCHED_TOKENS:-8192}"
-# Served model id clients address (default: the model dir basename). Set explicitly so
+# Served model ids clients address (default: the model dir basename). Set explicitly so
 # a redeploy on another Thor keeps the SAME id (e.g. Qwen3.6-27B-FP8) — a default basename
 # would silently change the id (lowercased dir name) and break every consumer + the eval harness.
-SERVED_NAME="${TAEY_SERVED_NAME:-$(basename "${MODEL_PATH}")}"
+read -r -a SERVED_NAMES <<< "${TAEY_SERVED_NAME:-$(basename "${MODEL_PATH}")}"
+[ "${#SERVED_NAMES[@]}" -gt 0 ] || { echo "[vLLM] TAEY_SERVED_NAME must name at least one model id" >&2; exit 1; }
 MAX_MODEL_LEN="${TAEY_MAX_MODEL_LEN:-16384}"
 # Weight quantization. Decode on this hardware is memory-bandwidth-bound — every weight is read
 # per generated token — so tokens/sec scales with how many BYTES the weights occupy, not with
@@ -56,6 +57,7 @@ QUANTIZATION="${TAEY_QUANTIZATION:-}"
 VLLM_IMAGE="${VLLM_IMAGE:-ghcr.io/nvidia-ai-iot/vllm@sha256:b587dd56b4cb076209ad5156a626ac75f5a976d0e8e7d1e6a9fccd56d1bd65e8}"
 
 echo "[vLLM] Serving model: ${MODEL_PATH}"
+echo "[vLLM] Served names:  ${SERVED_NAMES[*]}"
 echo "[vLLM] Models dir:    ${MODELS_DIR} -> /models"
 echo "[vLLM] Port: ${VLLM_PORT}, GPU util: ${GPU_UTIL}, image: ${VLLM_IMAGE}"
 
@@ -150,7 +152,7 @@ exec docker run \
   ${QUANT_ENV_ARGS} \
   "${VLLM_IMAGE}" \
   vllm serve "/models/$(basename "${MODEL_PATH}")" \
-    --served-model-name "${SERVED_NAME}" \
+    --served-model-name "${SERVED_NAMES[@]}" \
     --host 0.0.0.0 \
     --port "${VLLM_PORT}" \
     --max-model-len "${MAX_MODEL_LEN}" \

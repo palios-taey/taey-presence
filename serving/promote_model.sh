@@ -57,7 +57,8 @@ done
 #   TAEY_NODE1_SSH / TAEY_NODE2_SSH       user@host for each serving node
 #   TAEY_NODE1_HOST / TAEY_NODE2_HOST     host:port used for HTTP probes
 #   TAEY_NODE1_MODELS / TAEY_NODE2_MODELS host dir mounted at /models in the serving container
-#   TAEY_SERVED_NAME                      the stable alias checkpoints are promoted behind
+#   TAEY_SERVED_NAME                      space-separated stable aliases promoted together
+#   TAEY_PRIMARY_SERVED_NAME              alias used for the generation gate
 #   TAEY_SERVE_UNIT                       systemd unit that serves the model
 NODE1_SSH="${TAEY_NODE1_SSH:?set TAEY_NODE1_SSH, e.g. taey@node1.local}"
 NODE2_SSH="${TAEY_NODE2_SSH:?set TAEY_NODE2_SSH, e.g. taey@node2.local}"
@@ -78,7 +79,11 @@ SERVE_PORT="${TAEY_SERVE_PORT:-8000}"
 NODE1_CONSUMERS="${TAEY_NODE1_CONSUMERS:-}"
 NODE2_CONSUMERS="${TAEY_NODE2_CONSUMERS:-}"
 UNIT="${TAEY_SERVE_UNIT:-taey-ep3.service}"
-ALIAS="${TAEY_SERVED_NAME:-ep3}"
+SERVED_NAME_LIST="${TAEY_SERVED_NAME:?set TAEY_SERVED_NAME to the complete space-separated stable alias set}"
+read -r -a SERVED_ALIASES <<< "$SERVED_NAME_LIST"
+PRIMARY_ALIAS="${TAEY_PRIMARY_SERVED_NAME:-${SERVED_ALIASES[0]:-}}"
+PROMOTION_DROPIN="zzzz-active-model.conf"
+LEGACY_PROMOTION_DROPIN="zzz-taey-promoted-model.conf"
 # SSH may be one-directional between nodes; push from whichever side has the key. Node-to-node only: relaying through the
 # operator workstation drops transfer from ~112MB/s to ~7MB/s because OpenSSH 9+ routes
 # remote-to-remote scp through the local host.
@@ -87,7 +92,7 @@ LOAD_TIMEOUT="${TAEY_LOAD_TIMEOUT:-900}"
 log() { printf '[promote] %s\n' "$*"; }
 die() { printf '[promote] FAIL: %s\n' "$*" >&2; exit 1; }
 
-served_root() {  # <host> -> the model directory the node opened FOR THIS ALIAS
+served_root() {  # <host> <alias> -> the model directory the node opened FOR THIS ALIAS
   # Select by IDENTITY, never by position. A node may advertise several models — this fleet's
   # second node serves the alias alongside a LoRA adapter — and /v1/models ordering is not part of
   # any contract, so data[0] can silently be a different model than the one being promoted. This
@@ -95,8 +100,9 @@ served_root() {  # <host> -> the model directory the node opened FOR THIS ALIAS
   # name-versus-artifact confusion the gate exists to catch. Exactly one match is required: zero
   # means the alias is not served, more than one means the payload is ambiguous, and both are
   # failures rather than something to pick a winner from.
-  curl -s --max-time 10 "http://$1:$SERVE_PORT/v1/models" 2>/dev/null \
-    | ALIAS="$ALIAS" python3 -c '
+  local host="$1" alias="$2"
+  curl -s --max-time 10 "http://$host:$SERVE_PORT/v1/models" 2>/dev/null \
+    | ALIAS="$alias" python3 -c '
 import sys, json, os
 alias = os.environ["ALIAS"]
 try:
@@ -118,11 +124,39 @@ print(root)
 
 generates() {  # <host> -> proof the weights load AND produce tokens
   curl -s --max-time 120 "http://$1:$SERVE_PORT/v1/chat/completions" -H 'Content-Type: application/json' \
-    -d "{\"model\":\"$ALIAS\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply with exactly one word: ready\"}],\"max_tokens\":10,\"chat_template_kwargs\":{\"enable_thinking\":false}}" 2>/dev/null \
+    -d "{\"model\":\"$PRIMARY_ALIAS\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply with exactly one word: ready\"}],\"max_tokens\":10,\"chat_template_kwargs\":{\"enable_thinking\":false}}" 2>/dev/null \
     | python3 -c 'import sys,json;print(json.load(sys.stdin)["choices"][0]["message"]["content"].strip())' 2>/dev/null || true
 }
 
-assert_dropin_convention() {  # <ssh> <host> -> the promoted node carries ONLY the convention drop-in
+assert_no_identity_conflicts() {  # <ssh> <host> -> no unowned drop-in assigns model identity
+  local ssh_t="$1" host="$2" conflicts
+  if ! conflicts="$(ssh -o ConnectTimeout=10 "$ssh_t" "
+    for f in /etc/systemd/system/$UNIT.d/*.conf; do
+      [ -f \"\$f\" ] || continue
+      b=\$(basename \"\$f\")
+      case \"\$b\" in '$PROMOTION_DROPIN'|'$LEGACY_PROMOTION_DROPIN') continue ;; esac
+      [ -r \"\$f\" ] || exit 70
+      awk '
+        /^[[:space:]]*($|#|;)/ { next }
+        /^[[:space:]]*Environment[[:space:]]*=/ && /TAEY_(MODEL_PATH|SERVED_NAME)=/ { found=1 }
+        END { exit found ? 0 : 1 }
+      ' \"\$f\"
+      rc=\$?
+      case \"\$rc\" in
+        0) printf '%s\\n' \"\$b\" ;;
+        1) ;;
+        *) exit \"\$rc\" ;;
+      esac
+    done
+    exit 0
+  " 2>/dev/null)"; then
+    die "$host: could not inspect systemd model-identity drop-ins"
+  fi
+  [ -z "$conflicts" ] \
+    || die "$host: these unowned sibling drop-ins assign model path or served names: $conflicts"
+}
+
+assert_dropin_convention() {  # <ssh> <host> <expected-host-path> -> exact owned identity, no override
   # WHY THIS EXISTS SEPARATELY FROM THE ROOT CHECK. served_root() already proves the promoted
   # WEIGHTS are what the alias opened, so a sibling drop-in that clobbers TAEY_MODEL_PATH is
   # already caught. What nothing caught is a sibling that sets something ELSE. Observed
@@ -134,18 +168,34 @@ assert_dropin_convention() {  # <ssh> <host> -> the promoted node carries ONLY t
   #
   # Checked on the EFFECTIVE merged env, not only the files: an adapter injected from the unit
   # itself or an env file would satisfy a file census and still reach the serve.
-  local ssh_t="$1" host="$2" lora siblings
+  local ssh_t="$1" host="$2" expected_path="$3" effective_env identity_file expected_file lora siblings
 
-  lora="$(ssh -o ConnectTimeout=10 "$ssh_t" \
-            "systemctl show $UNIT -p Environment --value" 2>/dev/null \
-          | tr ' ' '\n' | grep '^TAEY_LORA_PATH=' || true)"
+  if ! effective_env="$(ssh -o ConnectTimeout=10 "$ssh_t" \
+            "systemctl show $UNIT -p Environment --value" 2>/dev/null)"; then
+    die "$host: could not inspect the effective systemd environment after promotion"
+  fi
+  lora="$(printf '%s\n' "$effective_env" | tr ' ' '\n' | grep '^TAEY_LORA_PATH=' || true)"
   [ -z "$lora" ] \
     || die "$host: promoted serve resolves ${lora% *} — an adapter is attached to the model just
        promoted. Remove the drop-in or env entry that sets it, then re-run. (Adapters are attached
        deliberately for an eval; carrying one THROUGH a promotion is never deliberate.)"
 
+  if ! identity_file="$(ssh -o ConnectTimeout=10 "$ssh_t" \
+      "cat /etc/systemd/system/$UNIT.d/$PROMOTION_DROPIN" 2>/dev/null)"; then
+    die "$host: could not read the promotion-owned identity drop-in after restart"
+  fi
+  expected_file="$(printf '%s\n' \
+    '# Written by promote_model.sh. This is the sole model-identity drop-in.' \
+    '[Service]' \
+    "Environment=TAEY_MODEL_PATH=$expected_path" \
+    "Environment=\"TAEY_SERVED_NAME=$SERVED_NAME_LIST\"")"
+  [ "$identity_file" = "$expected_file" ] \
+    || die "$host: $PROMOTION_DROPIN does not exactly match the promoted path and stable aliases"
+
+  assert_no_identity_conflicts "$ssh_t" "$host"
+
   siblings="$(ssh -o ConnectTimeout=10 "$ssh_t" \
-                "ls /etc/systemd/system/$UNIT.d/ 2>/dev/null | grep -v '^zzz-taey-promoted-model.conf$'" \
+                "ls /etc/systemd/system/$UNIT.d/ 2>/dev/null | grep -v '^${PROMOTION_DROPIN}$'" \
               2>/dev/null || true)"
   if [ -n "$siblings" ]; then
     # Not fatal on its own — the two hard properties above are already proven, and a legitimate
@@ -155,7 +205,7 @@ assert_dropin_convention() {  # <ssh> <host> -> the promoted node carries ONLY t
     log "         but each one wins over the promoted config if it ever sets the same key:"
     printf '%s\n' "$siblings" | while read -r s; do [ -n "$s" ] && log "           $s"; done
   else
-    log "$host drop-ins: exactly the promotion drop-in, no siblings"
+    log "$host drop-ins: exactly $PROMOTION_DROPIN, no siblings"
   fi
 }
 
@@ -175,20 +225,27 @@ manifest() {  # <ssh> <dir> -> one digest over every file's name+content, or NOT
 }
 
 drift_check() {  # $1 = "deep" to additionally compare per-file content manifests
-  local deep="${1:-}" r1 r2
-  r1="$(served_root "$NODE1_HOST")"; r2="$(served_root "$NODE2_HOST")"
-  printf '  node1 %s -> %s\n  node2 %s -> %s\n' "$ALIAS" "${r1:-UNRESOLVED}" "$ALIAS" "${r2:-UNRESOLVED}"
-  [ -n "$r1" ] && [ -n "$r2" ] || { echo "  INCONCLUSIVE: the alias did not resolve to exactly one model with a root on both nodes"; return 2; }
-  # Compare ROOT, never the alias. Alias equality is precisely what hid the 2026-07-30 split.
-  if [ "$r1" != "$r2" ]; then
-    echo "  DRIFT: the nodes serve DIFFERENT model directories under the same alias '$ALIAS'"; return 1
-  fi
+  local deep="${1:-}" alias r1 r2 resolved_root=""
+  assert_no_identity_conflicts "$NODE1_SSH" "$NODE1_HOST"
+  assert_no_identity_conflicts "$NODE2_SSH" "$NODE2_HOST"
+  for alias in "${SERVED_ALIASES[@]}"; do
+    r1="$(served_root "$NODE1_HOST" "$alias")"; r2="$(served_root "$NODE2_HOST" "$alias")"
+    printf '  node1 %s -> %s\n  node2 %s -> %s\n' "$alias" "${r1:-UNRESOLVED}" "$alias" "${r2:-UNRESOLVED}"
+    [ -n "$r1" ] && [ -n "$r2" ] || { echo "  INCONCLUSIVE: alias '$alias' did not resolve to exactly one model with a root on both nodes"; return 2; }
+    if [ "$r1" != "$r2" ]; then
+      echo "  DRIFT: the nodes serve DIFFERENT model directories under alias '$alias'"; return 1
+    fi
+    if [ -n "$resolved_root" ] && [ "$r1" != "$resolved_root" ]; then
+      echo "  DRIFT: stable aliases resolve to different model roots ('$resolved_root' versus '$r1')"; return 1
+    fi
+    resolved_root="$r1"
+  done
   # Say exactly what was checked. Equal roots mean both nodes OPENED THE SAME PATH — they do not
   # mean the files under that path are identical, and a corrupted or partially-synced tree serves
   # happily from the right path. Claiming "same weights" from a string comparison would be the same
   # class of overclaim this script exists to catch, so the cheap check reports its own limit.
   if [ "$deep" != "deep" ]; then
-    echo "  OK (served-root agreement): both nodes serve '$r1' for alias '$ALIAS'."
+    echo "  OK (served-root agreement): both nodes serve '$resolved_root' for aliases '${SERVED_ALIASES[*]}'."
     echo "     CONTENT NOT VERIFIED — equal roots do not prove equal files. Use --check-content to compare per-file sha256 manifests."
     return 0
   fi
@@ -196,24 +253,40 @@ drift_check() {  # $1 = "deep" to additionally compare per-file content manifest
   local m1 m2
   # `|| true` so a nonzero ssh cannot terminate the script under set -e before the INCONCLUSIVE
   # branch below is reached. An unreachable node must REPORT "cannot tell", not vanish mid-check.
-  m1="$(manifest "$NODE1_SSH" "$NODE1_MODELS/${r1##*/}" || true)"
-  m2="$(manifest "$NODE2_SSH" "$NODE2_MODELS/${r2##*/}" || true)"
+  m1="$(manifest "$NODE1_SSH" "$NODE1_MODELS/${resolved_root##*/}" || true)"
+  m2="$(manifest "$NODE2_SSH" "$NODE2_MODELS/${resolved_root##*/}" || true)"
   [ -n "$m1" ] && [ -n "$m2" ] || { echo "  INCONCLUSIVE: could not compute a manifest on one or both nodes"; return 2; }
-  [ "$m1" = "$m2" ] || { echo "  CONTENT DRIFT: same root '$r1' but DIFFERENT file contents (node1=$m1 node2=$m2)"; return 1; }
+  [ "$m1" = "$m2" ] || { echo "  CONTENT DRIFT: same root '$resolved_root' but DIFFERENT file contents (node1=$m1 node2=$m2)"; return 1; }
   echo "  OK (content verified): identical root AND identical per-file manifest $m1"
   return 0
 }
 
 consumers_for() { case "$1" in node1) printf '%s' "$NODE1_CONSUMERS" ;; node2) printf '%s' "$NODE2_CONSUMERS" ;; esac; }
+declare -A QUIESCED_CONSUMERS=()
 
 quiesce() {  # <node-label> — stop every pinned consumer and PROVE it stopped
   local list; list="$(consumers_for "$1")"
   [ "$list" = "none" ] && { log "$1: no pinned consumers declared"; return 0; }
-  local u
+  local u state
   for u in $list; do
+    state="$(systemctl --user is-active "$u" 2>/dev/null || true)"
+    case "$state" in
+      active|activating|reloading) ;;
+      deactivating)
+        systemctl --user stop "$u" || die "$1: could not finish stopping $u"
+        log "$1: $u was already deactivating; leaving it stopped after the window"
+        continue
+        ;;
+      inactive|failed)
+        log "$1: $u was $state before the window; leaving it unchanged"
+        continue
+        ;;
+      *) die "$1: could not determine the pre-window state of declared consumer $u (got '${state:-no state}')" ;;
+    esac
     systemctl --user stop "$u" || die "$1: could not stop $u — refusing to restart a node whose consumer is still admitting turns"
     [ "$(systemctl --user is-active "$u")" = "active" ] \
       && die "$1: $u still active after stop — refusing to proceed"
+    QUIESCED_CONSUMERS["$1:$u"]=1
     log "$1: quiesced $u"
   done
 }
@@ -221,11 +294,14 @@ quiesce() {  # <node-label> — stop every pinned consumer and PROVE it stopped
 restore() {  # <node-label> — bring the pinned consumers back and PROVE they came back
   local list; list="$(consumers_for "$1")"
   [ "$list" = "none" ] && return 0
-  local u
+  local u key
   for u in $list; do
+    key="$1:$u"
+    [ "${QUIESCED_CONSUMERS[$key]:-}" = "1" ] || continue
     systemctl --user start "$u" || die "$1: $u FAILED TO RESTART after promotion — the node is serving but its consumer is down"
     [ "$(systemctl --user is-active "$u")" = "active" ] \
       || die "$1: $u did not become active after promotion"
+    QUIESCED_CONSUMERS["$key"]=""
     log "$1: restored $u"
   done
 }
@@ -233,32 +309,42 @@ restore() {  # <node-label> — bring the pinned consumers back and PROVE they c
 promote_node() {  # <ssh> <models-dir> <host> <model-name> <node-label>
   local ssh_t="$1" models="$2" host="$3" model="$4" label="$5"
   log "promoting $host -> $model (maintenance window opens for ${label}'s consumers)"
+  assert_no_identity_conflicts "$ssh_t" "$host"
   quiesce "$label"
   ssh -o ConnectTimeout=10 "$ssh_t" "test -d '$models/$model'" \
     || die "$host: $models/$model missing — copy the weights before promoting"
-  # A DEDICATED, LATE-SORTING DROP-IN — not the generic override.conf.
+  # A DEDICATED ACTIVE-MODEL DROP-IN — not the generic override.conf.
   # Two reasons. Ownership: override.conf is the name a human reaches for, so writing it means
-  # promotion silently clobbers whatever an operator put there. Precedence: systemd applies drop-ins
-  # in LEXICAL order and later wins, so a sibling sorting after ours would override the promoted
-  # model path and the node would restart serving something else. Observed on this fleet — node1
-  # carries zz-cpt-v7-candidate.conf (today it only clears TAEY_LORA_PATH, but the name sorts after
-  # "override"), and the two nodes do not even have the same drop-in set. Sorting last makes the
-  # promoted path win by construction rather than by luck; the post-restart root check below would
-  # CATCH a loss, but preventing it is better than detecting it.
+  # promotion silently clobbers whatever an operator put there. The previous promotion filename
+  # started with only three z's and lost to the fleet's existing zzzz-active-model.conf, so every
+  # run restarted the old weights and then timed out. Promotion now OWNS that active-model file,
+  # writes model path and stable aliases together, and removes its obsolete losing predecessor.
   ssh -o ConnectTimeout=10 "$ssh_t" "
-    sudo mkdir -p /etc/systemd/system/$UNIT.d &&
-    printf '# Written by promote_model.sh. Sorts last so the promoted model path wins over any\n# sibling drop-in. Do not rename to something sorting earlier.\n[Service]\nEnvironment=TAEY_MODEL_PATH=$models/$model\n' \
-      | sudo tee /etc/systemd/system/$UNIT.d/zzz-taey-promoted-model.conf >/dev/null &&
+    set -e
+    _dir=/etc/systemd/system/$UNIT.d
+    _tmp=\"\$_dir/.${PROMOTION_DROPIN}.\$\$.tmp\"
+    sudo mkdir -p \"\$_dir\" &&
+    printf '%s\n' '# Written by promote_model.sh. This is the sole model-identity drop-in.' '[Service]' 'Environment=TAEY_MODEL_PATH=$models/$model' 'Environment=\"TAEY_SERVED_NAME=$SERVED_NAME_LIST\"' \
+      | sudo tee \"\$_tmp\" >/dev/null &&
+    sudo chmod 0644 \"\$_tmp\" &&
+    sudo mv -f \"\$_tmp\" \"\$_dir/$PROMOTION_DROPIN\" &&
+    sudo rm -f \"\$_dir/$LEGACY_PROMOTION_DROPIN\" &&
     sudo systemctl daemon-reload && sudo systemctl restart $UNIT" \
     || die "$host: restart failed"
 
-  local waited=0 root
+  local waited=0 alias root ready=0 roots_summary=""
   while [ "$waited" -lt "$LOAD_TIMEOUT" ]; do
-    root="$(served_root "$host")"
-    [ "$root" = "/models/$model" ] && break
+    ready=1
+    roots_summary=""
+    for alias in "${SERVED_ALIASES[@]}"; do
+      root="$(served_root "$host" "$alias")"
+      roots_summary="${roots_summary}${alias}=${root:-UNRESOLVED} "
+      [ "$root" = "/models/$model" ] || ready=0
+    done
+    [ "$ready" -eq 1 ] && break
     sleep 15; waited=$((waited + 15))
   done
-  [ "$root" = "/models/$model" ] || die "$host: did not serve /models/$model within ${LOAD_TIMEOUT}s (got '${root:-nothing}')"
+  [ "$ready" -eq 1 ] || die "$host: did not serve /models/$model under every stable alias within ${LOAD_TIMEOUT}s (got '$roots_summary')"
   local out; out="$(generates "$host")"
   [ -n "$out" ] || die "$host: serves the right root but does NOT generate — weights are loaded but broken"
   restore "$label"
@@ -266,8 +352,8 @@ promote_node() {  # <ssh> <models-dir> <host> <model-name> <node-label>
   # the weights are already proven serving AND generating above. A die() here before restore would
   # leave every pinned consumer stopped over a drop-in problem, which is a worse outage than the
   # one it reports.
-  assert_dropin_convention "$ssh_t" "$host"
-  log "$host OK: root=$root, completion=$(printf %q "$out"), consumers restored"
+  assert_dropin_convention "$ssh_t" "$host" "$models/$model"
+  log "$host OK: root=/models/$model, aliases=${SERVED_ALIASES[*]}, completion=$(printf %q "$out"), consumers restored"
 }
 
 # INPUT VALIDATION BEFORE ANY SSH OR DESTRUCTIVE RSYNC.
@@ -286,7 +372,16 @@ valid_abs_dir() { case "$1" in /*) case "$1" in *..*|*[\'\"\$\`\;\&\|\<\>]*) ret
 valid_abs_dir "$NODE1_MODELS" || die "TAEY_NODE1_MODELS must be an absolute path with no '..' or shell metacharacters"
 valid_abs_dir "$NODE2_MODELS" || die "TAEY_NODE2_MODELS must be an absolute path with no '..' or shell metacharacters"
 valid_component "$UNIT" || die "TAEY_SERVE_UNIT must be a single safe component (got: $UNIT)"
-valid_component "$ALIAS" || die "TAEY_SERVED_NAME must be a single safe component (got: $ALIAS)"
+[ "${#SERVED_ALIASES[@]}" -gt 0 ] || die "TAEY_SERVED_NAME must name at least one stable alias"
+for alias in "${SERVED_ALIASES[@]}"; do
+  valid_component "$alias" || die "each TAEY_SERVED_NAME alias must be a single safe component (got: $alias)"
+done
+SERVED_NAME_LIST="${SERVED_ALIASES[*]}"
+valid_component "$PRIMARY_ALIAS" || die "TAEY_PRIMARY_SERVED_NAME must be a single safe component (got: $PRIMARY_ALIAS)"
+case " ${SERVED_ALIASES[*]} " in
+  *" $PRIMARY_ALIAS "*) ;;
+  *) die "TAEY_PRIMARY_SERVED_NAME '$PRIMARY_ALIAS' is not present in TAEY_SERVED_NAME '$SERVED_NAME_LIST'" ;;
+esac
 
 case "${1:-}" in
   --check)         drift_check;      exit $? ;;
@@ -330,6 +425,11 @@ case "$SRC" in
   *) die "source must be node1 or node2" ;;
 esac
 ssh -o ConnectTimeout=10 "$src_ssh" "test -d '$src_dir/$MODEL'" || die "$SRC: $src_dir/$MODEL not found"
+
+# Artifact synchronization is the first mutation in a promotion, so identity ownership must be
+# proven on BOTH nodes before rsync --delete runs—not merely before each later service restart.
+assert_no_identity_conflicts "$NODE1_SSH" "$NODE1_HOST"
+assert_no_identity_conflicts "$NODE2_SSH" "$NODE2_HOST"
 
 # WHICH NODE DRIVES THE TRANSFER IS EXPLICIT AND VERIFIED, never assumed. An earlier version ran
 # rsync from node1 in BOTH directions while its comment claimed it drove "from whichever side can
@@ -393,4 +493,4 @@ promote_node "$NODE1_SSH" "$NODE1_MODELS" "$NODE1_HOST" "$MODEL" node1
 
 log "final drift check:"
 drift_check || die "promoted both nodes but they still disagree — investigate before serving traffic"
-log "PROMOTED: $MODEL is live on both nodes as '$ALIAS'"
+log "PROMOTED: $MODEL is live on both nodes as '${SERVED_ALIASES[*]}'"
