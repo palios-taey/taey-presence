@@ -38,32 +38,33 @@ except ImportError as exc:  # fail LOUD and actionable, never a bare traceback
     )
     raise
 
-# --- per-display dispatch-lock ----------------------------------------------------------------
-# Reuse the taeys-hands lock primitives so drive_chat and the taeys-hands side share ONE key
-# (taey:plan_active::N) and one NX/EX discipline by construction. A fixed owner token means every
-# drive_chat call is ONE owner (distinct from a by-hand driver's token), so first-writer-wins +
-# refuse-if-a-different-owner-holds works both ways. FAIL-OPEN: an advisory lock must never block
-# Taey from driving a display, so every lock op is wrapped and proceeds on error.
-LOCK_OWNER = "taey-drive_chat"
-# TTL must exceed the gap between a session's supervised actions, or the lease drops mid-run and
-# another driver can grab the display. Generation completion is watched by the external monitor,
-# not by owner observations. Env-overridable for unusually slow supervised action sequences. An explicit release on
-# session-end will free a finished display before the TTL — noted with taeys-hands.)
-LOCK_TTL_DEFAULT = int(os.environ.get("TAEY_DRIVE_LOCK_TTL", "600"))
-try:
-    from consultation_v2.primitives import (
-        acquire_display_lock as _acquire_display_lock,
-        display_lock_record as _display_lock_record,
-        _plan_lock_key as _plan_lock_key,
+# --- per-display dispatch lease ---------------------------------------------------------------
+# The Hands primitive owns the one physical-display mutex. ui_drive may not substitute another
+# key or proceed when that dependency is unavailable. The owner arrives only from soma_proxy's
+# validated request context, never from model arguments.
+from consultation_v2.primitives import (
+    acquire_display_lock as _acquire_display_lock,
+    display_lock_record as _display_lock_record,
+    _plan_lock_key as _plan_lock_key,
+)
+from storage.redis_pool import get_client as _lock_redis_client
+from redis.exceptions import WatchError as _LockWatchError
+
+
+_MONITOR_TTL_DEFAULT = int(os.environ.get("TAEY_CONSULT_MONITOR_TTL", "10800"))
+LOCK_TTL_DEFAULT = int(
+    os.environ.get("TAEY_DRIVE_LOCK_TTL", str(_MONITOR_TTL_DEFAULT))
+)
+if LOCK_TTL_DEFAULT < _MONITOR_TTL_DEFAULT:
+    raise RuntimeError(
+        "TAEY_DRIVE_LOCK_TTL must be at least TAEY_CONSULT_MONITOR_TTL so display "
+        "ownership survives the no-poll consultation wait"
     )
-    from storage.redis_pool import get_client as _lock_redis_client
-    from redis.exceptions import WatchError as _LockWatchError
-    _LOCK_AVAILABLE = True
-except Exception:  # fail-open if the lock stack cannot import
-    _LOCK_AVAILABLE = False
 
 
-REF_PREFIX = "atspi2."
+REF_PREFIX = "atspi3."
+_LEASE_OWNER_RE = re.compile(r"taey-drive:[A-Za-z0-9._-]{1,64}:[0-9a-f]{32}")
+_TRACE_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,159}")
 
 
 class UiDriveError(RuntimeError):
@@ -139,17 +140,35 @@ def _configure_display(display: str) -> SimpleNamespace:
     )
 
 
+def _lease_context(*, required: bool = True) -> SimpleNamespace | None:
+    owner = os.environ.get("TAEY_DRIVE_LEASE_OWNER", "")
+    seat_id = os.environ.get("TAEY_DRIVE_LEASE_SEAT", "")
+    turn_id = os.environ.get("TAEY_DRIVE_LEASE_TURN", "")
+    if not any((owner, seat_id, turn_id)) and not required:
+        return None
+    if not _LEASE_OWNER_RE.fullmatch(owner):
+        raise UiDriveError("missing or invalid proxy-issued display lease owner")
+    if not _TRACE_ID_RE.fullmatch(seat_id):
+        raise UiDriveError("missing or invalid proxy-issued display lease seat")
+    if not _TRACE_ID_RE.fullmatch(turn_id):
+        raise UiDriveError("missing or invalid proxy-issued display lease turn")
+    return SimpleNamespace(owner=owner, seat_id=seat_id, turn_id=turn_id)
+
+
 def _encode_ref(
     *,
     display: str,
     platform: str,
+    revision: str,
     element: str,
 ) -> str:
     payload = json.dumps(
         {
-            "v": 2,
+            "v": 3,
             "display": display,
             "platform": platform,
+            "surface": "browser",
+            "revision": revision,
             "element": element,
         },
         ensure_ascii=False,
@@ -168,13 +187,17 @@ def _decode_ref(value: str) -> dict[str, Any]:
         payload = json.loads(base64.urlsafe_b64decode(encoded + padding).decode("utf-8"))
     except Exception as exc:
         raise UiDriveError(f"invalid ref encoding: {exc}") from exc
-    required = {"v", "display", "platform", "element"}
-    if set(payload) != required or payload.get("v") != 2:
+    required = {"v", "display", "platform", "surface", "revision", "element"}
+    if set(payload) != required or payload.get("v") != 3:
         raise UiDriveError("invalid ref schema")
     if not re.fullmatch(r":\d+", payload.get("display") or ""):
         raise UiDriveError("invalid ref display")
     if payload.get("platform") not in CHAT_PLATFORMS:
         raise UiDriveError("invalid ref platform")
+    if payload.get("surface") != "browser":
+        raise UiDriveError("invalid ref surface")
+    if not re.fullmatch(r"[0-9a-f]{64}", payload.get("revision") or ""):
+        raise UiDriveError("invalid ref revision")
     if not isinstance(payload.get("element"), str) or not payload["element"]:
         raise UiDriveError("invalid ref element")
     return payload
@@ -200,6 +223,40 @@ def _snapshot(deps: SimpleNamespace) -> Snapshot:
             f"snapshot platform {snapshot.platform!r} does not match bound {deps.platform!r}"
         )
     return snapshot
+
+
+def _snapshot_revision(snapshot: Snapshot) -> str:
+    mapped: dict[str, Any] = {}
+    for element_key in sorted(snapshot.mapped):
+        items = list(snapshot.mapped.get(element_key) or [])
+        if not items:
+            continue
+        matches = sorted(
+            (
+                {
+                    "name": item.name,
+                    "role": item.role,
+                    "states": sorted(set(item.states)),
+                }
+                for item in items
+            ),
+            key=lambda row: json.dumps(row, sort_keys=True, separators=(",", ":")),
+        )
+        mapped[element_key] = {
+            "match_count": len(items),
+            "matches": matches,
+        }
+    payload = {
+        "current_url": snapshot.url,
+        "mapped": mapped,
+    }
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _public_element(
@@ -290,24 +347,24 @@ def _attach_grammar(display: str) -> dict:
 
 
 def _resolve_target(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str, Any]:
-    element_key = getattr(args, "element", None)
-    if element_key and args.ref:
-        raise UiDriveError("--element cannot be combined with --ref")
-    if args.ref:
-        descriptor = _decode_ref(args.ref)
-        if descriptor["display"] != deps.display:
-            raise UiDriveError(
-                f"ref is scoped to display {descriptor['display']}, not {deps.display}"
-            )
-        if descriptor["platform"] != deps.platform:
-            raise UiDriveError(
-                f"ref is scoped to platform {descriptor['platform']}, not {deps.platform}"
-            )
-        element_key = descriptor["element"]
-    if not element_key:
-        raise UiDriveError("target requires --element or --ref")
-
+    if not args.ref:
+        raise UiDriveError("target requires --ref from the immediately preceding observe")
+    descriptor = _decode_ref(args.ref)
+    if descriptor["display"] != deps.display:
+        raise UiDriveError(
+            f"ref is scoped to display {descriptor['display']}, not {deps.display}"
+        )
+    if descriptor["platform"] != deps.platform:
+        raise UiDriveError(
+            f"ref is scoped to platform {descriptor['platform']}, not {deps.platform}"
+        )
     snapshot = _snapshot(deps)
+    revision = _snapshot_revision(snapshot)
+    if descriptor["revision"] != revision:
+        raise UiDriveError(
+            "stale browser snapshot ref; observe again and decide from the fresh tree"
+        )
+    element_key = descriptor["element"]
     matches = list(snapshot.mapped.get(element_key) or [])
     if len(matches) != 1:
         raise UiDriveError(
@@ -321,6 +378,7 @@ def _resolve_target(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str
         "ref": _encode_ref(
             display=deps.display,
             platform=deps.platform,
+            revision=revision,
             element=element_key,
         ),
     }
@@ -328,6 +386,7 @@ def _resolve_target(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str
 
 def _observe(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str, Any]:
     snapshot = _snapshot(deps)
+    revision = _snapshot_revision(snapshot)
     cfg = _platform_config(deps.display)
     mapped: list[dict[str, Any]] = []
     for element_key in sorted(snapshot.mapped):
@@ -338,6 +397,7 @@ def _observe(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str, Any]:
                 ref = _encode_ref(
                     display=deps.display,
                     platform=deps.platform,
+                    revision=revision,
                     element=element_key,
                 )
             mapped.append(
@@ -375,6 +435,8 @@ def _observe(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str, Any]:
         raise UiDriveError(f"{deps.platform}: urls.fresh must be a non-empty string")
     return {
         "platform": deps.platform,
+        "surface": "browser",
+        "snapshot_revision": revision,
         "current_url": snapshot.url,
         "fresh_url": fresh_url,
         "stop_keys": stop_keys,
@@ -657,8 +719,11 @@ def _add_display(parser: argparse.ArgumentParser) -> None:
 
 
 def _add_target(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--ref")
-    parser.add_argument("--element", help="platform-YAML element key (e.g. attach_trigger, composer_input, send_button) — resolved from that display's platform YAML")
+    parser.add_argument(
+        "--ref",
+        required=True,
+        help="atspi3 ref from the immediately preceding canonical browser observe",
+    )
 
 
 
@@ -713,19 +778,19 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-# Action ops mutate the display and must HOLD the per-display lock; observe/read-clipboard are
-# reads that only RENEW the lease when we already own it — a non-owner read never locks or renews.
+# Display mutations and clipboard extraction must hold the per-display lease. Observe remains
+# read-only: it renews only the exact owner and never creates a lease for a bystander.
 _LOCK_ACTION_OPS = {
     "click", "focus", "activate", "type", "paste", "key",
-    "focus-dialog", "extract",
+    "focus-dialog", "read-clipboard", "extract",
 }
 
 
-def _renew_if_owner(display: str, ttl: int) -> bool:
-    """Atomically extend the lease IFF we own it (WATCH/MULTI, mirroring release_display_lock).
-    Never renews another owner's lock, never raises out — fail-open."""
-    if not _LOCK_AVAILABLE:
-        return False
+def _renew_if_owner(
+    display: str,
+    lease: SimpleNamespace,
+    ttl: int,
+) -> bool:
     try:
         client = _lock_redis_client()
         key = _plan_lock_key(display)
@@ -740,75 +805,156 @@ def _renew_if_owner(display: str, ttl: int) -> bool:
                     try:
                         record = json.loads(raw)
                     except Exception:
-                        record = {}
-                    if record.get("owner_token") != LOCK_OWNER:
+                        raise UiDriveError(
+                            f"display {display} lease record is not valid JSON"
+                        )
+                    if not isinstance(record, dict):
+                        raise UiDriveError(
+                            f"display {display} lease record is not an object"
+                        )
+                    if record.get("owner_token") != lease.owner:
                         pipe.unwatch()
                         return False
+                    record["seat_id"] = lease.seat_id
+                    record["last_turn_id"] = lease.turn_id
                     pipe.multi()
-                    pipe.expire(key, ttl)
+                    pipe.set(key, json.dumps(record), ex=ttl)
                     pipe.execute()
                     return True
                 except _LockWatchError:
                     continue
-    except Exception as exc:  # fail-open
-        sys.stderr.write(f"[ui_drive] lock renew failed on {display} ({exc}); ignoring\n")
-        return False
+    except UiDriveError:
+        raise
+    except Exception as exc:
+        raise UiDriveError(
+            f"display {display} lease renewal unavailable; refusing action: {exc}"
+        ) from exc
 
 
-def _guard_action(display: str, ttl: int) -> None:
-    """Acquire-or-renew-or-REFUSE before an action op. Refusal raises UiDriveError (surfaces as
-    ok:false). FAIL-OPEN: any lock error logs to stderr and proceeds — the lock never blocks driving."""
-    if not _LOCK_AVAILABLE:
-        return
-    try:
-        token = _acquire_display_lock(
-            payload={"owner_token": LOCK_OWNER}, ttl=ttl, display=display
-        )
-    except Exception as exc:  # Redis unreachable etc. -> fail-open
-        sys.stderr.write(f"[ui_drive] lock acquire failed on {display} ({exc}); proceeding\n")
-        return
-    if token is not None:
-        return  # freshly acquired -> we hold it
-    # Held. Ours -> renew and proceed; a DIFFERENT owner -> refuse.
+def _observe_lease(
+    display: str,
+    lease: SimpleNamespace | None,
+    ttl: int,
+) -> dict[str, Any]:
+    if lease is None:
+        return {
+            "state": "unattributed_observation",
+            "owned": False,
+            "expires_by_ttl": True,
+        }
     try:
         record = _display_lock_record(display) or {}
-    except Exception as exc:  # fail-open on read error
-        sys.stderr.write(f"[ui_drive] lock record read failed on {display} ({exc}); proceeding\n")
-        return
+        if not record:
+            return {
+                "state": "unheld",
+                "owned": False,
+                "expires_by_ttl": True,
+            }
+        owned = record.get("owner_token") == lease.owner
+        if owned and not _renew_if_owner(display, lease, ttl):
+            raise UiDriveError(f"display {display} lease disappeared during renewal")
+        refreshed = _display_lock_record(display) or {}
+        return {
+            "state": "owned" if owned else "held_by_other",
+            "owned": owned,
+            "ttl_seconds": refreshed.get("ttl_seconds", record.get("ttl_seconds")),
+            "expires_by_ttl": True,
+        }
+    except Exception as exc:
+        return {
+            "state": "unavailable",
+            "owned": False,
+            "expires_by_ttl": True,
+            "error": str(exc),
+        }
+
+
+def _guard_action(
+    display: str,
+    lease: SimpleNamespace,
+    ttl: int,
+) -> dict[str, Any]:
+    try:
+        token = _acquire_display_lock(
+            payload={
+                "owner_token": lease.owner,
+                "seat_id": lease.seat_id,
+                "last_turn_id": lease.turn_id,
+                "actor_type": "taey-drive_chat",
+            },
+            ttl=ttl,
+            display=display,
+        )
+    except Exception as exc:
+        raise UiDriveError(
+            f"display {display} lease acquisition unavailable; refusing action: {exc}"
+        ) from exc
+    if token is not None:
+        return {
+            "state": "acquired",
+            "owned": True,
+            "ttl_seconds": ttl,
+            "expires_by_ttl": True,
+        }
+    try:
+        record = _display_lock_record(display) or {}
+    except Exception as exc:
+        raise UiDriveError(
+            f"display {display} lease record unavailable; refusing action: {exc}"
+        ) from exc
     owner = record.get("owner_token")
-    if owner == LOCK_OWNER:
-        _renew_if_owner(display, ttl)
-        return
+    if owner == lease.owner:
+        if not _renew_if_owner(display, lease, ttl):
+            raise UiDriveError(
+                f"display {display} lease disappeared during renewal; refusing action"
+            )
+        return {
+            "state": "renewed",
+            "owned": True,
+            "ttl_seconds": ttl,
+            "expires_by_ttl": True,
+        }
     raise UiDriveError(
-        f"display {display} is held by another driver ({owner or 'unknown'}); not acting "
-        f"(observe is still free)"
+        f"display {display} is held by another driver; refusing action "
+        f"(observe remains available)"
     )
 
 
 def _dispatch(args: argparse.Namespace, deps: SimpleNamespace) -> Any:
     if args.action == "observe":
-        _renew_if_owner(deps.display, LOCK_TTL_DEFAULT)  # owner-only; a bystander read never locks
-        return _observe(args, deps)
-    if args.action == "read-clipboard":
-        _renew_if_owner(deps.display, LOCK_TTL_DEFAULT)
-        return _read_clipboard(deps, getattr(args, "output_file", None))
+        result = _observe(args, deps)
+        result["lease"] = _observe_lease(
+            deps.display,
+            _lease_context(required=False),
+            LOCK_TTL_DEFAULT,
+        )
+        return result
+    lease_receipt = None
     if args.action in _LOCK_ACTION_OPS:
-        _guard_action(deps.display, LOCK_TTL_DEFAULT)
+        lease = _lease_context()
+        assert lease is not None
+        lease_receipt = _guard_action(deps.display, lease, LOCK_TTL_DEFAULT)
     if args.action == "extract":
-        return _extract_response(args, deps)
-    if args.action in {"click", "focus", "activate"}:
-        return _element_action(args.action, args, deps)
-    if args.action == "type":
-        return _type_text(args, deps)
-    if args.action == "paste":
-        return _paste(args, deps)
-    if args.action == "key":
-        return _key(args, deps)
-    if args.action == "focus-dialog":
-        return _focus_dialog(args, deps)
-    if args.action == "attach-grammar":
+        result = _extract_response(args, deps)
+    elif args.action in {"click", "focus", "activate"}:
+        result = _element_action(args.action, args, deps)
+    elif args.action == "type":
+        result = _type_text(args, deps)
+    elif args.action == "paste":
+        result = _paste(args, deps)
+    elif args.action == "key":
+        result = _key(args, deps)
+    elif args.action == "focus-dialog":
+        result = _focus_dialog(args, deps)
+    elif args.action == "read-clipboard":
+        result = _read_clipboard(deps, getattr(args, "output_file", None))
+    elif args.action == "attach-grammar":
         return _attach_grammar(deps.display)
-    raise UiDriveError(f"unsupported action: {args.action}")
+    else:
+        raise UiDriveError(f"unsupported action: {args.action}")
+    if lease_receipt is not None:
+        result = {**result, "lease": lease_receipt}
+    return result
 
 
 def main(argv: list[str] | None = None) -> int:

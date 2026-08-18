@@ -886,9 +886,8 @@ TOOLS = [
                             "that X11 window instead of the browser"
                         ),
                     },
-                    "element": {"type": "string", "description": "platform-YAML element key for click/focus/activate. Use only after a fresh observe confirms the intended live control; the key does not replace observation."},
                     "ref": {"type": "string",
-                            "description": "element ref from the immediately preceding fresh observe (for click/focus/activate)"},
+                            "description": "revision-bound element ref from the immediately preceding fresh observe; required for click/focus/activate"},
                     "text": {"type": "string", "description": "text to type or paste (use for SHORT input; for a large packet use text_file instead so you don't regenerate every character)"},
                     "text_file": {"type": "string", "description": "absolute path to a file whose EXACT bytes are pasted (paste action only). Prefer this for any large/verbatim content — pass the path, not the content; the tool reads and pastes it. Instant and byte-perfect."},
                     "output_file": {"type": "string", "description": "absolute destination path for read_clipboard; the file must not already exist"},
@@ -1521,6 +1520,28 @@ def _do_drive_chat(arguments: dict) -> str:
         return _err(display, action,
                     f"unknown action {action!r}; valid: {sorted(_DRIVE_ACTIONS)}")
 
+    context = dict(_request_context.get())
+    seat_id = str(context.get("seat_id") or "")
+    process_generation = str(context.get("process_generation") or "")
+    turn_id = str(context.get("turn_id") or "")
+    if (
+        not _SEAT_ID_RE.fullmatch(seat_id)
+        or not re.fullmatch(r"[0-9a-f]{32}", process_generation)
+        or not _TRACE_ID_RE.fullmatch(turn_id)
+    ):
+        return _err(
+            display,
+            action,
+            "drive_chat requires a validated active Taey turn context; refusing",
+        )
+    lease_owner = f"taey-drive:{seat_id}:{process_generation}"
+    drive_env = dict(os.environ)
+    drive_env.update({
+        "TAEY_DRIVE_LEASE_OWNER": lease_owner,
+        "TAEY_DRIVE_LEASE_SEAT": seat_id,
+        "TAEY_DRIVE_LEASE_TURN": turn_id,
+    })
+
     output_file = arguments.get("output_file")
     if output_file is not None:
         if action != "read_clipboard":
@@ -1535,24 +1556,12 @@ def _do_drive_chat(arguments: dict) -> str:
     if output_file is not None:
         cmd += ["--output-file", output_file]
     if action in ("click", "focus", "activate"):
-        # ui_drive resolves --element through the canonical fresh snapshot, including
-        # structural and shared-chrome mappings. Requiring a ref here meant every click
-        # had to be preceded by a full-tree observe purely to obtain one, so the
-        # tool surface exposed LESS than the layer beneath it and a caller told
-        # to "use the YAML key" had nowhere to put it. A key is stable across
-        # renders; a ref is not.
-        element = arguments.get("element")
         ref = arguments.get("ref")
-        if element and ref:
-            return _err(display, action, "pass element=<YAML key> or ref=<from observe>, not both")
-        if element:
-            cmd += ["--element", str(element)]
-        elif ref:
+        if ref:
             cmd += ["--ref", str(ref)]
         else:
             return _err(display, action,
-                        f"{action} requires element=<platform YAML key, e.g. 'toggle_menu'> "
-                        f"or ref=<from a recent observe>")
+                        f"{action} requires ref=<from the immediately preceding fresh observe>")
     elif action in ("type", "paste"):
         # Prefer text_file: the model passes a PATH and ui_drive pastes the exact
         # file bytes. A large packet as inline `text` forces the model to regenerate
@@ -1593,7 +1602,13 @@ def _do_drive_chat(arguments: dict) -> str:
             return _err(display, action, "key requires a key name, e.g. Return")
         cmd += ["--key", str(key)]
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
+        r = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=90,
+            env=drive_env,
+        )
         _audit("drive_chat", {"display": display, "action": action, "rc": r.returncode})
         out = (r.stdout or "").strip()
         if out:
