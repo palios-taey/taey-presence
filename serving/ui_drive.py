@@ -11,11 +11,9 @@ import os
 import re
 import sys
 import time
-from collections import Counter
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from urllib.parse import urlparse
 
 
 # The AT-SPI primitives live in the PUBLIC palios-taey/taeys-hands repo
@@ -28,7 +26,11 @@ if TAEYS_HANDS not in sys.path:
     sys.path.insert(0, TAEYS_HANDS)
 
 try:
+    from consultation_v2.platforms import routing as platform_routing
     from consultation_v2.platforms_runtime import display_environment
+    from consultation_v2.snapshot import build_snapshot
+    from consultation_v2.types import ElementRef, Snapshot
+    from consultation_v2.yaml_contract import CHAT_PLATFORMS, load_platform_yaml
 except ImportError as exc:  # fail LOUD and actionable, never a bare traceback
     sys.stderr.write(
         f"ui_drive: cannot import consultation_v2 from {TAEYS_HANDS!r}: {exc}\n"
@@ -43,10 +45,9 @@ except ImportError as exc:  # fail LOUD and actionable, never a bare traceback
 # refuse-if-a-different-owner-holds works both ways. FAIL-OPEN: an advisory lock must never block
 # Taey from driving a display, so every lock op is wrapped and proceeds on error.
 LOCK_OWNER = "taey-drive_chat"
-# TTL must exceed the gap between a session's owned-observes, or the lease drops mid-run and another
-# driver can grab the display. 600s covers deep-mode (deep_research / extended) poll gaps with
-# headroom; a well-behaved wait-for-completion loop observes far more often than that. Env-overridable
-# so a very sparse-poll op can raise it without a code change. (v1.1: an explicit release on
+# TTL must exceed the gap between a session's supervised actions, or the lease drops mid-run and
+# another driver can grab the display. Generation completion is watched by the external monitor,
+# not by owner observations. Env-overridable for unusually slow supervised action sequences. An explicit release on
 # session-end will free a finished display before the TTL — noted with taeys-hands.)
 LOCK_TTL_DEFAULT = int(os.environ.get("TAEY_DRIVE_LOCK_TTL", "600"))
 try:
@@ -62,38 +63,7 @@ except Exception:  # fail-open if the lock stack cannot import
     _LOCK_AVAILABLE = False
 
 
-REF_PREFIX = "atspi1."
-CHROME_POLICY = Path(TAEYS_HANDS) / "consultation_v2" / "firefox_chrome.yaml"
-OUTPUT_ROLES = {
-    "article",
-    "check box",
-    "combo box",
-    "entry",
-    "heading",
-    "link",
-    "list item",
-    "menu item",
-    "paragraph",
-    "push button",
-    "radio button",
-    "section",
-    "spin button",
-    "static",
-    "text",
-    "toggle button",
-}
-STATE_NAMES = (
-    "editable",
-    "focusable",
-    "focused",
-    "showing",
-    "visible",
-    "sensitive",
-    "enabled",
-    "checked",
-    "pressed",
-    "selected",
-)
+REF_PREFIX = "atspi2."
 
 
 class UiDriveError(RuntimeError):
@@ -112,13 +82,22 @@ def _requested_option(argv: list[str], option: str) -> str | None:
         return None
 
 
-def _emit(*, ok: bool, action: str, display: str | None, result: Any, error: str | None) -> None:
+def _emit(
+    *,
+    ok: bool,
+    action: str,
+    display: str | None,
+    platform: str | None,
+    result: Any,
+    error: str | None,
+) -> None:
     print(
         json.dumps(
             {
                 "ok": ok,
                 "action": action,
                 "display": display,
+                "platform": platform,
                 "result": result,
                 "error": error,
             },
@@ -146,169 +125,32 @@ def _configure_display(display: str) -> SimpleNamespace:
         raise UiDriveError(f"no AT-SPI bus resolved for display {display}")
     os.environ.update(env)
 
-    from consultation_v2 import atspi, clipboard, input as ui_input, interact
-    import gi
-
-    gi.require_version("Atspi", "2.0")
-    from gi.repository import Atspi
+    from consultation_v2 import clipboard, input as ui_input, interact
 
     ui_input.set_display(display)
     clipboard.set_display(display)
+    platform = _platform_for_display(env["DISPLAY"])
     return SimpleNamespace(
         display=env["DISPLAY"],
-        Atspi=Atspi,
-        atspi=atspi,
+        platform=platform,
         clipboard=clipboard,
         input=ui_input,
         interact=interact,
     )
 
 
-def _chrome_policy() -> tuple[set[str], set[tuple[str, str]], set[str]]:
-    import yaml
-
-    if not CHROME_POLICY.is_file():
-        raise UiDriveError(f"Firefox chrome policy is missing: {CHROME_POLICY}")
-    data = (yaml.safe_load(CHROME_POLICY.read_text(encoding="utf-8")) or {}).get(
-        "firefox_chrome", {}
-    )
-    subtree_roles = set(data.get("subtree_roles") or [])
-    portal_roles = set(data.get("portal_container_roles") or [])
-    exact: set[tuple[str, str]] = set()
-    for spec in data.get("exact_elements") or []:
-        names = spec.get("names_any_of") or ([spec["name"]] if "name" in spec else [])
-        for name in names:
-            exact.add((str(name), str(spec.get("role") or "")))
-    return subtree_roles, exact, portal_roles
-
-
-def _states(node: Any, Atspi: Any) -> list[str]:
-    found: list[str] = []
-    try:
-        state_set = node.get_state_set()
-    except Exception:
-        return found
-    for name in STATE_NAMES:
-        try:
-            if state_set.contains(getattr(Atspi.StateType, name.upper())):
-                found.append(name)
-        except Exception:
-            continue
-    return found
-
-
-def _text(node: Any, Atspi: Any, max_chars: int = 700) -> str:
-    try:
-        iface = node.get_text_iface()
-        if iface:
-            count = int(iface.get_character_count())
-            if 0 < count <= max_chars:
-                return (iface.get_text(0, count) or "").strip()
-    except Exception:
-        pass
-    try:
-        count = int(Atspi.Text.get_character_count(node))
-        if 0 < count <= max_chars:
-            return (Atspi.Text.get_text(node, 0, count) or "").strip()
-    except Exception:
-        pass
-    return ""
-
-
-def _is_showing(node: Any, Atspi: Any) -> bool:
-    try:
-        return bool(node.get_state_set().contains(Atspi.StateType.SHOWING))
-    except Exception:
-        return False
-
-
-def _is_onscreen(node: Any, Atspi: Any) -> bool:
-    try:
-        component = node.get_component_iface()
-        if component is None:
-            return False
-        rect = component.get_extents(Atspi.CoordType.SCREEN)
-        return bool(
-            rect
-            and rect.x >= 0
-            and rect.y >= 0
-            and rect.width > 0
-            and rect.height > 0
-        )
-    except Exception:
-        return False
-
-
-def _ancestor_set(node: Any) -> set[Any]:
-    ancestors: set[Any] = set()
-    current = node
-    for _ in range(50):
-        try:
-            parent = current.get_parent()
-        except Exception:
-            break
-        if parent is None:
-            break
-        ancestors.add(parent)
-        current = parent
-    return ancestors
-
-
-def _portal_roots(
-    firefox: Any,
-    document: Any,
-    *,
-    Atspi: Any,
-    subtree_roles: set[str],
-    portal_roles: set[str],
-    max_depth: int = 10,
-) -> list[Any]:
-    document_ancestors = _ancestor_set(document)
-    roots: list[Any] = []
-
-    def walk(node: Any, depth: int) -> None:
-        if depth > max_depth:
-            return
-        try:
-            role = str(node.get_role_name() or "")
-            if node == document or role == "document web" or role in subtree_roles:
-                return
-            if (
-                node not in document_ancestors
-                and role in portal_roles
-                and _is_onscreen(node, Atspi)
-            ):
-                roots.append(node)
-                return
-            for index in range(node.get_child_count()):
-                child = node.get_child_at_index(index)
-                if child is not None:
-                    walk(child, depth + 1)
-        except Exception:
-            return
-
-    walk(firefox, 0)
-    return roots
-
-
 def _encode_ref(
     *,
     display: str,
-    role: str,
-    name: str,
-    nth: int,
-    count: int,
-    max_depth: int,
+    platform: str,
+    element: str,
 ) -> str:
     payload = json.dumps(
         {
-            "v": 1,
+            "v": 2,
             "display": display,
-            "role": role,
-            "name": name,
-            "nth": nth,
-            "count": count,
-            "max_depth": max_depth,
+            "platform": platform,
+            "element": element,
         },
         ensure_ascii=False,
         sort_keys=True,
@@ -326,117 +168,63 @@ def _decode_ref(value: str) -> dict[str, Any]:
         payload = json.loads(base64.urlsafe_b64decode(encoded + padding).decode("utf-8"))
     except Exception as exc:
         raise UiDriveError(f"invalid ref encoding: {exc}") from exc
-    required = {"v", "display", "role", "name", "nth", "count", "max_depth"}
-    if set(payload) != required or payload.get("v") != 1:
+    required = {"v", "display", "platform", "element"}
+    if set(payload) != required or payload.get("v") != 2:
         raise UiDriveError("invalid ref schema")
     if not re.fullmatch(r":\d+", payload.get("display") or ""):
         raise UiDriveError("invalid ref display")
-    if not isinstance(payload["role"], str) or not isinstance(payload["name"], str):
-        raise UiDriveError("invalid ref role/name")
-    for key in ("nth", "count", "max_depth"):
-        if not isinstance(payload[key], int):
-            raise UiDriveError(f"invalid ref {key}")
-    if payload["nth"] < 0 or payload["count"] < 1:
-        raise UiDriveError("invalid ref occurrence metadata")
-    _validate_max_depth(payload["max_depth"])
+    if payload.get("platform") not in CHAT_PLATFORMS:
+        raise UiDriveError("invalid ref platform")
+    if not isinstance(payload.get("element"), str) or not payload["element"]:
+        raise UiDriveError("invalid ref element")
     return payload
 
 
-def _validate_max_depth(value: int) -> None:
-    if not 1 <= value <= 80:
-        raise UiDriveError(f"max depth must be between 1 and 80, got {value}")
-
-
-def _snapshot(deps: SimpleNamespace, *, max_depth: int) -> list[dict[str, Any]]:
-    _validate_max_depth(max_depth)
-    firefox = deps.atspi.find_firefox()
-    if firefox is None:
-        raise UiDriveError(f"Firefox not found on display {deps.display}")
-
-    documents = deps.atspi.document_web_elements(firefox, max_depth=10)
-    showing_documents = [doc for doc in documents if _is_showing(doc, deps.Atspi)]
-    if len(showing_documents) != 1:
-        raise UiDriveError(
-            f"expected exactly one SHOWING document web on {deps.display}, found {len(showing_documents)}"
-        )
-
-    subtree_roles, exact_chrome, portal_roles = _chrome_policy()
-    roots = [showing_documents[0]]
-    roots.extend(
-        _portal_roots(
-            firefox,
-            showing_documents[0],
-            Atspi=deps.Atspi,
-            subtree_roles=subtree_roles,
-            portal_roles=portal_roles,
-        )
+def _platform_for_display(display: str) -> str:
+    matches = sorted(
+        platform
+        for platform in CHAT_PLATFORMS
+        if platform_routing.get_platform_display(platform) == display
     )
-    rows: list[dict[str, Any]] = []
-
-    def walk(node: Any, depth: int) -> None:
-        if depth > max_depth:
-            return
-        try:
-            role = str(node.get_role_name() or "")
-            if role in subtree_roles:
-                return
-            if role == "document web" and not _is_showing(node, deps.Atspi):
-                return
-            name = str(node.get_name() or "").strip()
-            states = _states(node, deps.Atspi)
-            text = _text(node, deps.Atspi)
-            if (
-                "showing" in states
-                and role in OUTPUT_ROLES
-                and (name or text)
-                and (name, role) not in exact_chrome
-            ):
-                rows.append(
-                    {
-                        "role": role,
-                        "name": name,
-                        "text": text,
-                        "states": states,
-                        "atspi_obj": node,
-                    }
-                )
-            for index in range(node.get_child_count()):
-                child = node.get_child_at_index(index)
-                if child is not None:
-                    walk(child, depth + 1)
-        except Exception:
-            return
-
-    for root in roots:
-        walk(root, 0)
-
-    totals = Counter((row["role"], row["name"]) for row in rows)
-    occurrences: Counter[tuple[str, str]] = Counter()
-    for row in rows:
-        key = (row["role"], row["name"])
-        nth = occurrences[key]
-        occurrences[key] += 1
-        row["nth"] = nth
-        row["match_count"] = totals[key]
-        row["ref"] = _encode_ref(
-            display=deps.display,
-            role=row["role"],
-            name=row["name"],
-            nth=nth,
-            count=totals[key],
-            max_depth=max_depth,
+    if len(matches) != 1:
+        raise UiDriveError(
+            f"display {display} resolved to {matches}; expected exactly one Chat platform"
         )
-    return rows
+    return matches[0]
 
 
-def _public_element(row: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "ref": row["ref"],
-        "role": row["role"],
-        "name": row["name"],
-        "text": row["text"],
-        "states": row["states"],
+def _snapshot(deps: SimpleNamespace) -> Snapshot:
+    _firefox, _document, snapshot = build_snapshot(deps.platform)
+    if snapshot.platform != deps.platform:
+        raise UiDriveError(
+            f"snapshot platform {snapshot.platform!r} does not match bound {deps.platform!r}"
+        )
+    return snapshot
+
+
+def _public_element(
+    item: ElementRef,
+    *,
+    category: str,
+    element: str | None = None,
+    match_count: int = 1,
+    ref: str | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "category": category,
+        "element": element,
+        "name": item.name,
+        "role": item.role,
+        "states": list(item.states),
+        "match_count": match_count,
     }
+    if item.text:
+        payload["text"] = item.text
+    if item.description:
+        payload["description"] = item.description
+    if ref is not None:
+        payload["ref"] = ref
+    return payload
 
 
 # ---------------------------------------------------------------------------
@@ -453,29 +241,12 @@ def _public_element(row: dict[str, Any]) -> dict[str, Any]:
 # and this resolves it from THAT display's platform YAML. One sequence, every
 # platform, no hardcoded names anywhere.
 # ---------------------------------------------------------------------------
-_DISPLAY_PLATFORM = {
-    ":2": "chatgpt", ":3": "claude", ":4": "gemini", ":5": "grok", ":6": "perplexity",
-    ":21": "claude", ":22": "gemini", ":23": "grok", ":24": "perplexity",
-}
-_YAML_ROOT = os.path.join(TAEYS_HANDS, "consultation_v2", "platforms")
-_yaml_cache: dict[str, dict] = {}
-
-
 def _platform_config(display: str) -> dict:
-    platform = _DISPLAY_PLATFORM.get(display)
-    if not platform:
-        raise UiDriveError(
-            f"no platform mapping for display {display}; "
-            f"known: {sorted(_DISPLAY_PLATFORM)}")
-    if platform not in _yaml_cache:
-        path = os.path.join(_YAML_ROOT, platform, f"{platform}.yaml")
-        try:
-            import yaml as _yaml
-            with open(path, "r", encoding="utf-8") as fh:
-                _yaml_cache[platform] = _yaml.safe_load(fh) or {}
-        except Exception as exc:
-            raise UiDriveError(f"cannot load platform YAML {path}: {exc}") from exc
-    return _yaml_cache[platform]
+    platform = _platform_for_display(display)
+    try:
+        return load_platform_yaml(platform)
+    except Exception as exc:
+        raise UiDriveError(f"cannot load strict platform YAML for {platform}: {exc}") from exc
 
 
 def _attach_grammar(display: str) -> dict:
@@ -490,10 +261,14 @@ def _attach_grammar(display: str) -> dict:
     cfg = _platform_config(display)
     att = ((cfg.get("workflow") or {}).get("attachment") or {})
     emap = ((cfg.get("tree") or {}).get("element_map") or {})
-    trig_key = att.get("trigger") or "attach_trigger"
-    targ_key = att.get("menu_target") or "tool_upload"
+    trig_key = att.get("trigger")
+    targ_key = att.get("menu_target")
+    if not isinstance(trig_key, str) or not trig_key:
+        raise UiDriveError(f"{cfg.get('platform')}: workflow.attachment.trigger is required")
+    if not isinstance(targ_key, str) or not targ_key:
+        raise UiDriveError(f"{cfg.get('platform')}: workflow.attachment.menu_target is required")
     out = {
-        "platform": _DISPLAY_PLATFORM.get(display),
+        "platform": str(cfg.get("platform") or ""),
         "trigger_key": trig_key,
         "target_key": targ_key,
         "open_method": att.get("open_method"),
@@ -507,87 +282,114 @@ def _attach_grammar(display: str) -> dict:
         raise UiDriveError(
             f"{out['platform']}: workflow.attachment.trigger={trig_key!r} has no "
             f"element_map entry. YAML is the source of truth — fix it there, not here.")
-    return out
-
-
-def _element_spec(display: str, key: str) -> dict:
-    cfg = _platform_config(display)
-    emap = ((cfg.get("tree") or {}).get("element_map") or {})
-    spec = emap.get(key)
-    if not spec:
+    if not out["target"]:
         raise UiDriveError(
-            f"element {key!r} is not defined for {_DISPLAY_PLATFORM.get(display)} "
-            f"in its platform YAML. Defined keys include: "
-            f"{sorted(list(emap)[:24])}")
-    if not spec.get("name") or not spec.get("role"):
-        raise UiDriveError(f"element {key!r} lacks name/role in the platform YAML: {spec}")
-    return spec
+            f"{out['platform']}: workflow.attachment.menu_target={targ_key!r} has no "
+            f"element_map entry. YAML is the source of truth — fix it there, not here.")
+    return out
 
 
 def _resolve_target(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str, Any]:
     element_key = getattr(args, "element", None)
-    if element_key:
-        if args.ref:
-            raise UiDriveError("--element cannot be combined with --ref")
-        spec = _element_spec(deps.display, element_key)
-        args = argparse.Namespace(**{**vars(args),
-                                     "role": spec["role"], "name": spec["name"],
-                                     "nth": args.nth, "ref": None})
+    if element_key and args.ref:
+        raise UiDriveError("--element cannot be combined with --ref")
     if args.ref:
-        if args.role is not None or args.name is not None or args.nth is not None:
-            raise UiDriveError("--ref cannot be combined with --role, --name, or --nth")
         descriptor = _decode_ref(args.ref)
         if descriptor["display"] != deps.display:
             raise UiDriveError(
                 f"ref is scoped to display {descriptor['display']}, not {deps.display}"
             )
-        role = descriptor["role"]
-        name = descriptor["name"]
-        nth = descriptor["nth"]
-        max_depth = descriptor["max_depth"]
-        expected_count = descriptor["count"]
-    else:
-        if args.role is None or args.name is None:
-            raise UiDriveError("target requires --ref or both --role and --name")
-        role = args.role
-        name = args.name
-        nth = args.nth
-        max_depth = args.max_depth
-        expected_count = None
-
-    rows = _snapshot(deps, max_depth=max_depth)
-    matches = [row for row in rows if row["role"] == role and row["name"] == name]
-    if expected_count is not None and len(matches) != expected_count:
-        raise UiDriveError(
-            f"ref tree shape changed: expected {expected_count} exact role/name matches, found {len(matches)}"
-        )
-    if nth is None:
-        if len(matches) != 1:
+        if descriptor["platform"] != deps.platform:
             raise UiDriveError(
-                f"target descriptor matched {len(matches)} elements; expected exactly one or supply --nth"
+                f"ref is scoped to platform {descriptor['platform']}, not {deps.platform}"
             )
-        return matches[0]
-    if nth < 0:
-        raise UiDriveError("--nth must be zero or greater")
-    if nth >= len(matches):
+        element_key = descriptor["element"]
+    if not element_key:
+        raise UiDriveError("target requires --element or --ref")
+
+    snapshot = _snapshot(deps)
+    matches = list(snapshot.mapped.get(element_key) or [])
+    if len(matches) != 1:
         raise UiDriveError(
-            f"target descriptor matched {len(matches)} elements; occurrence {nth} does not exist"
+            f"mapped element {element_key!r} matched {len(matches)} elements on "
+            f"{deps.platform} {deps.display}; expected exactly one"
         )
-    return matches[nth]
+    item = matches[0]
+    return {
+        **dict(item.raw),
+        "element": element_key,
+        "ref": _encode_ref(
+            display=deps.display,
+            platform=deps.platform,
+            element=element_key,
+        ),
+    }
 
 
-def _observe(args: argparse.Namespace, deps: SimpleNamespace) -> list[dict[str, Any]]:
-    rows = _snapshot(deps, max_depth=args.max_depth)
-    if args.filter:
-        needle = args.filter.casefold()
-        rows = [
-            row
-            for row in rows
-            if needle in row["role"].casefold()
-            or needle in row["name"].casefold()
-            or needle in row["text"].casefold()
-        ]
-    return [_public_element(row) for row in rows]
+def _observe(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str, Any]:
+    snapshot = _snapshot(deps)
+    cfg = _platform_config(deps.display)
+    mapped: list[dict[str, Any]] = []
+    for element_key in sorted(snapshot.mapped):
+        items = list(snapshot.mapped.get(element_key) or [])
+        for item in items:
+            ref = None
+            if len(items) == 1:
+                ref = _encode_ref(
+                    display=deps.display,
+                    platform=deps.platform,
+                    element=element_key,
+                )
+            mapped.append(
+                _public_element(
+                    item,
+                    category="mapped",
+                    element=element_key,
+                    match_count=len(items),
+                    ref=ref,
+                )
+            )
+
+    unknown = [
+        _public_element(item, category="unknown") for item in snapshot.unknown
+    ]
+    sidebar = [
+        _public_element(item, category="sidebar") for item in snapshot.sidebar
+    ]
+    menu_items = [
+        _public_element(item, category="menu_item") for item in snapshot.menu_items
+    ]
+    monitor = ((cfg.get("workflow") or {}).get("monitor") or {})
+    stop_keys = monitor.get("stop_keys")
+    if stop_keys is None:
+        stop_key = monitor.get("stop_key")
+        stop_keys = [stop_key] if isinstance(stop_key, str) and stop_key else None
+    if not isinstance(stop_keys, list) or not all(
+        isinstance(key, str) and key for key in stop_keys
+    ):
+        raise UiDriveError(
+            f"{deps.platform}: workflow.monitor requires stop_keys or stop_key"
+        )
+    fresh_url = ((cfg.get("urls") or {}).get("fresh"))
+    if not isinstance(fresh_url, str) or not fresh_url:
+        raise UiDriveError(f"{deps.platform}: urls.fresh must be a non-empty string")
+    return {
+        "platform": deps.platform,
+        "current_url": snapshot.url,
+        "fresh_url": fresh_url,
+        "stop_keys": stop_keys,
+        "raw_count": snapshot.raw_count,
+        "counts": {
+            "mapped": len(mapped),
+            "unknown": len(unknown),
+            "sidebar": len(sidebar),
+            "menu_items": len(menu_items),
+        },
+        "mapped": mapped,
+        "unknown": unknown,
+        "sidebar": sidebar,
+        "menu_items": menu_items,
+    }
 
 
 def _element_action(
@@ -601,7 +403,17 @@ def _element_action(
     }[action]
     if not primitive(row):
         raise UiDriveError(f"{action} primitive returned false")
-    return {"performed": True, "element": _public_element(row)}
+    return {
+        "performed": True,
+        "element": {
+            "category": "mapped",
+            "element": row["element"],
+            "name": str(row.get("name") or ""),
+            "role": str(row.get("role") or ""),
+            "states": list(row.get("states") or []),
+            "ref": row["ref"],
+        },
+    }
 
 
 # GTK file-chooser titles Firefox uses, in the order worth trying.
@@ -810,12 +622,7 @@ def _extract_response(args: argparse.Namespace, deps: SimpleNamespace) -> dict[s
     """
     from consultation_v2 import drive_chat_adapter
 
-    platform = _DISPLAY_PLATFORM.get(deps.display)
-    if not platform:
-        raise UiDriveError(
-            f"no platform mapping for display {deps.display}; "
-            f"known: {sorted(_DISPLAY_PLATFORM)}"
-        )
+    platform = deps.platform
 
     result = drive_chat_adapter.extract(platform)
     text = str(result.get("response_text") or "")
@@ -845,32 +652,12 @@ def _extract_response(args: argparse.Namespace, deps: SimpleNamespace) -> dict[s
     return {**{key: value for key, value in result.items() if key != "response_text"}, **receipt}
 
 
-def _navigate(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str, Any]:
-    parsed = urlparse(args.url)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise UiDriveError("navigate URL must be absolute http(s)")
-    if not deps.input.focus_firefox():
-        raise UiDriveError("focus_firefox returned false")
-    if not deps.input.press_key("ctrl+l"):
-        raise UiDriveError("address-bar key returned false")
-    time.sleep(0.2)
-    if not deps.input.type_text(args.url):
-        raise UiDriveError("URL type_text returned false")
-    if not deps.input.press_key("Return"):
-        raise UiDriveError("navigation Return returned false")
-    return {"url": args.url}
-
-
 def _add_display(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--display", required=True, help="raw X display in :N form")
 
 
 def _add_target(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--ref")
-    parser.add_argument("--role")
-    parser.add_argument("--name")
-    parser.add_argument("--nth", type=int)
-    parser.add_argument("--max-depth", type=int, default=40)
     parser.add_argument("--element", help="platform-YAML element key (e.g. attach_trigger, composer_input, send_button) — resolved from that display's platform YAML")
 
 
@@ -881,8 +668,6 @@ def _parser() -> argparse.ArgumentParser:
 
     observe = commands.add_parser("observe")
     _add_display(observe)
-    observe.add_argument("--max-depth", type=int, default=12)
-    observe.add_argument("--filter")
 
     for action in ("click", "focus", "activate"):
         target = commands.add_parser(action)
@@ -925,17 +710,13 @@ def _parser() -> argparse.ArgumentParser:
     )
     extract.add_argument("--output-file", dest="output_file")
 
-    navigate = commands.add_parser("navigate")
-    _add_display(navigate)
-    navigate.add_argument("--url", required=True)
-
     return parser
 
 
 # Action ops mutate the display and must HOLD the per-display lock; observe/read-clipboard are
 # reads that only RENEW the lease when we already own it — a non-owner read never locks or renews.
 _LOCK_ACTION_OPS = {
-    "click", "focus", "activate", "type", "paste", "key", "navigate",
+    "click", "focus", "activate", "type", "paste", "key",
     "focus-dialog", "extract",
 }
 
@@ -1023,8 +804,6 @@ def _dispatch(args: argparse.Namespace, deps: SimpleNamespace) -> Any:
         return _paste(args, deps)
     if args.action == "key":
         return _key(args, deps)
-    if args.action == "navigate":
-        return _navigate(args, deps)
     if args.action == "focus-dialog":
         return _focus_dialog(args, deps)
     if args.action == "attach-grammar":
@@ -1036,17 +815,33 @@ def main(argv: list[str] | None = None) -> int:
     actual_argv = list(sys.argv[1:] if argv is None else argv)
     action = actual_argv[0] if actual_argv else "parse"
     display = _requested_option(actual_argv, "--display")
+    platform = None
     try:
         args = _parser().parse_args(actual_argv)
         action = args.action
         display = args.display
         deps = _configure_display(display)
         display = deps.display
+        platform = deps.platform
         result = _dispatch(args, deps)
-        _emit(ok=True, action=action, display=display, result=result, error=None)
+        _emit(
+            ok=True,
+            action=action,
+            display=display,
+            platform=platform,
+            result=result,
+            error=None,
+        )
         return 0
     except Exception as exc:
-        _emit(ok=False, action=action, display=display, result=None, error=str(exc))
+        _emit(
+            ok=False,
+            action=action,
+            display=display,
+            platform=platform,
+            result=None,
+            error=str(exc),
+        )
         return 1
 
 
