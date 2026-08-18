@@ -251,6 +251,8 @@ def _snapshot_revision(snapshot: Snapshot) -> str:
                     "name": item.name,
                     "role": item.role,
                     "states": sorted(set(item.states)),
+                    "text": item.text,
+                    "text_selections": item.raw.get("text_selections") or [],
                 }
                 for item in items
             ),
@@ -291,6 +293,9 @@ def _public_element(
     }
     if item.text:
         payload["text"] = item.text
+    text_selections = item.raw.get("text_selections") or []
+    if text_selections:
+        payload["text_selections"] = text_selections
     if item.description:
         payload["description"] = item.description
     if ref is not None:
@@ -411,12 +416,20 @@ def _manual_ui_module(platform: str) -> Any | None:
 def _declared_operation(
     platform: str,
     element_key: str,
-    states: list[str],
+    item: ElementRef | dict[str, Any],
 ) -> dict[str, Any] | None:
     manual = _manual_ui_module(platform)
     if manual is None:
         return None
-    declared = manual.element_operation(element_key, states)
+    if isinstance(item, ElementRef):
+        states = list(item.states)
+        context = dict(item.raw or {})
+        if item.text is not None:
+            context["text"] = item.text
+    else:
+        states = list(item.get("states") or [])
+        context = dict(item)
+    declared = manual.element_operation(element_key, states, context)
     if declared is not None and not isinstance(declared, dict):
         raise UiDriveError(
             f"{platform} manual element_operation must return a mapping or null"
@@ -449,7 +462,7 @@ def _observe(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str, Any]:
             )
             if len(items) == 1:
                 declared = _declared_operation(
-                    deps.platform, element_key, list(item.states)
+                    deps.platform, element_key, item
                 )
                 if declared is not None:
                     public_item["declared_operation"] = declared
@@ -504,7 +517,7 @@ def _element_action(
 ) -> dict[str, Any]:
     row = _resolve_target(args, deps)
     declared = _declared_operation(
-        deps.platform, row["element"], list(row.get("states") or [])
+        deps.platform, row["element"], row
     )
     if declared is not None and action not in declared["allowed_now"]:
         raise UiDriveError(
@@ -556,6 +569,10 @@ def _type_text(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str, Any
     """
     if not args.text:
         raise UiDriveError("type text must not be empty")
+    manual = _manual_ui_module(deps.platform)
+    validate_type = getattr(manual, "validate_type_action", None) if manual else None
+    if validate_type is not None:
+        validate_type(args.text, _snapshot(deps))
     if not deps.input.type_text(args.text):
         raise UiDriveError("type_text returned false")
     return {"typed_chars": len(args.text)}
@@ -631,6 +648,10 @@ def _paste(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str, Any]:
         source = "file"
     if text is None or text == "":
         raise UiDriveError("paste needs non-empty --text or a readable --text-file")
+    manual = _manual_ui_module(deps.platform)
+    validate_paste = getattr(manual, "validate_paste_action", None) if manual else None
+    if validate_paste is not None:
+        validate_paste(text, _snapshot(deps))
     if not deps.input.clipboard_paste(text):
         raise UiDriveError("clipboard_paste returned false")
     return {"pasted_chars": len(text), "source": source}
@@ -658,7 +679,10 @@ def _key(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str, Any]:
     if not args.key:
         raise UiDriveError("key must not be empty")
     manual = _manual_ui_module(deps.platform)
-    if manual is not None and manual.key_requires_state(args.key):
+    validate_key = getattr(manual, "validate_key_action", None) if manual else None
+    if validate_key is not None:
+        validate_key(args.key, _snapshot(deps))
+    elif manual is not None and manual.key_requires_state(args.key):
         manual.validate_key_state(args.key, _snapshot(deps))
     if not _xdo_key(args.display, args.key):
         raise UiDriveError(f"xdotool key --clearmodifiers {args.key} failed")
