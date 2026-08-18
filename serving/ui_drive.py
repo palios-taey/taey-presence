@@ -569,6 +569,10 @@ def _type_text(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str, Any
     """
     if not args.text:
         raise UiDriveError("type text must not be empty")
+    manual = _manual_ui_module(deps.platform)
+    validate_type = getattr(manual, "validate_type_action", None) if manual else None
+    if validate_type is not None:
+        validate_type(args.text, _snapshot(deps))
     if not deps.input.type_text(args.text):
         raise UiDriveError("type_text returned false")
     return {"typed_chars": len(args.text)}
