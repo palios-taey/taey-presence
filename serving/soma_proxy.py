@@ -845,8 +845,16 @@ TOOLS = [
                 ":5 grok, :6 perplexity; and the second set :21 claude2, :22 gemini2, :23 grok2, "
                 ":24 perplexity2. Resolve controls, chooser opening, attachment, composer input, "
                 "submission, generation monitoring, and extraction from that display's YAML and "
-                "the newly observed tree, one primitive at a time; do not use remembered labels, "
-                "shortcuts, coordinates, URLs, chooser routes, or send recipes. observe returns "
+                "the newly observed tree, one primitive at a time; do not use remembered platform "
+                "labels, platform shortcuts, coordinates, URLs, chooser routes, or send recipes. "
+                "The native GTK file chooser is a shared driver boundary rather than platform UI: "
+                "after a YAML-resolved upload action opens it, focus_dialog activates and verifies "
+                "the separate X11 chooser window. A browser-tree observation after the upload action "
+                "is not evidence that the separate chooser is absent; focus_dialog is the fail-loud "
+                "probe. Once focused, address the shared chooser one primitive at a time with a fresh "
+                "observation between each: key ctrl+l, key ctrl+a, type the absolute file path, then "
+                "key Return. Finally observe the platform tree and verify the attachment before any "
+                "composer or send action. observe returns "
                 "elements with refs. A mapped element that appears absent requires an unfiltered "
                 "observation and filter diagnosis first. If filtering is correct and the live tree "
                 "shows a changed name or role, stop for an exact platform-YAML update. Missing or "
@@ -872,7 +880,11 @@ TOOLS = [
                         "enum": ["observe", "click", "type", "paste", "key",
                                  "read_clipboard", "navigate", "focus", "activate",
                                  "focus_dialog", "extract"],
-                        "description": "the single action to perform",
+                        "description": (
+                            "the single action to perform; focus_dialog activates and verifies an "
+                            "already-open native GTK file chooser so subsequent primitives address "
+                            "that X11 window instead of the browser"
+                        ),
                     },
                     "element": {"type": "string", "description": "platform-YAML element key for click/focus/activate. Use only after a fresh observe confirms the intended live control; the key does not replace observation."},
                     "ref": {"type": "string",
