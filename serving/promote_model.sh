@@ -135,7 +135,18 @@ assert_no_identity_conflicts() {  # <ssh> <host> -> no unowned drop-in assigns m
       [ -f \"\$f\" ] || continue
       b=\$(basename \"\$f\")
       case \"\$b\" in '$PROMOTION_DROPIN'|'$LEGACY_PROMOTION_DROPIN') continue ;; esac
-      grep -Eq '^[[:space:]]*Environment[[:space:]]*=\"?TAEY_(MODEL_PATH|SERVED_NAME)=' \"\$f\" && printf '%s\\n' \"\$b\"
+      [ -r \"\$f\" ] || exit 70
+      awk '
+        /^[[:space:]]*($|#|;)/ { next }
+        /^[[:space:]]*Environment[[:space:]]*=/ && /TAEY_(MODEL_PATH|SERVED_NAME)=/ { found=1 }
+        END { exit found ? 0 : 1 }
+      ' \"\$f\"
+      rc=\$?
+      case \"\$rc\" in
+        0) printf '%s\\n' \"\$b\" ;;
+        1) ;;
+        *) exit \"\$rc\" ;;
+      esac
     done
     exit 0
   " 2>/dev/null)"; then
@@ -414,6 +425,11 @@ case "$SRC" in
   *) die "source must be node1 or node2" ;;
 esac
 ssh -o ConnectTimeout=10 "$src_ssh" "test -d '$src_dir/$MODEL'" || die "$SRC: $src_dir/$MODEL not found"
+
+# Artifact synchronization is the first mutation in a promotion, so identity ownership must be
+# proven on BOTH nodes before rsync --delete runs—not merely before each later service restart.
+assert_no_identity_conflicts "$NODE1_SSH" "$NODE1_HOST"
+assert_no_identity_conflicts "$NODE2_SSH" "$NODE2_HOST"
 
 # WHICH NODE DRIVES THE TRANSFER IS EXPLICIT AND VERIFIED, never assumed. An earlier version ran
 # rsync from node1 in BOTH directions while its comment claimed it drove "from whichever side can
