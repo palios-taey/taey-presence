@@ -38,6 +38,40 @@ CONVERSATION_ID = os.environ.get("TAEY_CONVERSATION_ID", "main")
 _SEAT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 _TRACE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$")
 _POINTER_RE = re.compile(r"^\[NOTIFY\]\s+You have \d+ messages?\b")
+_TEXTUAL_TOOL_INTENT_RE = re.compile(
+    r"\s*(?:<tool_call>.*?</tool_call>\s*)+\Z",
+    re.DOTALL,
+)
+
+
+class CompletionContractError(ValueError):
+    def __init__(self, code: str):
+        super().__init__(code)
+        self.code = code
+
+
+def _terminal_reply(payload: Any) -> str:
+    if not isinstance(payload, dict):
+        raise CompletionContractError("proxy_response_not_object")
+    choices = payload.get("choices")
+    if not isinstance(choices, list) or not choices:
+        raise CompletionContractError("proxy_choice_missing")
+    choice = choices[0]
+    if not isinstance(choice, dict):
+        raise CompletionContractError("proxy_choice_not_object")
+    message = choice.get("message")
+    if not isinstance(message, dict):
+        raise CompletionContractError("proxy_message_missing")
+    if message.get("tool_calls"):
+        raise CompletionContractError("proxy_structured_tool_intent_unfinished")
+    if choice.get("finish_reason") != "stop":
+        raise CompletionContractError("proxy_finish_reason_not_terminal")
+    reply = message.get("content")
+    if not isinstance(reply, str) or not reply.strip():
+        raise CompletionContractError("proxy_terminal_answer_missing")
+    if _TEXTUAL_TOOL_INTENT_RE.fullmatch(reply):
+        raise CompletionContractError("proxy_textual_tool_intent_unfinished")
+    return reply
 
 
 def _default_event_log() -> Path:
@@ -83,6 +117,7 @@ class ProxyResult:
     turn_id: str
     event_id: str
     correlation_id: str
+    payload: dict[str, Any]
 
 
 QUEUES = (
@@ -148,6 +183,14 @@ if removed == 1 then
     else
         redis.call('RPUSH', KEYS[2], ARGV[1])
     end
+end
+return removed
+"""
+
+_QUARANTINE_LUA = """
+local removed = redis.call('LREM', KEYS[1], 1, ARGV[1])
+if removed == 1 then
+    redis.call('LPUSH', KEYS[2], ARGV[1])
 end
 return removed
 """
@@ -477,6 +520,57 @@ class ReliableInbox:
         return {"requeued": recovered, "acknowledged": acknowledged}
 
 
+class ExecutiveInbox(ReliableInbox):
+    @staticmethod
+    def _quarantine_key(source: QueueSpec) -> str:
+        return f"{KEY_PREFIX}:{SESSION}:quarantine:{source.name}"
+
+    def _quarantine(self, claim: ClaimedMessage) -> None:
+        moved = int(
+            self.client.eval(
+                _QUARANTINE_LUA,
+                2,
+                claim.source.processing_key,
+                self._quarantine_key(claim.source),
+                claim.raw,
+            )
+        )
+        if moved != 1:
+            raise SeatFailure(
+                f"quarantine lost claim source={claim.source.name} "
+                f"msg_id={claim.message_id}"
+            )
+
+    def quarantine(self, claims: list[ClaimedMessage]) -> None:
+        for claim in claims:
+            self._quarantine(claim)
+        if claims:
+            self.client.delete(POINTER_BACKOFF_KEY)
+
+    def recover(self) -> dict[str, int]:
+        quarantined = 0
+        acknowledged = 0
+        for source in QUEUES:
+            for raw in self.client.lrange(source.processing_key, 0, -1):
+                payload, message_id = _decode_message(raw)
+                claim = ClaimedMessage(source, raw, payload, message_id)
+                if message_id in self.store.completed_message_ids:
+                    self._ack(claim)
+                    acknowledged += 1
+                else:
+                    self._quarantine(claim)
+                    quarantined += 1
+                    self.store.append(
+                        "claim_quarantine",
+                        message_ids=[message_id],
+                        sources=[source.name],
+                        reason="seat_recovered_nonterminal_claim",
+                        quarantine_key=self._quarantine_key(source),
+                    )
+        self.client.delete(POINTER_BACKOFF_KEY)
+        return {"quarantined": quarantined, "acknowledged": acknowledged}
+
+
 class ProxyClient:
     def ask(
         self,
@@ -555,6 +649,7 @@ class ProxyClient:
             turn_id=returned_turn_id,
             event_id=returned_event_id,
             correlation_id=returned_correlation_id,
+            payload=payload,
         )
 
 
@@ -750,6 +845,7 @@ def _run_turn(
             correlation_id=correlation_id,
             messages=store.messages_for(prompt, include_history=not claims),
         )
+        reply = _terminal_reply(result.payload)
         store.append(
             "turn_outcome",
             ok=True,
@@ -758,9 +854,9 @@ def _run_turn(
             proxy_turn_id=result.turn_id,
             message_ids=message_ids,
             prompt=prompt,
-            reply=result.reply,
+            reply=reply,
             role="assistant",
-            content=result.reply,
+            content=reply,
             source="taey",
             source_id=result.turn_id,
             kind="assistant_raise" if claims else "assistant_reply",
@@ -768,6 +864,7 @@ def _run_turn(
         )
     except Exception as exc:
         try:
+            inbox.quarantine(claims)
             store.append(
                 "turn_outcome",
                 ok=False,
@@ -776,16 +873,17 @@ def _run_turn(
                 message_ids=message_ids,
                 prompt=prompt,
                 error=f"{type(exc).__name__}: {exc}",
+                claim_state="quarantined" if claims else "not_applicable",
+                continuation="reconciliation_required",
             )
-            inbox.requeue(claims)
         except Exception as recovery_exc:
             raise SeatFailure(
                 f"turn failed ({exc}); durable recovery failed ({recovery_exc})"
             ) from recovery_exc
         raise
-    store.remember_outcome(prompt, result.reply, message_ids)
+    store.remember_outcome(prompt, reply, message_ids)
     inbox.acknowledge(claims)
-    return result.reply
+    return reply
 
 
 def main() -> int:
@@ -800,7 +898,7 @@ def main() -> int:
     try:
         store = EventStore(EVENT_LOG, MAX_TURNS)
         client = _redis_client()
-        inbox = ReliableInbox(client, store)
+        inbox = ExecutiveInbox(client, store)
         recovery = inbox.recover()
     except Exception as exc:
         print(
