@@ -243,15 +243,31 @@ drift_check() {  # $1 = "deep" to additionally compare per-file content manifest
 }
 
 consumers_for() { case "$1" in node1) printf '%s' "$NODE1_CONSUMERS" ;; node2) printf '%s' "$NODE2_CONSUMERS" ;; esac; }
+declare -A QUIESCED_CONSUMERS=()
 
 quiesce() {  # <node-label> — stop every pinned consumer and PROVE it stopped
   local list; list="$(consumers_for "$1")"
   [ "$list" = "none" ] && { log "$1: no pinned consumers declared"; return 0; }
-  local u
+  local u state
   for u in $list; do
+    state="$(systemctl --user is-active "$u" 2>/dev/null || true)"
+    case "$state" in
+      active|activating|reloading) ;;
+      deactivating)
+        systemctl --user stop "$u" || die "$1: could not finish stopping $u"
+        log "$1: $u was already deactivating; leaving it stopped after the window"
+        continue
+        ;;
+      inactive|failed)
+        log "$1: $u was $state before the window; leaving it unchanged"
+        continue
+        ;;
+      *) die "$1: could not determine the pre-window state of declared consumer $u (got '${state:-no state}')" ;;
+    esac
     systemctl --user stop "$u" || die "$1: could not stop $u — refusing to restart a node whose consumer is still admitting turns"
     [ "$(systemctl --user is-active "$u")" = "active" ] \
       && die "$1: $u still active after stop — refusing to proceed"
+    QUIESCED_CONSUMERS["$1:$u"]=1
     log "$1: quiesced $u"
   done
 }
@@ -259,11 +275,14 @@ quiesce() {  # <node-label> — stop every pinned consumer and PROVE it stopped
 restore() {  # <node-label> — bring the pinned consumers back and PROVE they came back
   local list; list="$(consumers_for "$1")"
   [ "$list" = "none" ] && return 0
-  local u
+  local u key
   for u in $list; do
+    key="$1:$u"
+    [ "${QUIESCED_CONSUMERS[$key]:-}" = "1" ] || continue
     systemctl --user start "$u" || die "$1: $u FAILED TO RESTART after promotion — the node is serving but its consumer is down"
     [ "$(systemctl --user is-active "$u")" = "active" ] \
       || die "$1: $u did not become active after promotion"
+    QUIESCED_CONSUMERS["$key"]=""
     log "$1: restored $u"
   done
 }
