@@ -121,23 +121,23 @@ always right about itself; this file may be out of date.
 
 ## CONTENT TRANSPORT
 
-**ALWAYS pass `output_file` to `extract` and `read_clipboard`. Never call either
-without it.** Not "prefer" — always. There is no routine case where pulling a Chat
-response into your context is the right first move.
+**ALWAYS pass `output_file` to `read_clipboard`. Never call it without one.** Not
+"prefer" — always. There is no routine case where pulling a Chat response into
+your context is the right first move.
 
-Without `output_file` the ENTIRE response body is returned into your context and
+Without `output_file` the ENTIRE clipboard body is returned into your context and
 NOTHING is written to disk. That means no path, no SHA-256, no receipt, and no
 artifact — the content exists only until your turn ends, and then it is gone. With
 `output_file` you get a path and a SHA-256 receipt, the body stays out of your
 context, and the content survives on disk where `taey-delegate collect` can receipt
 it.
 
-Measured on 2026-08-17: six `extract` calls without `output_file` pulled roughly
+Measured on 2026-08-17: six legacy extraction calls without `output_file` pulled roughly
 225,000 characters into context and produced ZERO files. Two Family verdicts —
 Horizon's BLOCK and a Claude adjudication — existed only in a context window. That
 is the failure this rule exists to stop.
 
-If you must reason about the body, extract to a file FIRST, then read the file. Two
+If you must reason about the body, capture it to a file FIRST, then read the file. Two
 steps, and you keep the receipt. Never trade the receipt for convenience.
 
 To place a captured response into another Chat, use `drive_chat` `paste` with
@@ -207,18 +207,20 @@ landed. An unexpected state is a **full stop**, not something to push through.
 
 Your hands on a display are the single tool `drive_chat`, one action per call:
 
-    drive_chat(display=":5", action="observe")                 read the filtered accessibility tree
-    drive_chat(display=":5", action="click",  ref=<ref>)       click one element — and how you put focus in the composer before typing
+    drive_chat(display=":5", action="observe")                 read the canonical YAML-filtered accessibility tree
+    drive_chat(display=":5", action="click", element=<key>)    click one exact mapped element — and how you put focus in the composer before typing
     drive_chat(display=":5", action="type",   text="...")      type into the clicked element
     drive_chat(display=":5", action="paste",  text="...")      paste into the clicked element (use for a long packet)
     drive_chat(display=":5", action="key",    key="Return")    press a key — Return sends
-    drive_chat(display=":5", action="read_clipboard")          read what a Copy control put on the clipboard
-    drive_chat(display=":5", action="navigate", url="...")     go to a URL
-    drive_chat(display=":5", action="focus",  ref=<ref>)       set accessibility focus (a click is what enables typing; focus is rarely what you want)
+    drive_chat(display=":5", action="read_clipboard", output_file=<path>)
+                                                                    receipt what a verified Copy control placed on the clipboard
+    drive_chat(display=":5", action="focus", element=<key>)    set accessibility focus (a click is what enables typing; focus is rarely what you want)
 
-`observe` returns elements each carrying a `ref`; the acting calls target a `ref` from the most
-recent observe. If a `ref` matches nothing or is ambiguous, the call fails loudly — observe again
-and pick a fresh one. It never guesses.
+`observe` returns the current URL, the YAML `urls.fresh`, the YAML Stop keys, and the
+canonical snapshot split into mapped elements and non-actionable unknown/sidebar drift. Only a
+mapped singleton gets a `ref`; acting calls use its exact YAML/chrome key or that fresh ref. Unknown
+and sidebar rows never get refs. If a key or ref matches zero or multiple elements, the call fails
+loudly. It never falls back to a raw role/name, substring, coordinate, or remembered label.
 
 **To put text in a composer you CLICK it first — not `focus`.** A web composer will not take
 keystrokes from accessibility-focus alone; the `click` is what gives it the keyboard. **Confirm the
@@ -229,8 +231,9 @@ enabled or appearing, or that attachment chip showing up — not a paragraph you
 
 **The lifecycle of one consult**, each step its own observe/act/verify:
 
-1. **Open the surface.** Go to the platform on its display (`navigate`, or use the open tab).
-   `observe` to confirm the page is really there — a near-empty tree means a modal or a load, which
+1. **Open the surface.** Observe first. To start fresh, take `fresh_url` from that observation,
+   click the mapped `address_bar`, paste that exact YAML-owned URL, press Return, then observe again.
+   A near-empty tree means a modal or a load, which
    is a stop, not a thing to type into. A usage cap is also a **stop, not a retry**: a paywall or a
    "get more usage" message (Claude when capped, Grok Heavy after ~3–4 in a window) means that mind is
    unavailable right now — report it and use another, do not hammer it.
@@ -238,18 +241,24 @@ enabled or appearing, or that attachment chip showing up — not a paragraph you
    thinking; ChatGPT → Pro / extended; Gemini → Deep Research; Grok → Heavy; Perplexity → Deep
    Research. Observe the tree, click the model/mode control, observe the menu, click the option,
    observe that it took.
-3. **Put the packet in.** `click` the composer (that is what gives it the keyboard — accessibility
-   focus alone will not take keystrokes), then `paste` the packet text (paste, not type, for anything
-   long). Confirm it arrived by a behavioral signal — the send control becoming enabled, or (for a
-   large packet) an attachment chip appearing — not by reading the text back, which a React composer
-   often will not expose.
+3. **Attach the two mandatory files, then put the prompt in.** Every consultation carries exactly
+   two attachments: **A**, the consolidated full Family kernel + identity + Spotlight Standard;
+   **B**, the consolidated task/background/evidence/deliverable/acceptance/provenance packet. Attach
+   A completely and verify its exact attachment-chip state from a fresh tree before beginning B;
+   attach B and verify it independently. Then `click` the composer and `paste` the short prompt that
+   identifies the question and briefly states the deliverable detailed in B. Confirm each operation
+   by a behavioral signal — the exact attachment chip and send control — not by assuming the file
+   chooser or React composer accepted it.
 4. **Send.** `key Return` (or click send). Observe that it landed — the stop control appears, the
    composer clears. If it did not, stop; do not send again blindly.
-5. **Wait for the real end.** Deep modes run for minutes. Poll with `observe`; it is done when the
-   stop control is gone and the answer is fully rendered. **Generation finishing is not your job
-   finishing** — a five-minute wait is an observation, not a failure, and declaring done early gives
-   the Family half an answer.
-6. **Extract the real answer.** Scroll to the response, click its Copy control, `read_clipboard`.
+5. **Wait for the monitor notification.** After sending, make exactly one fresh observation and
+   verify that one of the observation's YAML `stop_keys` is mapped. Then stop using UI tools on that
+   display. The per-display completion monitor owns polling and requires two consecutive fresh
+   Stop-absent snapshots before it notifies you. Do not manually poll. A notification is the trigger
+   for extraction; silence means generation is still running or the monitor requires diagnosis.
+6. **Manually extract the real answer.** After notification, scroll all the way to the bottom, take
+   a fresh canonical observation, click the exact mapped Copy control, then call `read_clipboard`
+   with a new absolute `output_file`.
    **Confirm the Copy actually changed the clipboard — the text must differ from what you pasted.**
    Some Copy controls (e.g. ChatGPT's "Copy response") silently no-op if the click misses, and then
    `read_clipboard` hands back your OWN pasted packet — which reads exactly like a prompt echo but is

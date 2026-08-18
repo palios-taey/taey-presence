@@ -842,9 +842,9 @@ TOOLS = [
                 "EXACTLY ONE action per call. Observe before acting; after every action, observe "
                 "again and independently verify its result before deciding the next action. Never "
                 "chain actions on an assumption. Displays: :2 chatgpt, :3 claude, :4 gemini, "
-                ":5 grok, :6 perplexity; and the second set :21 claude2, :22 gemini2, :23 grok2, "
-                ":24 perplexity2. Resolve controls, chooser opening, attachment, composer input, "
-                "submission, generation monitoring, and extraction from that display's YAML and "
+                ":5 grok, :6 perplexity; second displays are :21 claude, :22 gemini, :23 grok, "
+                ":24 perplexity. Resolve controls, chooser opening, attachment, composer input, "
+                "submission and manual extraction from that display's YAML and "
                 "the newly observed tree, one primitive at a time; do not use remembered platform "
                 "labels, platform shortcuts, coordinates, URLs, chooser routes, or send recipes. "
                 "The native GTK file chooser is a shared driver boundary rather than platform UI: "
@@ -854,15 +854,16 @@ TOOLS = [
                 "probe. Once focused, address the shared chooser one primitive at a time with a fresh "
                 "observation between each: key ctrl+l, key ctrl+a, type the absolute file path, then "
                 "key Return. Finally observe the platform tree and verify the attachment before any "
-                "composer or send action. observe returns "
-                "elements with refs. A mapped element that appears absent requires an unfiltered "
-                "observation and filter diagnosis first. If filtering is correct and the live tree "
-                "shows a changed name or role, stop for an exact platform-YAML update. Missing or "
+                "composer or send action. observe returns the current URL, YAML fresh URL, YAML "
+                "Stop keys, actionable mapped elements, and non-actionable unknown/sidebar drift. "
+                "Only an exact mapped singleton receives a ref. If the live tree shows a changed "
+                "name, role, missing mapping, duplicate mapping, or unexpected drift, stop for an "
+                "exact YAML tree-filter update. Missing or "
                 "ambiguous mappings fail loudly: do not retry blindly, substitute pixels, or "
-                "invent a fallback. read_clipboard returns what the verified Copy control placed "
-                "on the clipboard. extract runs the mapped platform extraction driver and returns "
-                "response_text unchanged unless output_file is supplied, which returns an artifact "
-                "receipt without the body."
+                "invent a fallback. After send, observe once to verify one of the returned Stop "
+                "keys is mapped, then stop polling and wait for the external completion monitor's "
+                "notification. On notification, manually scroll to the bottom, observe, activate "
+                "the exact mapped Copy control, then read_clipboard to an output_file receipt."
             ),
             "parameters": {
                 "type": "object",
@@ -878,8 +879,7 @@ TOOLS = [
                     "action": {
                         "type": "string",
                         "enum": ["observe", "click", "type", "paste", "key",
-                                 "read_clipboard", "navigate", "focus", "activate",
-                                 "focus_dialog", "extract"],
+                                 "read_clipboard", "focus", "activate", "focus_dialog"],
                         "description": (
                             "the single action to perform; focus_dialog activates and verifies an "
                             "already-open native GTK file chooser so subsequent primitives address "
@@ -891,13 +891,9 @@ TOOLS = [
                             "description": "element ref from the immediately preceding fresh observe (for click/focus/activate)"},
                     "text": {"type": "string", "description": "text to type or paste (use for SHORT input; for a large packet use text_file instead so you don't regenerate every character)"},
                     "text_file": {"type": "string", "description": "absolute path to a file whose EXACT bytes are pasted (paste action only). Prefer this for any large/verbatim content — pass the path, not the content; the tool reads and pastes it. Instant and byte-perfect."},
-                    "sent_file": {"type": "string", "description": "for extract: absolute path to the exact sent artifact; extraction is refused if response_text matches it (prompt echo)"},
-                    "output_file": {"type": "string", "description": "absolute destination path for captured content (extract or read_clipboard only); the file must not already exist"},
+                    "output_file": {"type": "string", "description": "absolute destination path for read_clipboard; the file must not already exist"},
                     "key": {"type": "string",
                             "description": "key to press, e.g. Return, ctrl+a, Delete"},
-                    "url": {"type": "string", "description": "absolute http(s) URL for navigate, taken from the active platform YAML rather than memory"},
-                    "filter": {"type": "string",
-                               "description": "optional substring filter for observe; a filtered absence is never evidence that an element is missing, so repeat unfiltered before acting"},
                 },
             },
         },
@@ -1252,12 +1248,12 @@ def _drive_chat_receipt(arguments: dict, body: str) -> dict:
     """drive_chat is the tool whose outcome is a small non-content verdict --
     did the element resolve, did the click fire, which path carried it. Those
     are exactly the fields that separate an attempt from a result, and none of
-    them are Chat content. extract/read_clipboard are excluded because their
-    result IS the answer body; they get a digest only.
+    them are Chat content. read_clipboard is excluded because its result can be
+    the answer body; it gets a digest only.
     """
     action = str(arguments.get("action") or "")
     receipt = {"action": action}
-    if action in {"extract", "read_clipboard"}:
+    if action == "read_clipboard":
         return receipt
     try:
         parsed = json.loads(body)
@@ -1283,7 +1279,7 @@ def _tool_receipt(name, arguments, result, *, ok):
 
     `arguments` is required, not optional: policy is per-tool and, for
     drive_chat, per-action. Without it the builder cannot tell a click verdict
-    from an extracted Chat answer.
+    from clipboard content.
     """
     if isinstance(result, BaseException):
         body = f"{type(result).__name__}: {result}"
@@ -1439,7 +1435,7 @@ _PASTE_INLINE_MAX_CHARS = int(os.environ.get("TAEY_PASTE_INLINE_MAX_CHARS", "800
 
 _DRIVE_ACTIONS = {
     "observe", "click", "focus", "activate", "type", "paste", "key",
-    "read_clipboard", "navigate", "focus_dialog", "extract",
+    "read_clipboard", "focus_dialog",
 }
 
 
@@ -1459,16 +1455,11 @@ _DRIVE_ACTIONS = {
 # deliver. TTL backstop so a crashed driver cannot leak a record forever.
 # ---------------------------------------------------------------------------
 _MONITOR_TTL_SECS = int(os.environ.get("TAEY_CONSULT_MONITOR_TTL", "10800"))
-_DISPLAY_PLATFORM = {":2": "chatgpt", ":3": "claude", ":4": "gemini", ":5": "grok",
-                     ":6": "perplexity", ":13": "claude-cvp", ":21": "claude2",
-                     ":22": "gemini2", ":23": "grok2", ":24": "perplexity2"}
-
-
 def _monitor_node() -> str:
     return os.environ.get("TAEY_SESSION_NAME") or os.environ.get("SEAT_ID") or "taey"
 
 
-def _monitor_touch(display: str, action: str) -> None:
+def _monitor_touch(display: str, platform: str, action: str) -> None:
     """Register-on-first-action, then write last_seen on every action.
 
     Registration is AUTOMATIC rather than a step the driver must remember: a
@@ -1494,6 +1485,7 @@ def _monitor_touch(display: str, action: str) -> None:
                 continue
             rec["last_seen"] = now
             rec["last_action"] = action
+            rec["platform"] = platform
             client.set(session_key, json.dumps(rec), ex=_MONITOR_TTL_SECS)
             found = True
         if not found:
@@ -1501,7 +1493,7 @@ def _monitor_touch(display: str, action: str) -> None:
             session_key = f"taey:{node}:active_session:{monitor_id}"
             client.set(session_key, json.dumps({
                 "monitor_id": monitor_id, "display": display,
-                "platform": _DISPLAY_PLATFORM.get(display, "unknown"),
+                "platform": platform,
                 "requester": node, "mode": "supervised_step",
                 "timeout": _MONITOR_TTL_SECS,
                 "started_ts": now, "last_seen": now, "last_action": action,
@@ -1531,9 +1523,9 @@ def _do_drive_chat(arguments: dict) -> str:
 
     output_file = arguments.get("output_file")
     if output_file is not None:
-        if action not in {"extract", "read_clipboard"}:
+        if action != "read_clipboard":
             return _err(display, action,
-                        "output_file is valid only for extract and read_clipboard")
+                        "output_file is valid only for read_clipboard")
         if not isinstance(output_file, str) or not output_file:
             return _err(display, action, "output_file must be a non-empty string")
 
@@ -1542,14 +1534,9 @@ def _do_drive_chat(arguments: dict) -> str:
     cmd = [UI_DRIVE_PYTHON, UI_DRIVE_SCRIPT, sub, "--display", display]
     if output_file is not None:
         cmd += ["--output-file", output_file]
-    if action == "observe":
-        if arguments.get("filter"):
-            cmd += ["--filter", str(arguments["filter"])]
-        if arguments.get("max_depth"):
-            cmd += ["--max-depth", str(int(arguments["max_depth"]))]
-    elif action in ("click", "focus", "activate"):
-        # ui_drive already resolves --element (a platform-YAML key) to that
-        # platform's exact {name, role}. Requiring a ref here meant every click
+    if action in ("click", "focus", "activate"):
+        # ui_drive resolves --element through the canonical fresh snapshot, including
+        # structural and shared-chrome mappings. Requiring a ref here meant every click
         # had to be preceded by a full-tree observe purely to obtain one, so the
         # tool surface exposed LESS than the layer beneath it and a caller told
         # to "use the YAML key" had nowhere to put it. A key is stable across
@@ -1605,22 +1592,23 @@ def _do_drive_chat(arguments: dict) -> str:
         if not key:
             return _err(display, action, "key requires a key name, e.g. Return")
         cmd += ["--key", str(key)]
-    elif action == "navigate":
-        url = arguments.get("url")
-        if not url:
-            return _err(display, action, "navigate requires a url")
-        cmd += ["--url", str(url)]
-    elif action == "extract":
-        sent_file = arguments.get("sent_file")
-        if sent_file:
-            cmd += ["--sent-file", str(sent_file)]
-
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
         _audit("drive_chat", {"display": display, "action": action, "rc": r.returncode})
-        _monitor_touch(display, action)  # stall signal = time since last action
         out = (r.stdout or "").strip()
         if out:
+            try:
+                payload = _json.loads(out)
+            except Exception:
+                payload = None
+            if (
+                r.returncode == 0
+                and isinstance(payload, dict)
+                and payload.get("ok") is True
+                and isinstance(payload.get("platform"), str)
+                and payload["platform"]
+            ):
+                _monitor_touch(display, payload["platform"], action)
             return out  # ui_drive.py emits exactly one JSON object
         return _err(display, action,
                     f"ui_drive exit={r.returncode}, no output; stderr={(r.stderr or '')[:300]}")
