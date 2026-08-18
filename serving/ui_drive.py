@@ -6,6 +6,8 @@ from __future__ import annotations
 import argparse
 import base64
 import hashlib
+import importlib
+import importlib.util
 import json
 import os
 import re
@@ -384,6 +386,32 @@ def _resolve_target(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str
     }
 
 
+def _manual_ui_module(platform: str) -> Any | None:
+    module_name = f"consultation_v2.platforms.{platform}.manual"
+    try:
+        if importlib.util.find_spec(module_name) is None:
+            return None
+    except ModuleNotFoundError:
+        return None
+    return importlib.import_module(module_name)
+
+
+def _declared_operation(
+    platform: str,
+    element_key: str,
+    states: list[str],
+) -> dict[str, Any] | None:
+    manual = _manual_ui_module(platform)
+    if manual is None:
+        return None
+    declared = manual.element_operation(element_key, states)
+    if declared is not None and not isinstance(declared, dict):
+        raise UiDriveError(
+            f"{platform} manual element_operation must return a mapping or null"
+        )
+    return declared
+
+
 def _observe(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str, Any]:
     snapshot = _snapshot(deps)
     revision = _snapshot_revision(snapshot)
@@ -400,15 +428,20 @@ def _observe(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str, Any]:
                     revision=revision,
                     element=element_key,
                 )
-            mapped.append(
-                _public_element(
-                    item,
-                    category="mapped",
-                    element=element_key,
-                    match_count=len(items),
-                    ref=ref,
-                )
+            public_item = _public_element(
+                item,
+                category="mapped",
+                element=element_key,
+                match_count=len(items),
+                ref=ref,
             )
+            if len(items) == 1:
+                declared = _declared_operation(
+                    deps.platform, element_key, list(item.states)
+                )
+                if declared is not None:
+                    public_item["declared_operation"] = declared
+            mapped.append(public_item)
 
     unknown = [
         _public_element(item, category="unknown") for item in snapshot.unknown
@@ -458,6 +491,15 @@ def _element_action(
     action: str, args: argparse.Namespace, deps: SimpleNamespace
 ) -> dict[str, Any]:
     row = _resolve_target(args, deps)
+    declared = _declared_operation(
+        deps.platform, row["element"], list(row.get("states") or [])
+    )
+    if declared is not None and action not in declared["allowed_now"]:
+        raise UiDriveError(
+            f"{row['element']} YAML declares {declared['method']}; "
+            f"{action!r} is not allowed in the fresh state "
+            f"(allowed_now={declared['allowed_now']})"
+        )
     primitive = {
         "click": deps.interact.atspi_click,
         "focus": deps.interact.atspi_focus,
@@ -603,6 +645,9 @@ def _xdo_key(display: str, key: str) -> bool:
 def _key(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str, Any]:
     if not args.key:
         raise UiDriveError("key must not be empty")
+    manual = _manual_ui_module(deps.platform)
+    if manual is not None and manual.key_requires_state(args.key):
+        manual.validate_key_state(args.key, _snapshot(deps))
     if not _xdo_key(args.display, args.key):
         raise UiDriveError(f"xdotool key --clearmodifiers {args.key} failed")
     return {"key": args.key, "clearmodifiers": True}
