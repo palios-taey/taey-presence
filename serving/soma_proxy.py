@@ -20,6 +20,7 @@ import contextvars
 import logging
 import operator
 import re
+import socket
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -147,6 +148,8 @@ class TurnContext:
 
 
 PROCESS_GENERATION = uuid.uuid4().hex
+_DRIVE_GENERATION_FENCE_KEY = "taey:soma:drive_process_generation"
+_serving_socket_reserved = False
 _active_turns: dict[str, TurnContext] = {}
 
 SAFE_OPS = {
@@ -174,6 +177,10 @@ async def startup():
     global _redis, _mira_redis, _http, _ecosystem_http
     global _permanent_kernel, _static_system_prefix, _system_prompt
     global _liveness_reaper_task
+    if not _serving_socket_reserved:
+        raise RuntimeError(
+            "proxy startup requires the production entrypoint to reserve its serving socket"
+        )
     _http = httpx.AsyncClient(
         base_url=VLLM_BASE,
         timeout=VLLM_REQUEST_TIMEOUT_SECS,
@@ -205,11 +212,10 @@ async def startup():
             _set_liveness_error(
                 f"startup reconciliation failed: {type(e).__name__}: {e}"
             )
-            if TAEY_LIVENESS_REQUIRED:
-                raise RuntimeError(
-                    "attributable turn liveness could not be reconciled; "
-                    "proxy startup refused"
-                ) from e
+            raise RuntimeError(
+                "attributable turn liveness could not be reconciled; "
+                "proxy startup refused"
+            ) from e
         _liveness_reaper_task = asyncio.create_task(_liveness_reaper())
     # Connect to Mira Redis for ecosystem state
     if MIRA_REDIS_HOST:
@@ -245,6 +251,18 @@ async def startup():
     _static_system_prefix = _permanent_kernel
     if _static_system_prefix:
         log.info("Static system prefix assembled (%d chars)", len(_static_system_prefix))
+
+    if _redis is None:
+        raise RuntimeError(
+            "Redis is required for fenced display ownership; proxy startup refused"
+        )
+    try:
+        if not _redis.set(_DRIVE_GENERATION_FENCE_KEY, PROCESS_GENERATION):
+            raise RuntimeError("Redis did not acknowledge generation publication")
+    except Exception as exc:
+        raise RuntimeError(
+            "display-owner generation could not be published; proxy startup refused"
+        ) from exc
 
     log.info("Proxying to vLLM at %s", VLLM_BASE)
 
@@ -1540,6 +1558,7 @@ def _do_drive_chat(arguments: dict) -> str:
         "TAEY_DRIVE_LEASE_OWNER": lease_owner,
         "TAEY_DRIVE_LEASE_SEAT": seat_id,
         "TAEY_DRIVE_LEASE_TURN": turn_id,
+        "TAEY_DRIVE_LEASE_GENERATION": process_generation,
     })
 
     output_file = arguments.get("output_file")
@@ -3159,11 +3178,22 @@ async def _chat_completions_for_turn(
 
 
 def main():
-    # Preflight before uvicorn binds a socket. The startup hook repeats this
-    # validation for ASGI launchers that import `app` instead of calling main().
+    global _serving_socket_reserved
     _read_canonical_system_prompt()
+    config = uvicorn.Config(
+        app,
+        host="0.0.0.0",
+        port=PROXY_PORT,
+        log_level="info",
+    )
+    listener: socket.socket = config.bind_socket()
+    _serving_socket_reserved = True
     log.info("Starting soma proxy on port %d -> vLLM at %s", PROXY_PORT, VLLM_BASE)
-    uvicorn.run(app, host="0.0.0.0", port=PROXY_PORT, log_level="info")
+    try:
+        uvicorn.Server(config).run(sockets=[listener])
+    finally:
+        _serving_socket_reserved = False
+        listener.close()
 
 
 if __name__ == "__main__":
