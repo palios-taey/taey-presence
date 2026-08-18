@@ -275,6 +275,24 @@ def _snapshot_revision(snapshot: Snapshot) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _snapshot_at_expected_revision(
+    args: argparse.Namespace,
+    deps: SimpleNamespace,
+) -> Snapshot:
+    expected = str(getattr(args, "expected_revision", "") or "")
+    if not re.fullmatch(r"[0-9a-f]{64}", expected):
+        raise UiDriveError(
+            "mutation requires --expected-revision from the preceding explicit observe"
+        )
+    snapshot = _snapshot(deps)
+    actual = _snapshot_revision(snapshot)
+    if actual != expected:
+        raise UiDriveError(
+            "browser tree changed after the preceding observe; observe again before acting"
+        )
+    return snapshot
+
+
 def _public_element(
     item: ElementRef,
     *,
@@ -569,10 +587,11 @@ def _type_text(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str, Any
     """
     if not args.text:
         raise UiDriveError("type text must not be empty")
+    snapshot = _snapshot_at_expected_revision(args, deps)
     manual = _manual_ui_module(deps.platform)
     validate_type = getattr(manual, "validate_type_action", None) if manual else None
     if validate_type is not None:
-        validate_type(args.text, _snapshot(deps))
+        validate_type(args.text, snapshot)
     if not deps.input.type_text(args.text):
         raise UiDriveError("type_text returned false")
     return {"typed_chars": len(args.text)}
@@ -648,10 +667,11 @@ def _paste(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str, Any]:
         source = "file"
     if text is None or text == "":
         raise UiDriveError("paste needs non-empty --text or a readable --text-file")
+    snapshot = _snapshot_at_expected_revision(args, deps)
     manual = _manual_ui_module(deps.platform)
     validate_paste = getattr(manual, "validate_paste_action", None) if manual else None
     if validate_paste is not None:
-        validate_paste(text, _snapshot(deps))
+        validate_paste(text, snapshot)
     if not deps.input.clipboard_paste(text):
         raise UiDriveError("clipboard_paste returned false")
     return {"pasted_chars": len(text), "source": source}
@@ -678,12 +698,13 @@ def _xdo_key(display: str, key: str) -> bool:
 def _key(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str, Any]:
     if not args.key:
         raise UiDriveError("key must not be empty")
+    snapshot = _snapshot_at_expected_revision(args, deps)
     manual = _manual_ui_module(deps.platform)
     validate_key = getattr(manual, "validate_key_action", None) if manual else None
     if validate_key is not None:
-        validate_key(args.key, _snapshot(deps))
+        validate_key(args.key, snapshot)
     elif manual is not None and manual.key_requires_state(args.key):
-        manual.validate_key_state(args.key, _snapshot(deps))
+        manual.validate_key_state(args.key, snapshot)
     if not _xdo_key(args.display, args.key):
         raise UiDriveError(f"xdotool key --clearmodifiers {args.key} failed")
     return {"key": args.key, "clearmodifiers": True}
@@ -807,6 +828,14 @@ def _add_target(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_expected_revision(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--expected-revision",
+        required=True,
+        help="snapshot revision returned by the preceding explicit observe",
+    )
+
+
 
 def _parser() -> argparse.ArgumentParser:
     parser = JsonArgumentParser(prog="ui_drive.py")
@@ -822,10 +851,12 @@ def _parser() -> argparse.ArgumentParser:
 
     type_parser = commands.add_parser("type")
     _add_display(type_parser)
+    _add_expected_revision(type_parser)
     type_parser.add_argument("--text", required=True)
 
     paste = commands.add_parser("paste")
     _add_display(paste)
+    _add_expected_revision(paste)
     paste.add_argument("--text")
     # Paste EXACT bytes from a file instead of regenerated inline text. A large
     # packet as --text forces the model to regenerate every character token-by-token
@@ -835,6 +866,7 @@ def _parser() -> argparse.ArgumentParser:
 
     key = commands.add_parser("key")
     _add_display(key)
+    _add_expected_revision(key)
     key.add_argument("--key", required=True)
 
     focus_dialog = commands.add_parser("focus-dialog")
