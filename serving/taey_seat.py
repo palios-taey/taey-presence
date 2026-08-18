@@ -38,16 +38,30 @@ CONVERSATION_ID = os.environ.get("TAEY_CONVERSATION_ID", "main")
 _SEAT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 _TRACE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$")
 _POINTER_RE = re.compile(r"^\[NOTIFY\]\s+You have \d+ messages?\b")
-_TEXTUAL_TOOL_INTENT_RE = re.compile(
-    r"\s*(?:<tool_call>.*?</tool_call>\s*)+\Z",
-    re.DOTALL,
-)
+_TEXTUAL_TOOL_INTENT_RE = re.compile(r"<tool_call(?:>|\s)", re.IGNORECASE)
 
 
 class CompletionContractError(ValueError):
     def __init__(self, code: str):
         super().__init__(code)
         self.code = code
+
+
+def _contains_textual_tool_intent(reply: str) -> bool:
+    if _TEXTUAL_TOOL_INTENT_RE.search(reply):
+        return True
+    try:
+        value = json.loads(reply)
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(value, dict):
+        return False
+    function = value.get("function", value)
+    return (
+        isinstance(function, dict)
+        and isinstance(function.get("name"), str)
+        and "arguments" in function
+    )
 
 
 def _terminal_reply(payload: Any) -> str:
@@ -69,7 +83,7 @@ def _terminal_reply(payload: Any) -> str:
     reply = message.get("content")
     if not isinstance(reply, str) or not reply.strip():
         raise CompletionContractError("proxy_terminal_answer_missing")
-    if _TEXTUAL_TOOL_INTENT_RE.fullmatch(reply):
+    if _contains_textual_tool_intent(reply):
         raise CompletionContractError("proxy_textual_tool_intent_unfinished")
     return reply
 
