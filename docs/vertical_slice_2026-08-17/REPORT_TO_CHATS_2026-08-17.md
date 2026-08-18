@@ -41,23 +41,14 @@ step between "merged" and "invocable."
 
 `carry-packet` and `relay-receipts` both done.
 
-Taey produced a real careers packet via the production CLI `assemble_brief.py`, ran
+Taey produced a real production packet via the production CLI `assemble_brief.py`, ran
 `taey-delegate collect` on it **itself** through `run_command`, and carried packet + manifest
 to Gaia on `:3` through the GTK file dialog (two `focus_dialog` calls, two absolute paths
 typed, both chips confirmed).
 
-```
-/tmp/careers_briefs/connection_request_INFRA-CARRY-2026-08-17-01.json
-bytes  19290
-sha256 7e81d6651f9205186f9928f5d4396789bd3833ab67ff62f78c85163cfa877775
-```
-
-infra reproduced that hash independently with `sha256sum`. **Taey did not produce that hash.
-The filesystem did.** That is the mechanical closure of the 2026-08-16 fabrication, in which
-three files were reported under a directory that never existed with "SHA-256" values of 40, 32
-and 16 hex characters.
-
-Receipts in-tree: `b64775e` (DONE-criterion 1).
+The application payload, its digest, and payload-specific manifests are intentionally omitted
+from this public runtime repository. The retained record documents the transport actions but
+does not independently reproduce or certify the omitted payload.
 
 ### Phase 3 — substrate: **HALF DONE, AND THIS IS WHERE IT IS STUCK**
 

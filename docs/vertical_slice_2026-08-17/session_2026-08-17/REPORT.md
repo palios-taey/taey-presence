@@ -28,12 +28,11 @@ the code is at `palios-taey/claude-code-fleet-orchestrator`. Read those, not thi
 **Collector, first production run** (infra): two real files, exit 0, both sha256 and byte
 counts independently reproduced by infra in its own shell.
 
-**Taey ran the collector itself** via `run_command` on a real careers packet produced by the
-production CLI `assemble_brief.py` — `connection_request_INFRA-CARRY-2026-08-17-01.json`,
-19290 bytes, `7e81d6651f9205186f9928f5d4396789bd3833ab67ff62f78c85163cfa877775`, reproduced
-independently by infra. **Taey did not produce that hash. The filesystem did.** That is the
-mechanical closure of the 2026-08-16 fabrication, where three files were reported under a
-directory that never existed with "SHA-256" values of 40, 32 and 16 hex characters.
+**Taey ran the collector itself** via `run_command` on a real production packet produced by
+the production CLI `assemble_brief.py`. The application payload, its digest, and
+payload-specific manifests are intentionally omitted from this public runtime repository.
+The retained record documents the transport actions but does not independently reproduce or
+certify the omitted payload.
 
 **Taey attached both packet and manifest to Claude on `:3`** through the GTK file dialog —
 `focus_dialog` twice, two absolute paths typed, chips confirmed, sent, then STOPPED without
@@ -63,7 +62,7 @@ the seat gate is not deployed.
 **Perplexity's slice-3 ingestion-kernel order was never dispatched.** Still open.
 
 **The carry was run in an abbreviated form first.** The plan says *a CLI produces one real
-packet in a disposable worktree — a genuine careers/revloop packet*. Infra instead let Taey
+packet in a disposable worktree — a genuine production packet*. Infra instead let Taey
 author a probe packet in `taey_runs/`. That first run proved the mechanism but was not the
 specified carry. It was re-run correctly only after Jesse caught it.
 
