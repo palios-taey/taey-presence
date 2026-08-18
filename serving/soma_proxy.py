@@ -1454,6 +1454,9 @@ _DRIVE_ACTIONS = {
     "observe", "click", "focus", "activate", "type", "paste", "key",
     "read_clipboard", "focus_dialog",
 }
+_DRIVE_MUTATIONS = {
+    "click", "focus", "activate", "type", "paste", "key", "focus_dialog",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -1552,6 +1555,73 @@ def _do_drive_chat(arguments: dict) -> str:
             action,
             "drive_chat requires a validated active Taey turn context; refusing",
         )
+    sequence = context.get("_ui_sequence")
+    if not isinstance(sequence, dict):
+        return _err(
+            display,
+            action,
+            "drive_chat requires request-local observe/action state; refusing",
+        )
+    observations = sequence.get("observations")
+    if not isinstance(observations, dict):
+        return _err(display, action, "invalid request-local observe/action state; refusing")
+    tool_round = context.get("tool_round")
+    if not isinstance(tool_round, int) or tool_round < 1:
+        return _err(display, action, "drive_chat requires a positive tool round; refusing")
+
+    def _terminal_refusal(msg: str) -> str:
+        terminal = sequence.get("terminal")
+        if not isinstance(terminal, dict):
+            terminal = {
+                "display": display,
+                "action": action,
+                "tool_round": tool_round,
+                "reason": msg,
+            }
+            sequence["terminal"] = terminal
+            observations.clear()
+        payload = {
+            "ok": False,
+            "action": action,
+            "display": display,
+            "result": None,
+            "error": msg,
+            "ui_sequence": {
+                "state": "terminal_refusal",
+                "first_failure": terminal,
+                "instruction": "Stop this attempt; report the first failure and do not retry UI mutations in this turn.",
+            },
+        }
+        return _json.dumps(payload)
+
+    expected_revision = ""
+    if action in _DRIVE_MUTATIONS:
+        terminal = sequence.get("terminal")
+        if isinstance(terminal, dict):
+            return _terminal_refusal(
+                "a prior UI mutation failed in this turn; further UI mutations are refused"
+            )
+        observed = observations.pop(display, None)
+        if not isinstance(observed, dict):
+            return _terminal_refusal(
+                "UI mutation requires an explicit fresh observe on this display"
+            )
+        observed_round = observed.get("tool_round")
+        expected_revision = str(observed.get("snapshot_revision") or "")
+        if not isinstance(observed_round, int) or observed_round >= tool_round:
+            return _terminal_refusal(
+                "UI mutation requires an observe result seen in an earlier model round"
+            )
+        if not re.fullmatch(r"[0-9a-f]{64}", expected_revision):
+            return _terminal_refusal(
+                "preceding observe did not provide a valid browser snapshot revision"
+            )
+
+    def _argument_refusal(msg: str) -> str:
+        if action in _DRIVE_MUTATIONS:
+            return _terminal_refusal(msg)
+        return _err(display, action, msg)
+
     lease_owner = f"taey-drive:{seat_id}:{process_generation}"
     drive_env = dict(os.environ)
     drive_env.update({
@@ -1564,10 +1634,9 @@ def _do_drive_chat(arguments: dict) -> str:
     output_file = arguments.get("output_file")
     if output_file is not None:
         if action != "read_clipboard":
-            return _err(display, action,
-                        "output_file is valid only for read_clipboard")
+            return _argument_refusal("output_file is valid only for read_clipboard")
         if not isinstance(output_file, str) or not output_file:
-            return _err(display, action, "output_file must be a non-empty string")
+            return _argument_refusal("output_file must be a non-empty string")
 
     sub = {"read_clipboard": "read-clipboard",
            "focus_dialog": "focus-dialog"}.get(action, action)
@@ -1579,8 +1648,9 @@ def _do_drive_chat(arguments: dict) -> str:
         if ref:
             cmd += ["--ref", str(ref)]
         else:
-            return _err(display, action,
-                        f"{action} requires ref=<from the immediately preceding fresh observe>")
+            return _argument_refusal(
+                f"{action} requires ref=<from the immediately preceding fresh observe>"
+            )
     elif action in ("type", "paste"):
         # Prefer text_file: the model passes a PATH and ui_drive pastes the exact
         # file bytes. A large packet as inline `text` forces the model to regenerate
@@ -1603,23 +1673,27 @@ def _do_drive_chat(arguments: dict) -> str:
             # can be diffed, cited, and proven. A path can be verified; a generation
             # cannot. Short inline text stays allowed for genuine one-liners.
             if action == "paste" and len(str(text)) > _PASTE_INLINE_MAX_CHARS:
-                return _err(display, action,
-                            f"paste refused: {len(str(text))} chars of inline text exceeds "
-                            f"the {_PASTE_INLINE_MAX_CHARS}-char inline limit. Content this "
-                            f"long must be a FILE: write it with write_file (or use the "
-                            f"existing file), then paste with text_file='<absolute path>'. "
-                            f"The tool pastes the exact bytes — so what is sent is verifiable "
-                            f"on disk rather than composed in the moment.")
+                return _argument_refusal(
+                    f"paste refused: {len(str(text))} chars of inline text exceeds "
+                    f"the {_PASTE_INLINE_MAX_CHARS}-char inline limit. Content this "
+                    f"long must be a FILE: write it with write_file (or use the "
+                    f"existing file), then paste with text_file='<absolute path>'. "
+                    f"The tool pastes the exact bytes — so what is sent is verifiable "
+                    f"on disk rather than composed in the moment."
+                )
             cmd += ["--text", str(text)]
         else:
-            return _err(display, action,
-                        f"{action} requires non-empty 'text'"
-                        + (" or 'text_file'" if action == "paste" else ""))
+            return _argument_refusal(
+                f"{action} requires non-empty 'text'"
+                + (" or 'text_file'" if action == "paste" else "")
+            )
+        cmd += ["--expected-revision", expected_revision]
     elif action == "key":
         key = arguments.get("key")
         if not key:
-            return _err(display, action, "key requires a key name, e.g. Return")
+            return _argument_refusal("key requires a key name, e.g. Return")
         cmd += ["--key", str(key)]
+        cmd += ["--expected-revision", expected_revision]
     try:
         r = subprocess.run(
             cmd,
@@ -1635,23 +1709,71 @@ def _do_drive_chat(arguments: dict) -> str:
                 payload = _json.loads(out)
             except Exception:
                 payload = None
-            if (
+            succeeded = (
                 r.returncode == 0
                 and isinstance(payload, dict)
                 and payload.get("ok") is True
                 and isinstance(payload.get("platform"), str)
                 and payload["platform"]
-            ):
+            )
+            if succeeded:
                 _monitor_touch(display, payload["platform"], action)
+                if action == "observe":
+                    revision = str((payload.get("result") or {}).get("snapshot_revision") or "")
+                    if not re.fullmatch(r"[0-9a-f]{64}", revision):
+                        return _err(
+                            display,
+                            action,
+                            "explicit observe returned no valid snapshot revision",
+                        )
+                    terminal = sequence.get("terminal")
+                    if isinstance(terminal, dict):
+                        payload["ui_sequence"] = {
+                            "state": "terminal_refusal",
+                            "first_failure": terminal,
+                            "mutation_token_issued": False,
+                        }
+                    else:
+                        observations[display] = {
+                            "snapshot_revision": revision,
+                            "tool_round": tool_round,
+                        }
+                        payload["ui_sequence"] = {
+                            "state": "observed",
+                            "snapshot_revision": revision,
+                            "tool_round": tool_round,
+                            "mutation_token_issued": True,
+                        }
+                elif action in _DRIVE_MUTATIONS:
+                    payload["ui_sequence"] = {
+                        "state": "mutation_complete",
+                        "consumed_snapshot_revision": expected_revision,
+                        "observe_required_before_next_mutation": True,
+                    }
+                return _json.dumps(payload)
+            if action in _DRIVE_MUTATIONS:
+                detail = (
+                    str(payload.get("error") or "")
+                    if isinstance(payload, dict)
+                    else f"ui_drive exit={r.returncode}; stderr={(r.stderr or '')[:300]}"
+                )
+                return _terminal_refusal(detail or "UI mutation failed")
             return out  # ui_drive.py emits exactly one JSON object
-        return _err(display, action,
-                    f"ui_drive exit={r.returncode}, no output; stderr={(r.stderr or '')[:300]}")
+        msg = f"ui_drive exit={r.returncode}, no output; stderr={(r.stderr or '')[:300]}"
+        if action in _DRIVE_MUTATIONS:
+            return _terminal_refusal(msg)
+        return _err(display, action, msg)
     except subprocess.TimeoutExpired:
         _audit("drive_chat", {"display": display, "action": action, "rc": "timeout"})
+        if action in _DRIVE_MUTATIONS:
+            return _terminal_refusal("drive_chat timed out after 90s")
         return _err(display, action, "drive_chat timed out after 90s")
     except Exception as e:
         _audit("drive_chat", {"display": display, "action": action, "error": str(e)[:200]})
-        return _err(display, action, f"{type(e).__name__}: {e}")
+        msg = f"{type(e).__name__}: {e}"
+        if action in _DRIVE_MUTATIONS:
+            return _terminal_refusal(msg)
+        return _err(display, action, msg)
 
 
 def _do_list_dir(path: str, pattern: str = "") -> str:
@@ -2785,7 +2907,9 @@ async def chat_completions(request: Request):
         raise HTTPException(status_code=400, detail="request body must be an object")
     body = dict(raw_body)
     turn = _turn_context(request, body)
-    context_token = _request_context.set(_turn_payload(turn))
+    turn_payload = _turn_payload(turn)
+    turn_payload["_ui_sequence"] = {"observations": {}, "terminal": None}
+    context_token = _request_context.set(turn_payload)
     started = False
     try:
         try:
