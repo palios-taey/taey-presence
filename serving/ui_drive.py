@@ -13,6 +13,7 @@ import os
 import re
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -45,12 +46,10 @@ except ImportError as exc:  # fail LOUD and actionable, never a bare traceback
 # key or proceed when that dependency is unavailable. The owner arrives only from soma_proxy's
 # validated request context, never from model arguments.
 from consultation_v2.primitives import (
-    acquire_display_lock as _acquire_display_lock,
     display_lock_record as _display_lock_record,
     _plan_lock_key as _plan_lock_key,
 )
 from storage.redis_pool import get_client as _lock_redis_client
-from redis.exceptions import WatchError as _LockWatchError
 
 
 _MONITOR_TTL_DEFAULT = int(os.environ.get("TAEY_CONSULT_MONITOR_TTL", "10800"))
@@ -66,7 +65,9 @@ if LOCK_TTL_DEFAULT < _MONITOR_TTL_DEFAULT:
 
 REF_PREFIX = "atspi3."
 _LEASE_OWNER_RE = re.compile(r"taey-drive:[A-Za-z0-9._-]{1,64}:[0-9a-f]{32}")
+_PROCESS_GENERATION_RE = re.compile(r"[0-9a-f]{32}")
 _TRACE_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,159}")
+_DRIVE_GENERATION_FENCE_KEY = "taey:soma:drive_process_generation"
 
 
 class UiDriveError(RuntimeError):
@@ -146,7 +147,8 @@ def _lease_context(*, required: bool = True) -> SimpleNamespace | None:
     owner = os.environ.get("TAEY_DRIVE_LEASE_OWNER", "")
     seat_id = os.environ.get("TAEY_DRIVE_LEASE_SEAT", "")
     turn_id = os.environ.get("TAEY_DRIVE_LEASE_TURN", "")
-    if not any((owner, seat_id, turn_id)) and not required:
+    process_generation = os.environ.get("TAEY_DRIVE_LEASE_GENERATION", "")
+    if not any((owner, seat_id, turn_id, process_generation)) and not required:
         return None
     if not _LEASE_OWNER_RE.fullmatch(owner):
         raise UiDriveError("missing or invalid proxy-issued display lease owner")
@@ -154,7 +156,17 @@ def _lease_context(*, required: bool = True) -> SimpleNamespace | None:
         raise UiDriveError("missing or invalid proxy-issued display lease seat")
     if not _TRACE_ID_RE.fullmatch(turn_id):
         raise UiDriveError("missing or invalid proxy-issued display lease turn")
-    return SimpleNamespace(owner=owner, seat_id=seat_id, turn_id=turn_id)
+    if not _PROCESS_GENERATION_RE.fullmatch(process_generation):
+        raise UiDriveError("missing or invalid proxy-issued process generation")
+    expected_owner = f"taey-drive:{seat_id}:{process_generation}"
+    if owner != expected_owner:
+        raise UiDriveError("proxy-issued display lease identity is inconsistent")
+    return SimpleNamespace(
+        owner=owner,
+        seat_id=seat_id,
+        turn_id=turn_id,
+        process_generation=process_generation,
+    )
 
 
 def _encode_ref(
@@ -824,56 +836,11 @@ def _parser() -> argparse.ArgumentParser:
 
 
 # Display mutations and clipboard extraction must hold the per-display lease. Observe remains
-# read-only: it renews only the exact owner and never creates a lease for a bystander.
+# read-only: it reports lease state without creating, renewing, or transferring ownership.
 _LOCK_ACTION_OPS = {
     "click", "focus", "activate", "type", "paste", "key",
     "focus-dialog", "read-clipboard", "extract",
 }
-
-
-def _renew_if_owner(
-    display: str,
-    lease: SimpleNamespace,
-    ttl: int,
-) -> bool:
-    try:
-        client = _lock_redis_client()
-        key = _plan_lock_key(display)
-        while True:
-            with client.pipeline() as pipe:
-                try:
-                    pipe.watch(key)
-                    raw = pipe.get(key)
-                    if not raw:
-                        pipe.unwatch()
-                        return False
-                    try:
-                        record = json.loads(raw)
-                    except Exception:
-                        raise UiDriveError(
-                            f"display {display} lease record is not valid JSON"
-                        )
-                    if not isinstance(record, dict):
-                        raise UiDriveError(
-                            f"display {display} lease record is not an object"
-                        )
-                    if record.get("owner_token") != lease.owner:
-                        pipe.unwatch()
-                        return False
-                    record["seat_id"] = lease.seat_id
-                    record["last_turn_id"] = lease.turn_id
-                    pipe.multi()
-                    pipe.set(key, json.dumps(record), ex=ttl)
-                    pipe.execute()
-                    return True
-                except _LockWatchError:
-                    continue
-    except UiDriveError:
-        raise
-    except Exception as exc:
-        raise UiDriveError(
-            f"display {display} lease renewal unavailable; refusing action: {exc}"
-        ) from exc
 
 
 def _observe_lease(
@@ -896,13 +863,10 @@ def _observe_lease(
                 "expires_by_ttl": True,
             }
         owned = record.get("owner_token") == lease.owner
-        if owned and not _renew_if_owner(display, lease, ttl):
-            raise UiDriveError(f"display {display} lease disappeared during renewal")
-        refreshed = _display_lock_record(display) or {}
         return {
             "state": "owned" if owned else "held_by_other",
             "owned": owned,
-            "ttl_seconds": refreshed.get("ttl_seconds", record.get("ttl_seconds")),
+            "ttl_seconds": record.get("ttl_seconds"),
             "expires_by_ttl": True,
         }
     except Exception as exc:
@@ -914,54 +878,154 @@ def _observe_lease(
         }
 
 
+_FENCED_DISPLAY_LEASE_LUA = """
+local authoritative_generation = redis.call('GET', KEYS[2])
+if authoritative_generation ~= ARGV[1] then
+    return {'refused_generation_fence', tostring(authoritative_generation or '')}
+end
+
+local turn_deadline = tonumber(redis.call('ZSCORE', KEYS[4], ARGV[4]) or '0')
+if turn_deadline == 0 then
+    return {'refused_missing_turn_lease', ''}
+end
+if turn_deadline <= tonumber(ARGV[9]) then
+    return {'refused_expired_turn_lease', ''}
+end
+
+local raw_context = redis.call('HGET', KEYS[3], ARGV[4])
+if not raw_context then
+    return {'refused_missing_turn', ''}
+end
+local context_ok, context = pcall(cjson.decode, raw_context)
+if not context_ok or type(context) ~= 'table' then
+    return {'refused_invalid_turn', ''}
+end
+if tostring(context['turn_id'] or '') ~= ARGV[4]
+    or tostring(context['seat_id'] or '') ~= ARGV[3]
+    or tostring(context['process_generation'] or '') ~= ARGV[1] then
+    return {'refused_turn_mismatch', ''}
+end
+
+local raw_lock = redis.call('GET', KEYS[1])
+if not raw_lock then
+    local record = {
+        owner_token=ARGV[2],
+        seat_id=ARGV[3],
+        last_turn_id=ARGV[4],
+        actor_type='taey-drive_chat',
+        holder_pid=tonumber(ARGV[6]),
+        holder_starttime=ARGV[7],
+        locked_at=ARGV[8]
+    }
+    redis.call('SET', KEYS[1], cjson.encode(record), 'EX', tonumber(ARGV[5]))
+    return {'acquired', ''}
+end
+
+local lock_ok, record = pcall(cjson.decode, raw_lock)
+if not lock_ok or type(record) ~= 'table' then
+    return {'refused_invalid_lock', ''}
+end
+local previous_owner = tostring(record['owner_token'] or '')
+if tostring(record['actor_type'] or '') ~= 'taey-drive_chat' then
+    return {'refused_actor', previous_owner}
+end
+if tostring(record['seat_id'] or '') ~= ARGV[3] then
+    return {'refused_other_seat', previous_owner}
+end
+
+if previous_owner == ARGV[2] then
+    record['last_turn_id'] = ARGV[4]
+    record['holder_pid'] = tonumber(ARGV[6])
+    record['holder_starttime'] = ARGV[7]
+    redis.call('SET', KEYS[1], cjson.encode(record), 'EX', tonumber(ARGV[5]))
+    return {'renewed', ''}
+end
+
+local owner_prefix = 'taey-drive:' .. ARGV[3] .. ':'
+if string.sub(previous_owner, 1, string.len(owner_prefix)) ~= owner_prefix then
+    return {'refused_owner_shape', previous_owner}
+end
+local previous_generation = string.sub(previous_owner, string.len(owner_prefix) + 1)
+if string.len(previous_generation) ~= 32
+    or not string.match(previous_generation, '^[0-9a-f]+$') then
+    return {'refused_owner_shape', previous_owner}
+end
+if previous_generation == ARGV[1] then
+    return {'refused_current_generation_owner', previous_owner}
+end
+
+record['previous_owner_token'] = previous_owner
+record['owner_token'] = ARGV[2]
+record['seat_id'] = ARGV[3]
+record['last_turn_id'] = ARGV[4]
+record['actor_type'] = 'taey-drive_chat'
+record['holder_pid'] = tonumber(ARGV[6])
+record['holder_starttime'] = ARGV[7]
+record['generation_takeover_at'] = ARGV[8]
+redis.call('SET', KEYS[1], cjson.encode(record), 'EX', tonumber(ARGV[5]))
+return {'generation_takeover', previous_owner}
+"""
+
+
+def _process_starttime() -> str:
+    try:
+        stat = Path(f"/proc/{os.getpid()}/stat").read_text(encoding="utf-8")
+    except OSError as exc:
+        raise UiDriveError("cannot establish display-lease process identity") from exc
+    end = stat.rfind(")")
+    fields = stat[end + 2:].split() if end >= 0 else []
+    if len(fields) < 20:
+        raise UiDriveError("cannot parse display-lease process identity")
+    return fields[19]
+
+
 def _guard_action(
     display: str,
     lease: SimpleNamespace,
     ttl: int,
 ) -> dict[str, Any]:
     try:
-        token = _acquire_display_lock(
-            payload={
-                "owner_token": lease.owner,
-                "seat_id": lease.seat_id,
-                "last_turn_id": lease.turn_id,
-                "actor_type": "taey-drive_chat",
-            },
-            ttl=ttl,
-            display=display,
+        client = _lock_redis_client()
+        result = client.eval(
+            _FENCED_DISPLAY_LEASE_LUA,
+            4,
+            _plan_lock_key(display),
+            _DRIVE_GENERATION_FENCE_KEY,
+            f"taey:{lease.seat_id}:turn_context",
+            f"taey:{lease.seat_id}:active_turns",
+            lease.process_generation,
+            lease.owner,
+            lease.seat_id,
+            lease.turn_id,
+            ttl,
+            os.getpid(),
+            _process_starttime(),
+            datetime.now(timezone.utc).isoformat(),
+            time.time(),
         )
     except Exception as exc:
         raise UiDriveError(
-            f"display {display} lease acquisition unavailable; refusing action: {exc}"
+            f"display {display} fenced lease unavailable; refusing action: {exc}"
         ) from exc
-    if token is not None:
-        return {
-            "state": "acquired",
-            "owned": True,
-            "ttl_seconds": ttl,
-            "expires_by_ttl": True,
-        }
-    try:
-        record = _display_lock_record(display) or {}
-    except Exception as exc:
+    if not isinstance(result, (list, tuple)) or not result:
         raise UiDriveError(
-            f"display {display} lease record unavailable; refusing action: {exc}"
-        ) from exc
-    owner = record.get("owner_token")
-    if owner == lease.owner:
-        if not _renew_if_owner(display, lease, ttl):
-            raise UiDriveError(
-                f"display {display} lease disappeared during renewal; refusing action"
-            )
-        return {
-            "state": "renewed",
+            f"display {display} fenced lease returned an invalid receipt; refusing action"
+        )
+    state = str(result[0])
+    previous_owner = str(result[1]) if len(result) > 1 and result[1] else ""
+    if state in {"acquired", "renewed", "generation_takeover"}:
+        receipt = {
+            "state": state,
             "owned": True,
             "ttl_seconds": ttl,
             "expires_by_ttl": True,
         }
+        if previous_owner:
+            receipt["previous_owner_token"] = previous_owner
+        return receipt
+    detail = f" ({previous_owner})" if previous_owner else ""
     raise UiDriveError(
-        f"display {display} is held by another driver; refusing action "
-        f"(observe remains available)"
+        f"display {display} fenced lease refused action: {state}{detail}"
     )
 
 
