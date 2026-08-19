@@ -32,6 +32,7 @@ try:
     from consultation_v2.platforms import routing as platform_routing
     from consultation_v2.platforms_runtime import display_environment
     from consultation_v2.planner import selection_path_operation
+    from consultation_v2.runtime import ConsultationRuntime
     from consultation_v2.snapshot import build_snapshot
     from consultation_v2.types import ElementRef, Snapshot
     from consultation_v2.yaml_contract import CHAT_PLATFORMS, load_platform_yaml
@@ -625,6 +626,41 @@ def _element_action(
     }
 
 
+def _navigate_fresh(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str, Any]:
+    cfg = _platform_config(deps.display)
+    fresh_url = ((cfg.get("urls") or {}).get("fresh"))
+    if not isinstance(fresh_url, str) or not fresh_url:
+        raise UiDriveError(f"{deps.platform}: urls.fresh must be a non-empty string")
+    if args.url != fresh_url:
+        raise UiDriveError(
+            f"{deps.platform}: navigate accepts only the exact YAML urls.fresh "
+            f"value {fresh_url!r}"
+        )
+    before = _snapshot(deps)
+    before_revision = _snapshot_revision(before)
+    runtime = ConsultationRuntime(deps.platform)
+    if not runtime.navigate(fresh_url, verify_change=True):
+        raise UiDriveError(
+            f"{deps.platform}: verified navigation to YAML urls.fresh failed"
+        )
+    after = _snapshot(deps)
+    mapped_count = sum(len(items) for items in (after.mapped or {}).values())
+    if int(after.raw_count or 0) < 1 or mapped_count < 1:
+        raise UiDriveError(
+            f"{deps.platform}: navigation reached no populated canonical tree"
+        )
+    return {
+        "navigated": True,
+        "target_url": fresh_url,
+        "current_url": after.url,
+        "before_snapshot_revision": before_revision,
+        "after_snapshot_revision": _snapshot_revision(after),
+        "after_raw_count": int(after.raw_count or 0),
+        "after_mapped_count": mapped_count,
+        "tree_ready": True,
+    }
+
+
 # GTK file-chooser titles Firefox uses, in the order worth trying.
 _FILE_DIALOG_TITLES = ("File Upload", "Open File", "Open", "Choose File", "Select File")
 
@@ -931,6 +967,10 @@ def _parser() -> argparse.ArgumentParser:
     _add_expected_revision(key)
     key.add_argument("--key", required=True)
 
+    navigate = commands.add_parser("navigate")
+    _add_display(navigate)
+    navigate.add_argument("--url", required=True)
+
     focus_dialog = commands.add_parser("focus-dialog")
     _add_display(focus_dialog)
 
@@ -956,7 +996,7 @@ def _parser() -> argparse.ArgumentParser:
 # Display mutations and clipboard extraction must hold the per-display lease. Observe remains
 # read-only: it reports lease state without creating, renewing, or transferring ownership.
 _LOCK_ACTION_OPS = {
-    "click", "focus", "activate", "hover", "operate", "type", "paste", "key",
+    "click", "focus", "activate", "hover", "operate", "type", "paste", "key", "navigate",
     "focus-dialog", "read-clipboard", "extract",
 }
 
@@ -1171,6 +1211,8 @@ def _dispatch(args: argparse.Namespace, deps: SimpleNamespace) -> Any:
         result = _paste(args, deps)
     elif args.action == "key":
         result = _key(args, deps)
+    elif args.action == "navigate":
+        result = _navigate_fresh(args, deps)
     elif args.action == "focus-dialog":
         result = _focus_dialog(args, deps)
     elif args.action == "read-clipboard":

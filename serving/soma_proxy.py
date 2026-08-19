@@ -897,12 +897,14 @@ TOOLS = [
                     "action": {
                         "type": "string",
                         "enum": ["observe", "click", "type", "paste", "key",
-                                 "read_clipboard", "focus", "activate", "hover", "operate",
+                                 "read_clipboard", "focus", "activate", "hover", "operate", "navigate",
                                  "focus_dialog"],
                         "description": (
                             "the single action to perform; operate executes the one operation "
                             "declared by platform YAML for the chosen revision-bound ref; direct "
                             "click/focus/activate/hover are only for refs with no declaration; "
+                            "navigate opens only this platform's exact YAML urls.fresh through "
+                            "the shared self-verifying navigation primitive; "
                             "focus_dialog activates and verifies an "
                             "already-open native GTK file chooser so subsequent primitives address "
                             "that X11 window instead of the browser"
@@ -915,6 +917,8 @@ TOOLS = [
                     "output_file": {"type": "string", "description": "absolute destination path for read_clipboard; the file must not already exist"},
                     "key": {"type": "string",
                             "description": "key to press, e.g. Return, ctrl+a, Delete"},
+                    "url": {"type": "string",
+                            "description": "for navigate only: must exactly equal this platform YAML's urls.fresh"},
                 },
             },
         },
@@ -1455,11 +1459,11 @@ CHAT_DISPLAYS = tuple(
 _PASTE_INLINE_MAX_CHARS = int(os.environ.get("TAEY_PASTE_INLINE_MAX_CHARS", "800"))
 
 _DRIVE_ACTIONS = {
-    "observe", "click", "focus", "activate", "hover", "operate", "type", "paste", "key",
+    "observe", "click", "focus", "activate", "hover", "operate", "navigate", "type", "paste", "key",
     "read_clipboard", "focus_dialog",
 }
 _DRIVE_MUTATIONS = {
-    "click", "focus", "activate", "hover", "operate", "type", "paste", "key", "focus_dialog",
+    "click", "focus", "activate", "hover", "operate", "navigate", "type", "paste", "key", "focus_dialog",
 }
 
 
@@ -1605,21 +1609,24 @@ def _do_drive_chat(arguments: dict) -> str:
             return _terminal_refusal(
                 "a prior UI mutation failed in this turn; further UI mutations are refused"
             )
-        observed = observations.pop(display, None)
-        if not isinstance(observed, dict):
-            return _terminal_refusal(
-                "UI mutation requires an explicit fresh observe on this display"
-            )
-        observed_round = observed.get("tool_round")
-        expected_revision = str(observed.get("snapshot_revision") or "")
-        if not isinstance(observed_round, int) or observed_round >= tool_round:
-            return _terminal_refusal(
-                "UI mutation requires an observe result seen in an earlier model round"
-            )
-        if not re.fullmatch(r"[0-9a-f]{64}", expected_revision):
-            return _terminal_refusal(
-                "preceding observe did not provide a valid browser snapshot revision"
-            )
+        if action == "navigate":
+            observations.pop(display, None)
+        else:
+            observed = observations.pop(display, None)
+            if not isinstance(observed, dict):
+                return _terminal_refusal(
+                    "UI mutation requires an explicit fresh observe on this display"
+                )
+            observed_round = observed.get("tool_round")
+            expected_revision = str(observed.get("snapshot_revision") or "")
+            if not isinstance(observed_round, int) or observed_round >= tool_round:
+                return _terminal_refusal(
+                    "UI mutation requires an observe result seen in an earlier model round"
+                )
+            if not re.fullmatch(r"[0-9a-f]{64}", expected_revision):
+                return _terminal_refusal(
+                    "preceding observe did not provide a valid browser snapshot revision"
+                )
 
     def _argument_refusal(msg: str) -> str:
         if action in _DRIVE_MUTATIONS:
@@ -1698,6 +1705,11 @@ def _do_drive_chat(arguments: dict) -> str:
             return _argument_refusal("key requires a key name, e.g. Return")
         cmd += ["--key", str(key)]
         cmd += ["--expected-revision", expected_revision]
+    elif action == "navigate":
+        url = arguments.get("url")
+        if not isinstance(url, str) or not url:
+            return _argument_refusal("navigate requires the exact YAML urls.fresh value")
+        cmd += ["--url", url]
     try:
         r = subprocess.run(
             cmd,
@@ -1751,9 +1763,10 @@ def _do_drive_chat(arguments: dict) -> str:
                 elif action in _DRIVE_MUTATIONS:
                     payload["ui_sequence"] = {
                         "state": "mutation_complete",
-                        "consumed_snapshot_revision": expected_revision,
                         "observe_required_before_next_mutation": True,
                     }
+                    if expected_revision:
+                        payload["ui_sequence"]["consumed_snapshot_revision"] = expected_revision
                 return _json.dumps(payload)
             if action in _DRIVE_MUTATIONS:
                 detail = (
