@@ -5,6 +5,9 @@
 
 # Python
 __pycache__/
+.pytest_cache/
+.ruff_cache/
+.gitnexus/
 *.py[cod]
 *.egg-info/
 .eggs/
@@ -39,8 +42,17 @@ serving/credential-denylist.txt
 
 # Retired path components are history-only, not current public surface.
 archive/
+docs/archive/
+docs/vertical_slice_*/
 archived/
 deprecated/
 superseded/
 obsolete/
 legacy/
+
+# Non-production editor and backup artifacts
+*.bak
+*.orig
+*.rej
+*.tmp
+*~

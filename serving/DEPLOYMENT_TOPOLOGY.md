@@ -1,5 +1,9 @@
 # Deployment topology — what actually runs, where, from which commit
 
+**Status: dated Mira production receipt, not current configuration authority.** Hostnames, IPs, unit names,
+absolute paths, and SHAs below are observations from the stated dates. Use `SERVING.md`, configuration
+templates, and the included probes to establish current state.
+
 `SERVING.md` and `README` describe the code and the architecture. This file describes the
 **deployment**: which commit runs, out of which directory, under which unit, on which venv, and
 what proves it is alive.
