@@ -926,7 +926,7 @@ TOOLS = [
                     },
                     "scope": {
                         "type": "string",
-                        "enum": ["base", "menu_snapshot"],
+                        "enum": ["base", "menu_snapshot", "app_root_snapshot"],
                         "description": "observe only: canonical Hands observation scope; use the exact workflow.selection menu operate.scope from platform YAML; defaults to base",
                     },
                     "ref": {"type": "string",
@@ -1616,7 +1616,7 @@ def _do_drive_chat(arguments: dict) -> str:
     scope = arguments.get("scope")
     if action == "observe":
         scope = str(scope or "base")
-        if scope not in {"base", "menu_snapshot"}:
+        if scope not in {"base", "menu_snapshot", "app_root_snapshot"}:
             return _err(display, action, f"unsupported observation scope {scope!r}")
     elif scope is not None:
         return _err(display, action, "scope is valid only for observe")
