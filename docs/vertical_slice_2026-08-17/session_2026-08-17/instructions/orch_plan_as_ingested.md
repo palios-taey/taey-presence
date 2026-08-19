@@ -15,7 +15,7 @@
 
 ## Phase: p2-receipted-carry - The receipted carry, THE production result [order: 2]
 
-### Task: carry-packet - Taey carries one real careers/revloop packet end to end with receipts [priority: 10] [owner: taey] [depends: pull-production]
+### Task: carry-packet - Taey carries one real production packet end to end with receipts [priority: 10] [owner: taey] [depends: pull-production]
 - The lane that produced the 2026-08-16 fabrication. A CLI produces one real packet in a disposable worktree; Taey runs `taey-delegate collect` on the declared paths via run_command; Taey carries packet plus manifest to the authoring Chat over the receipted relay; Chat accepts or corrects.
 - Exercises the loop with Taey in the middle. This is training trajectory #1, paired against the Aug 16 fabrication as its rejected sample.
 - LEAN: no wait-states inside a single seat turn. Send in one turn; harvest on the consult-complete signal in the next. The signal already exists and already targets taey.
