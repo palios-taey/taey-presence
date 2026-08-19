@@ -143,6 +143,7 @@ class TurnContext:
     seat_id: str
     event_id: str
     correlation_id: str
+    tool_profile: str
     process_generation: str
     started_at: float
 
@@ -151,6 +152,17 @@ PROCESS_GENERATION = uuid.uuid4().hex
 _DRIVE_GENERATION_FENCE_KEY = "taey:soma:drive_process_generation"
 _serving_socket_reserved = False
 _active_turns: dict[str, TurnContext] = {}
+
+_FULL_TOOL_PROFILE = "full"
+_MANUAL_CHAT_UI_TOOL_PROFILE = "manual-chat-ui"
+_TOOL_PROFILE_ALLOWED: dict[str, frozenset[str] | None] = {
+    _FULL_TOOL_PROFILE: None,
+    _MANUAL_CHAT_UI_TOOL_PROFILE: frozenset({
+        "read_file",
+        "list_dir",
+        "drive_chat",
+    }),
+}
 
 SAFE_OPS = {
     ast.Add: operator.add,
@@ -926,6 +938,25 @@ TOOLS = [
 ]
 
 
+def _tools_for_profile(profile: str) -> list[dict]:
+    allowed = _TOOL_PROFILE_ALLOWED[profile]
+    if allowed is None:
+        return TOOLS
+    selected = [
+        tool for tool in TOOLS
+        if tool.get("function", {}).get("name") in allowed
+    ]
+    selected_names = {
+        tool.get("function", {}).get("name") for tool in selected
+    }
+    if selected_names != set(allowed):
+        missing = sorted(set(allowed) - selected_names)
+        raise RuntimeError(
+            f"tool profile {profile!r} references missing tools: {missing}"
+        )
+    return selected
+
+
 def safe_eval(expr: str):
     """Safely evaluate a numeric Python expression."""
 
@@ -977,6 +1008,33 @@ def _format_isma_results(data: dict) -> str:
 
 def execute_tool_call(name: str, arguments: dict) -> str:
     """Execute a tool call and return the result as a string."""
+    context = _request_context.get()
+    profile = str(context.get("tool_profile") or _FULL_TOOL_PROFILE)
+    profile_state = context.get("_tool_profile_state")
+    if isinstance(profile_state, dict):
+        terminal = profile_state.get("terminal")
+        if isinstance(terminal, dict):
+            return (
+                "tool profile terminal refusal: a prior capability violation ended "
+                f"this turn ({terminal.get('reason', 'unknown violation')})"
+            )
+    allowed = _TOOL_PROFILE_ALLOWED.get(profile)
+    if allowed is not None and name not in allowed:
+        reason = f"tool {name!r} is not available in profile {profile!r}"
+        if isinstance(profile_state, dict):
+            profile_state["terminal"] = {
+                "tool": name,
+                "reason": reason,
+            }
+        _audit("tool_profile_refusal", {
+            "profile": profile,
+            "tool": name,
+            "reason": reason,
+        })
+        return (
+            f"tool profile terminal refusal: {reason}. Stop this attempt and "
+            "report the capability violation; no further tool action is permitted."
+        )
     if name == "search_isma":
         query = arguments.get("query", "")
         top_k = arguments.get("top_k", 5)
@@ -2491,11 +2549,26 @@ def _turn_context(request: Request, body: dict) -> TurnContext:
         or event_id,
         "X-Taey-Correlation-Id",
     )
+    raw_tool_profile = request.headers.get("x-taey-tool-profile")
+    tool_profile = (
+        _FULL_TOOL_PROFILE
+        if raw_tool_profile is None
+        else raw_tool_profile.strip()
+    )
+    if tool_profile not in _TOOL_PROFILE_ALLOWED:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "X-Taey-Tool-Profile must be one of "
+                f"{sorted(_TOOL_PROFILE_ALLOWED)}"
+            ),
+        )
     return TurnContext(
         turn_id=uuid.uuid4().hex,
         seat_id=seat_id,
         event_id=event_id,
         correlation_id=correlation_id,
+        tool_profile=tool_profile,
         process_generation=PROCESS_GENERATION,
         started_at=time.time(),
     )
@@ -2507,6 +2580,7 @@ def _turn_payload(turn: TurnContext) -> dict:
         "seat_id": turn.seat_id,
         "event_id": turn.event_id,
         "correlation_id": turn.correlation_id,
+        "tool_profile": turn.tool_profile,
         "process_generation": turn.process_generation,
         "started_at": turn.started_at,
     }
@@ -2805,6 +2879,7 @@ def _turn_headers(turn: TurnContext) -> dict[str, str]:
         "X-Taey-Seat-Id": turn.seat_id,
         "X-Taey-Event-Id": turn.event_id,
         "X-Taey-Correlation-Id": turn.correlation_id,
+        "X-Taey-Tool-Profile": turn.tool_profile,
     }
 
 
@@ -2926,6 +3001,7 @@ async def chat_completions(request: Request):
     turn = _turn_context(request, body)
     turn_payload = _turn_payload(turn)
     turn_payload["_ui_sequence"] = {"observations": {}, "terminal": None}
+    turn_payload["_tool_profile_state"] = {"terminal": None}
     context_token = _request_context.set(turn_payload)
     started = False
     try:
@@ -2981,13 +3057,11 @@ async def _chat_completions_for_turn(
     resolved_answer = ""
     resolved_thinking = ""
 
-    # EVERY Taey instance gets the full tool surface, council seats included (Jesse, 2026-08-01).
-    # The council is what researches ISMA, files and repos; a seat that cannot look at anything can
-    # only opine. Seats were excluded in 2db83fe2 with no stated rationale, inside a commit about
-    # PROMPT isolation — the exclusion was never a decision anyone took, and it made the council
-    # structurally unable to do the job it exists for.
-    if "tools" not in body:
+    if turn.tool_profile == _FULL_TOOL_PROFILE and "tools" not in body:
         body["tools"] = TOOLS
+    elif turn.tool_profile != _FULL_TOOL_PROFILE:
+        body["tools"] = _tools_for_profile(turn.tool_profile)
+        body.pop("tool_choice", None)
 
     t0 = time.time()
 
