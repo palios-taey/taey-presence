@@ -31,6 +31,7 @@ if TAEYS_HANDS not in sys.path:
 try:
     from consultation_v2.platforms import routing as platform_routing
     from consultation_v2.platforms_runtime import display_environment
+    from consultation_v2.planner import selection_path_operation
     from consultation_v2.snapshot import build_snapshot
     from consultation_v2.types import ElementRef, Snapshot
     from consultation_v2.yaml_contract import CHAT_PLATFORMS, load_platform_yaml
@@ -437,8 +438,6 @@ def _declared_operation(
     item: ElementRef | dict[str, Any],
 ) -> dict[str, Any] | None:
     manual = _manual_ui_module(platform)
-    if manual is None:
-        return None
     if isinstance(item, ElementRef):
         states = list(item.states)
         context = dict(item.raw or {})
@@ -447,12 +446,38 @@ def _declared_operation(
     else:
         states = list(item.get("states") or [])
         context = dict(item)
-    declared = manual.element_operation(element_key, states, context)
-    if declared is not None and not isinstance(declared, dict):
+    manual_declared = None
+    if manual is not None:
+        manual_declared = manual.element_operation(element_key, states, context)
+        if manual_declared is not None and not isinstance(manual_declared, dict):
+            raise UiDriveError(
+                f"{platform} manual element_operation must return a mapping or null"
+            )
+
+    action = selection_path_operation(platform, element_key)
+    if manual_declared is not None and action is not None:
+        if action not in (manual_declared.get("primitives") or []):
+            raise UiDriveError(
+                f"{platform} element {element_key!r} conflicts between manual "
+                f"operation {manual_declared.get('method')!r} and YAML selection "
+                f"path action {action!r}"
+            )
+        return manual_declared
+    if manual_declared is not None:
+        return manual_declared
+    if action is None:
+        return None
+    if action not in {"click", "hover"}:
         raise UiDriveError(
-            f"{platform} manual element_operation must return a mapping or null"
+            f"{platform} selection path action {action!r} for {element_key!r} "
+            "has no drive_chat primitive"
         )
-    return declared
+    return {
+        "method": "selection_path",
+        "primitives": [action],
+        "allowed_now": [action],
+        "forbidden": sorted({"activate", "click", "focus", "hover"} - {action}),
+    }
 
 
 def _observe(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str, Any]:
@@ -547,6 +572,9 @@ def _element_action(
         "click": deps.interact.atspi_click,
         "focus": deps.interact.atspi_focus,
         "activate": deps.interact.atspi_activate,
+        "hover": lambda element: deps.input.hover(
+            int(element["x"]), int(element["y"])
+        ) if element.get("x") is not None and element.get("y") is not None else False,
     }[action]
     if not primitive(row):
         raise UiDriveError(f"{action} primitive returned false")
@@ -844,7 +872,7 @@ def _parser() -> argparse.ArgumentParser:
     observe = commands.add_parser("observe")
     _add_display(observe)
 
-    for action in ("click", "focus", "activate"):
+    for action in ("click", "focus", "activate", "hover"):
         target = commands.add_parser(action)
         _add_display(target)
         _add_target(target)
@@ -894,7 +922,7 @@ def _parser() -> argparse.ArgumentParser:
 # Display mutations and clipboard extraction must hold the per-display lease. Observe remains
 # read-only: it reports lease state without creating, renewing, or transferring ownership.
 _LOCK_ACTION_OPS = {
-    "click", "focus", "activate", "type", "paste", "key",
+    "click", "focus", "activate", "hover", "type", "paste", "key",
     "focus-dialog", "read-clipboard", "extract",
 }
 
@@ -1101,7 +1129,7 @@ def _dispatch(args: argparse.Namespace, deps: SimpleNamespace) -> Any:
         lease_receipt = _guard_action(deps.display, lease, LOCK_TTL_DEFAULT)
     if args.action == "extract":
         result = _extract_response(args, deps)
-    elif args.action in {"click", "focus", "activate"}:
+    elif args.action in {"click", "focus", "activate", "hover"}:
         result = _element_action(args.action, args, deps)
     elif args.action == "type":
         result = _type_text(args, deps)
