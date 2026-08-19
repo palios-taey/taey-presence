@@ -360,7 +360,7 @@ def _yaml_pick_strategy(cfg: dict, element_key: str) -> str | None:
     workflow = cfg.get("workflow") or {}
     declared: set[str] = set()
 
-    consult_steps = ((workflow.get("consult") or {}).get("steps") or {})
+    consult_steps = ((workflow.get("full_consult") or {}).get("steps") or {})
     if isinstance(consult_steps, dict):
         for step in consult_steps.values():
             if not isinstance(step, dict):
