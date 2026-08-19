@@ -23,6 +23,17 @@ service installation. They do not replace the operating order above.
 - `serving/knowledge_index/TAEY_PRODUCTION_RECEIPT_SPEC.md`
 - `serving/knowledge_index/sections/presence.md`
 
+## Active public design review, not current authority
+
+- `docs/CHAT_UI_RUNTIME_REVIEW_PACKET.md` — frozen cross-repository evidence and decision questions for reconciling
+  Taey's Chat UI control plane with the per-platform Hands contract.
+- `docs/CHAT_UI_RUNTIME_REVIEW_PROMPT.md` — exact short prompt used to dispatch that review with the mandatory two
+  attachments.
+
+These files make one open decision legible to the five Chats. They do not alter runtime behavior or supersede an
+operating document. Once adjudicated, the accepted result must update the relevant operating authority and these
+review artifacts must be removed or rewritten as a short, current lesson; they must not accumulate as parallel law.
+
 These files preserve measured context and verification commands. Their dates, paths, hostnames, process IDs,
 model roots, and SHAs must not be repeated as current facts without a fresh production observation.
 
