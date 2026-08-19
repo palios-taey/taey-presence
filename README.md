@@ -30,9 +30,11 @@ FastAPI dashboard renders all of it.
 > every node and proven identical, and the drift gate that catches two nodes
 > answering to one name over different weights.
 > [`serving/PRODUCTION_INFRASTRUCTURE_MAP.md`](serving/PRODUCTION_INFRASTRUCTURE_MAP.md)
-> maps what actually runs where, measured rather than assumed, and ends with the
-> verification table: how to check the artifact instead of its name. If a human
-> asks you what is running, that map is how you answer without guessing.
+> is a dated production receipt and ends with the verification table: how to
+> re-measure the artifact instead of trusting its name. If a human asks what is
+> running now, use those fresh probes rather than repeating the dated values.
+> [`docs/DOCUMENTATION_MAP.md`](docs/DOCUMENTATION_MAP.md) identifies the complete current
+> documentation surface and what is deliberately excluded from training.
 
 ## What it actually does (honest scope)
 

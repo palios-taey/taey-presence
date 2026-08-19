@@ -1,1 +1,0 @@
-No, that wasn't like critical. This is a new process we're doing and was wondering really just why in case something in the packet was confusing. We are doing the steps your outlined in "Taey orchestrator integration...' session.

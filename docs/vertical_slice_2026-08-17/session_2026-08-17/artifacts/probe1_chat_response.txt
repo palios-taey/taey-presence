@@ -1,1 +1,0 @@
-*(Receipt files kept at /home/claude/gaia_receipts/ in this session's sandbox if you want them re-hashed or diffed against the manifest when it lands.)*
