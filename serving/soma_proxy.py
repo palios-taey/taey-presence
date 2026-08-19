@@ -733,7 +733,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "run_command",
-            "description": "Run a shell command on the production machine and get back its exit code and output. This is how you reach git (status, log, diff, add, commit, push), the orchestrator (taey-task, taey-plan, taey-notify), the databases, the test suites, and every other CLI the fleet uses. Prefer specific commands over exploratory ones, check exit codes rather than assuming success, and read output before acting on it. Every call is recorded in the tool audit log.",
+            "description": "Run a non-UI shell command on the production machine and get back its exit code and output. This is how you reach git (status, log, diff, add, commit, push), the orchestrator (taey-task, taey-plan, taey-notify), the databases, the test suites, and every other non-UI CLI the fleet uses. Direct DISPLAY bindings, xdotool/X11 executables, raw AT-SPI, and ui_drive invocation are refused; Chat UI work must use drive_chat so YAML resolution, fresh-tree refs, display leases, and action cadence remain enforced. Prefer specific commands over exploratory ones, check exit codes rather than assuming success, and read output before acting on it. Every call is recorded in the tool audit log.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -1404,10 +1404,57 @@ def _do_write_file(path: str, content: str, append: bool = False) -> str:
     return f"write_file ok: {'appended to' if append else 'wrote'} {resolved} ({size} bytes on disk)"
 
 
+_CHAT_DISPLAY_BINDING = re.compile(
+    r"(?ix)(?:^|(?:&&|\|\||[;|&])\s*|\b(?:env|export)\s+)"
+    r"DISPLAY\s*=\s*['\"]?:(?:21|22|23|24|2|3|4|5|6)(?:\.\d+)?['\"]?"
+    r"(?=\s|$|[;&|])"
+)
+_CHAT_DISPLAY_ARGUMENT = re.compile(
+    r"(?ix)(?:--display|-display)(?:\s+|=)['\"]?"
+    r":(?:21|22|23|24|2|3|4|5|6)(?:\.\d+)?['\"]?(?=\s|$|[;&|])"
+)
+_RAW_UI_EXECUTABLE = re.compile(
+    r"(?ix)(?:^|[\s;&|()])(?:[^\s;&|()]*/)?"
+    r"(?:xdotool|wmctrl|xte|xvkbd|xsel|xclip)(?=\s|$|[;&|()])"
+)
+_RAW_ATSPI_ACCESS = re.compile(
+    r"(?ix)\b(?:pyatspi|gi\.repository\.Atspi|"
+    r"from\s+gi\.repository\s+import\s+Atspi)\b"
+)
+_UI_DRIVE_BYPASS = re.compile(r"(?i)(?:^|[/\s])ui_drive\.py(?=\s|$)")
+
+
+def _run_command_ui_refusal(command: str) -> str | None:
+    if _CHAT_DISPLAY_BINDING.search(command):
+        return "direct Chat DISPLAY binding"
+    if _CHAT_DISPLAY_ARGUMENT.search(command):
+        return "direct Chat display argument"
+    if _RAW_UI_EXECUTABLE.search(command):
+        return "raw X11 UI executable"
+    if _RAW_ATSPI_ACCESS.search(command):
+        return "raw AT-SPI access"
+    if _UI_DRIVE_BYPASS.search(command):
+        return "direct ui_drive invocation"
+    return None
+
+
 def _do_run_command(command: str, cwd: str = "", timeout_seconds: int = 120) -> str:
     import subprocess, os
     if not isinstance(command, str) or not command.strip():
         return "run_command error: command must be a non-empty string"
+    ui_refusal = _run_command_ui_refusal(command)
+    if ui_refusal is not None:
+        _audit("run_command", {
+            "command": command[:400],
+            "cwd": cwd,
+            "rc": "refused_ui_bypass",
+            "reason": ui_refusal,
+        })
+        return (
+            f"run_command error: {ui_refusal} is prohibited. Use drive_chat for "
+            "Chat UI work so platform YAML, the fresh accessibility tree, display "
+            "leases, and one-action/one-observe cadence remain enforced."
+        )
     timeout_seconds = max(1, min(int(timeout_seconds or 120), 900))
     workdir = cwd if (cwd and os.path.isdir(cwd)) else os.path.expanduser("~")
     try:
