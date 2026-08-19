@@ -177,16 +177,20 @@ def _encode_ref(
     platform: str,
     revision: str,
     element: str,
+    pick: str | None = None,
 ) -> str:
+    descriptor = {
+        "v": 4 if pick is not None else 3,
+        "display": display,
+        "platform": platform,
+        "surface": "browser",
+        "revision": revision,
+        "element": element,
+    }
+    if pick is not None:
+        descriptor["pick"] = pick
     payload = json.dumps(
-        {
-            "v": 3,
-            "display": display,
-            "platform": platform,
-            "surface": "browser",
-            "revision": revision,
-            "element": element,
-        },
+        descriptor,
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
@@ -204,7 +208,10 @@ def _decode_ref(value: str) -> dict[str, Any]:
     except Exception as exc:
         raise UiDriveError(f"invalid ref encoding: {exc}") from exc
     required = {"v", "display", "platform", "surface", "revision", "element"}
-    if set(payload) != required or payload.get("v") != 3:
+    version = payload.get("v")
+    if version == 4:
+        required.add("pick")
+    if set(payload) != required or version not in {3, 4}:
         raise UiDriveError("invalid ref schema")
     if not re.fullmatch(r":\d+", payload.get("display") or ""):
         raise UiDriveError("invalid ref display")
@@ -216,6 +223,8 @@ def _decode_ref(value: str) -> dict[str, Any]:
         raise UiDriveError("invalid ref revision")
     if not isinstance(payload.get("element"), str) or not payload["element"]:
         raise UiDriveError("invalid ref element")
+    if version == 4 and payload.get("pick") != "last_by_y":
+        raise UiDriveError("invalid ref pick strategy")
     return payload
 
 
@@ -252,6 +261,8 @@ def _snapshot_revision(snapshot: Snapshot) -> str:
                 {
                     "name": item.name,
                     "role": item.role,
+                    "x": item.x,
+                    "y": item.y,
                     "states": sorted(set(item.states)),
                     "text": item.text,
                     "text_selections": item.raw.get("text_selections") or [],
@@ -345,6 +356,72 @@ def _platform_config(display: str) -> dict:
         raise UiDriveError(f"cannot load strict platform YAML for {platform}: {exc}") from exc
 
 
+def _yaml_pick_strategy(cfg: dict, element_key: str) -> str | None:
+    workflow = cfg.get("workflow") or {}
+    declared: set[str] = set()
+
+    consult_steps = ((workflow.get("full_consult") or {}).get("steps") or {})
+    if isinstance(consult_steps, dict):
+        for step in consult_steps.values():
+            if not isinstance(step, dict):
+                continue
+            elements = step.get("elements") or []
+            if element_key not in elements:
+                continue
+            pick = step.get("pick")
+            if isinstance(pick, str) and pick:
+                declared.add(pick)
+
+    extract = workflow.get("extract") or {}
+    if (
+        isinstance(extract, dict)
+        and extract.get("primary_key") == element_key
+    ):
+        strategy = extract.get("strategy")
+        if isinstance(strategy, str) and strategy:
+            declared.add(strategy)
+
+    if len(declared) > 1:
+        raise UiDriveError(
+            f"{cfg.get('platform')}: conflicting YAML pick strategies for "
+            f"{element_key!r}: {sorted(declared)}"
+        )
+    if not declared:
+        return None
+    strategy = next(iter(declared))
+    if strategy != "last_by_y":
+        raise UiDriveError(
+            f"{cfg.get('platform')}: unsupported YAML pick strategy "
+            f"{strategy!r} for {element_key!r}"
+        )
+    return strategy
+
+
+def _selected_mapped_item(
+    cfg: dict,
+    element_key: str,
+    items: list[ElementRef],
+) -> tuple[ElementRef | None, str | None]:
+    if not items:
+        return None, None
+    strategy = _yaml_pick_strategy(cfg, element_key)
+    if strategy is None:
+        return (items[0], None) if len(items) == 1 else (None, None)
+    if any(item.y is None for item in items):
+        raise UiDriveError(
+            f"{cfg.get('platform')}: YAML {strategy} for {element_key!r} "
+            "requires a y coordinate on every exact tree match"
+        )
+    max_y = max(int(item.y) for item in items if item.y is not None)
+    selected = [item for item in items if item.y == max_y]
+    if len(selected) != 1:
+        raise UiDriveError(
+            f"{cfg.get('platform')}: YAML {strategy} for {element_key!r} "
+            f"resolved {len(selected)} matches at y={max_y}; expected one"
+        )
+    return selected[0], strategy
+
+
 def _attach_grammar(display: str) -> dict:
     """The platform's ATTACH grammar, entirely from its YAML.
 
@@ -405,12 +482,18 @@ def _resolve_target(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str
         )
     element_key = descriptor["element"]
     matches = list(snapshot.mapped.get(element_key) or [])
-    if len(matches) != 1:
+    cfg = _platform_config(deps.display)
+    item, pick = _selected_mapped_item(cfg, element_key, matches)
+    if item is None:
         raise UiDriveError(
             f"mapped element {element_key!r} matched {len(matches)} elements on "
-            f"{deps.platform} {deps.display}; expected exactly one"
+            f"{deps.platform} {deps.display} without one YAML-selected target"
         )
-    item = matches[0]
+    if descriptor.get("pick") != pick:
+        raise UiDriveError(
+            f"ref pick strategy {descriptor.get('pick')!r} does not match current "
+            f"YAML strategy {pick!r} for {element_key!r}"
+        )
     return {
         **dict(item.raw),
         "element": element_key,
@@ -419,6 +502,7 @@ def _resolve_target(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str
             platform=deps.platform,
             revision=revision,
             element=element_key,
+            pick=pick,
         ),
     }
 
@@ -488,14 +572,16 @@ def _observe(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str, Any]:
     mapped: list[dict[str, Any]] = []
     for element_key in sorted(snapshot.mapped):
         items = list(snapshot.mapped.get(element_key) or [])
+        selected, pick = _selected_mapped_item(cfg, element_key, items)
         for item in items:
             ref = None
-            if len(items) == 1:
+            if item is selected:
                 ref = _encode_ref(
                     display=deps.display,
                     platform=deps.platform,
                     revision=revision,
                     element=element_key,
+                    pick=pick,
                 )
             public_item = _public_element(
                 item,
@@ -504,7 +590,12 @@ def _observe(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str, Any]:
                 match_count=len(items),
                 ref=ref,
             )
-            if len(items) == 1:
+            if pick is not None:
+                public_item["yaml_selection"] = {
+                    "strategy": pick,
+                    "selected": item is selected,
+                }
+            if item is selected:
                 declared = _declared_operation(
                     deps.platform, element_key, item
                 )
