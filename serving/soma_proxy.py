@@ -877,6 +877,8 @@ TOOLS = [
                 "submission and manual extraction from that display's YAML and "
                 "the newly observed tree, one primitive at a time; do not use remembered platform "
                 "labels, platform shortcuts, coordinates, URLs, chooser routes, or send recipes. "
+                "For an opened selection menu, use the exact observation scope declared by that "
+                "menu's YAML operate.scope; the returned refs remain bound to that scope. "
                 "The native GTK file chooser is a shared driver boundary rather than platform UI: "
                 "after a YAML-resolved upload action opens it, focus_dialog activates and verifies "
                 "the separate X11 chooser window. A browser-tree observation after the upload action "
@@ -921,6 +923,11 @@ TOOLS = [
                             "already-open native GTK file chooser so subsequent primitives address "
                             "that X11 window instead of the browser"
                         ),
+                    },
+                    "scope": {
+                        "type": "string",
+                        "enum": ["base", "menu_snapshot"],
+                        "description": "observe only: canonical Hands observation scope; use the exact workflow.selection menu operate.scope from platform YAML; defaults to base",
                     },
                     "ref": {"type": "string",
                             "description": "revision-bound element ref from the immediately preceding fresh observe; required for click/focus/activate/hover/operate"},
@@ -1606,6 +1613,13 @@ def _do_drive_chat(arguments: dict) -> str:
     if action not in _DRIVE_ACTIONS:
         return _err(display, action,
                     f"unknown action {action!r}; valid: {sorted(_DRIVE_ACTIONS)}")
+    scope = arguments.get("scope")
+    if action == "observe":
+        scope = str(scope or "base")
+        if scope not in {"base", "menu_snapshot"}:
+            return _err(display, action, f"unsupported observation scope {scope!r}")
+    elif scope is not None:
+        return _err(display, action, "scope is valid only for observe")
 
     context = dict(_request_context.get())
     seat_id = str(context.get("seat_id") or "")
@@ -1710,6 +1724,8 @@ def _do_drive_chat(arguments: dict) -> str:
     sub = {"read_clipboard": "read-clipboard",
            "focus_dialog": "focus-dialog"}.get(action, action)
     cmd = [UI_DRIVE_PYTHON, UI_DRIVE_SCRIPT, sub, "--display", display]
+    if action == "observe":
+        cmd += ["--scope", scope]
     if output_file is not None:
         cmd += ["--output-file", output_file]
     if action in ("click", "focus", "activate", "hover", "operate"):
@@ -1810,11 +1826,13 @@ def _do_drive_chat(arguments: dict) -> str:
                     else:
                         observations[display] = {
                             "snapshot_revision": revision,
+                            "snapshot_scope": str((payload.get("result") or {}).get("scope") or ""),
                             "tool_round": tool_round,
                         }
                         payload["ui_sequence"] = {
                             "state": "observed",
                             "snapshot_revision": revision,
+                            "snapshot_scope": str((payload.get("result") or {}).get("scope") or ""),
                             "tool_round": tool_round,
                             "mutation_token_issued": True,
                         }

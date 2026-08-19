@@ -33,7 +33,7 @@ try:
     from consultation_v2.platforms_runtime import display_environment
     from consultation_v2.planner import selection_path_operation
     from consultation_v2.runtime import ConsultationRuntime
-    from consultation_v2.snapshot import build_snapshot
+    from consultation_v2.snapshot import build_menu_snapshot, build_snapshot
     from consultation_v2.types import ElementRef, Snapshot
     from consultation_v2.yaml_contract import CHAT_PLATFORMS, load_platform_yaml
 except ImportError as exc:  # fail LOUD and actionable, never a bare traceback
@@ -66,6 +66,7 @@ if LOCK_TTL_DEFAULT < _MONITOR_TTL_DEFAULT:
 
 
 REF_PREFIX = "atspi3."
+OBSERVE_SCOPES = ("base", "menu_snapshot")
 _LEASE_OWNER_RE = re.compile(r"taey-drive:[A-Za-z0-9._-]{1,64}:[0-9a-f]{32}")
 _PROCESS_GENERATION_RE = re.compile(r"[0-9a-f]{32}")
 _TRACE_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,159}")
@@ -175,15 +176,17 @@ def _encode_ref(
     *,
     display: str,
     platform: str,
+    scope: str,
     revision: str,
     element: str,
     pick: str | None = None,
 ) -> str:
     descriptor = {
-        "v": 4 if pick is not None else 3,
+        "v": 5,
         "display": display,
         "platform": platform,
         "surface": "browser",
+        "scope": scope,
         "revision": revision,
         "element": element,
     }
@@ -207,11 +210,23 @@ def _decode_ref(value: str) -> dict[str, Any]:
         payload = json.loads(base64.urlsafe_b64decode(encoded + padding).decode("utf-8"))
     except Exception as exc:
         raise UiDriveError(f"invalid ref encoding: {exc}") from exc
-    required = {"v", "display", "platform", "surface", "revision", "element"}
     version = payload.get("v")
-    if version == 4:
-        required.add("pick")
-    if set(payload) != required or version not in {3, 4}:
+    if version in {3, 4}:
+        required = {"v", "display", "platform", "surface", "revision", "element"}
+        if version == 4:
+            required.add("pick")
+        if set(payload) != required:
+            raise UiDriveError("invalid ref schema")
+        payload["scope"] = "base"
+    elif version == 5:
+        required = {
+            "v", "display", "platform", "surface", "scope", "revision", "element",
+        }
+        if "pick" in payload:
+            required.add("pick")
+        if set(payload) != required:
+            raise UiDriveError("invalid ref schema")
+    else:
         raise UiDriveError("invalid ref schema")
     if not re.fullmatch(r":\d+", payload.get("display") or ""):
         raise UiDriveError("invalid ref display")
@@ -219,11 +234,13 @@ def _decode_ref(value: str) -> dict[str, Any]:
         raise UiDriveError("invalid ref platform")
     if payload.get("surface") != "browser":
         raise UiDriveError("invalid ref surface")
+    if payload.get("scope") not in OBSERVE_SCOPES:
+        raise UiDriveError("invalid ref scope")
     if not re.fullmatch(r"[0-9a-f]{64}", payload.get("revision") or ""):
         raise UiDriveError("invalid ref revision")
     if not isinstance(payload.get("element"), str) or not payload["element"]:
         raise UiDriveError("invalid ref element")
-    if version == 4 and payload.get("pick") != "last_by_y":
+    if "pick" in payload and payload.get("pick") != "last_by_y":
         raise UiDriveError("invalid ref pick strategy")
     return payload
 
@@ -241,16 +258,67 @@ def _platform_for_display(display: str) -> str:
     return matches[0]
 
 
-def _snapshot(deps: SimpleNamespace) -> Snapshot:
-    _firefox, _document, snapshot = build_snapshot(deps.platform)
+def _scope_expected_elements(platform: str, scope: str) -> tuple[str, ...]:
+    cfg = load_platform_yaml(platform)
+    selection = ((cfg.get("workflow") or {}).get("selection") or {})
+    menus = selection.get("menus") or {}
+    expected: set[str] = set()
+    if isinstance(menus, dict):
+        for menu in menus.values():
+            if not isinstance(menu, dict):
+                continue
+            operate = menu.get("operate") or {}
+            if not isinstance(operate, dict) or operate.get("scope") != scope:
+                continue
+            options = menu.get("options") or {}
+            if not isinstance(options, dict):
+                continue
+            for option in options.values():
+                if not isinstance(option, dict):
+                    continue
+                element = option.get("element")
+                if isinstance(element, str) and element:
+                    expected.add(element)
+                for step in option.get("path") or []:
+                    if not isinstance(step, dict):
+                        continue
+                    path_element = step.get("element")
+                    if isinstance(path_element, str) and path_element:
+                        expected.add(path_element)
+    if not expected:
+        raise UiDriveError(
+            f"{platform} YAML does not declare observation scope {scope!r}"
+        )
+    return tuple(sorted(expected))
+
+
+def _snapshot(deps: SimpleNamespace, *, scope: str = "base") -> Snapshot:
+    builders = {
+        "base": build_snapshot,
+        "menu_snapshot": build_menu_snapshot,
+    }
+    builder = builders.get(scope)
+    if builder is None:
+        raise UiDriveError(
+            f"unsupported observation scope {scope!r}; expected one of {list(OBSERVE_SCOPES)}"
+        )
+    _firefox, _document, snapshot = builder(deps.platform)
     if snapshot.platform != deps.platform:
         raise UiDriveError(
             f"snapshot platform {snapshot.platform!r} does not match bound {deps.platform!r}"
         )
+    if scope != "base":
+        expected = _scope_expected_elements(deps.platform, scope)
+        present = [key for key in expected if snapshot.mapped.get(key)]
+        if not present:
+            raise UiDriveError(
+                f"{deps.platform} {scope} contains none of its YAML-declared mapped "
+                f"options {list(expected)}; refusing base-scope fallback"
+            )
     return snapshot
 
 
-def _snapshot_revision(snapshot: Snapshot) -> str:
+def _snapshot_revision(snapshot: Snapshot, *, scope: str = "base") -> str:
     mapped: dict[str, Any] = {}
     for element_key in sorted(snapshot.mapped):
         items = list(snapshot.mapped.get(element_key) or [])
@@ -276,6 +344,7 @@ def _snapshot_revision(snapshot: Snapshot) -> str:
             "matches": matches,
         }
     payload = {
+        "scope": scope,
         "current_url": snapshot.url,
         "mapped": mapped,
     }
@@ -474,8 +543,9 @@ def _resolve_target(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str
         raise UiDriveError(
             f"ref is scoped to platform {descriptor['platform']}, not {deps.platform}"
         )
-    snapshot = _snapshot(deps)
-    revision = _snapshot_revision(snapshot)
+    scope = descriptor["scope"]
+    snapshot = _snapshot(deps, scope=scope)
+    revision = _snapshot_revision(snapshot, scope=scope)
     if descriptor["revision"] != revision:
         raise UiDriveError(
             "stale browser snapshot ref; observe again and decide from the fresh tree"
@@ -500,6 +570,7 @@ def _resolve_target(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str
         "ref": _encode_ref(
             display=deps.display,
             platform=deps.platform,
+            scope=scope,
             revision=revision,
             element=element_key,
             pick=pick,
@@ -566,8 +637,14 @@ def _declared_operation(
 
 
 def _observe(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str, Any]:
-    snapshot = _snapshot(deps)
-    revision = _snapshot_revision(snapshot)
+    scope = args.scope
+    snapshot = _snapshot(deps, scope=scope)
+    revision = _snapshot_revision(snapshot, scope=scope)
+    expected_scope_elements = (
+        list(_scope_expected_elements(deps.platform, scope))
+        if scope != "base"
+        else []
+    )
     cfg = _platform_config(deps.display)
     mapped: list[dict[str, Any]] = []
     for element_key in sorted(snapshot.mapped):
@@ -579,6 +656,7 @@ def _observe(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str, Any]:
                 ref = _encode_ref(
                     display=deps.display,
                     platform=deps.platform,
+                    scope=scope,
                     revision=revision,
                     element=element_key,
                     pick=pick,
@@ -629,6 +707,8 @@ def _observe(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str, Any]:
     return {
         "platform": deps.platform,
         "surface": "browser",
+        "scope": scope,
+        "scope_expected_elements": expected_scope_elements,
         "snapshot_revision": revision,
         "current_url": snapshot.url,
         "fresh_url": fresh_url,
@@ -1032,6 +1112,7 @@ def _parser() -> argparse.ArgumentParser:
 
     observe = commands.add_parser("observe")
     _add_display(observe)
+    observe.add_argument("--scope", choices=OBSERVE_SCOPES, default="base")
 
     for action in ("click", "focus", "activate", "hover", "operate"):
         target = commands.add_parser(action)
