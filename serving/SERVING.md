@@ -167,6 +167,26 @@ than a habit — a habit is what lapses at 2am.
 # completion, and only then are the consumers restarted. Config comes from serving/fleet.env.
 ./serving/promote_model.sh node1 <checkpoint-dir-name>
 
+# PLAN A BOUNDED THOR ROLLING RELEASE. This signed planner requires an attributable Hub
+# receipt, immutable taey+ep3 aliases, a declared rollback artifact, and full SHA-256 values.
+# It performs no SSH, service, bake, release-filesystem, or cleanup action; a valid plan only
+# records its receipt ID in the local anti-replay ledger.
+python3 serving/rolling_thor_release.py \
+  --fleet-env serving/fleet.env \
+  --hub-decision-receipt /secure/path/hub-decision.json \
+  --hub-decision-signature /secure/path/hub-decision.json.sig \
+  --allowed-signers /secure/pinned/taey-family.allowed-signers \
+  --receipt-consumption-ledger /secure/state/rolling-receipt-consumption.json \
+  --artifact-sha256 <64-lowercase-hex> \
+  --rollback-artifact-sha256 <64-lowercase-hex> \
+  --candidate-source /srv/taey/incoming/<candidate-input> \
+  --staging-node node2 \
+  --bake-command '<approved bake command writing $TAEY_RELEASE_STAGING>' \
+  --verify-command 'python3 /srv/taey/checkout/serving/verify_servable_artifact.py --candidate "$TAEY_RELEASE_STAGING" --reference "$TAEY_RELEASE_REFERENCE"'
+
+# --apply is intentionally disabled. It always refuses before reading or consuming a receipt.
+# No live rolling-release executor is shipped by this repository revision.
+
 # THE STANDING DRIFT GATE. Run it after any serving change, and on a schedule.
 ./serving/promote_model.sh --check            # served-root agreement; fast, mutates nothing
 ./serving/promote_model.sh --check-content    # also compares per-file manifests; reads every byte
@@ -183,25 +203,125 @@ than a habit — a habit is what lapses at 2am.
   --model <new-id>
 ```
 
-**The three tools compose; none replaces another.** `deploy_thor.sh` installs the stack and swaps
-the artifact on ONE node. `promote_model.sh` makes BOTH nodes hold and serve the same checkpoint,
-and is the only step that verifies content rather than paths. `promote_main_model.sh` points the
-UI-facing proxy at an endpoint that is already serving correctly. A release runs them in that order;
-skipping the middle one is how two nodes end up answering to one alias over different weights.
+**The tools have distinct scopes; none silently replaces another.** `deploy_thor.sh` installs the
+stack and swaps an artifact on ONE node. `promote_model.sh` is the established direct-copy path
+that makes BOTH nodes hold and serve the same checkpoint. `rolling_thor_release.py` is a signed,
+replay-protected planner for the bounded release contract; it is not a live release path in this
+revision. `promote_main_model.sh` points the UI-facing proxy at an endpoint that is already serving
+correctly. Do not mix existing tool mutations in one window.
 
-**Why the maintenance window is not optional.** The proxies have no admission control — there is no
-way to tell one "stop accepting turns" — so an instantaneous zero-open-turns poll proves nothing: a
-turn can be admitted immediately after it. `promote_model.sh` therefore STOPS the consumers pinned
-to a node before restarting it, and requires you to declare which units those are (the literal
-`none` is accepted, so the declaration is explicit rather than forgotten). Sequencing one node at a
-time bounds the blast radius; it does NOT preserve availability, because each proxy is pinned to a
-node and that node's route is down while it reloads.
+### Bounded rolling Thor release
 
-**Served id vs weights.** The served name is a stable alias chosen at launch, which is exactly why
-it is useless as evidence of what is loaded — it stays constant when the weights change. Read the
-`root` field of `/v1/models`, or `journalctl -u taey-ep3 | grep 'Serving model:'`. Two nodes
-answering to one id over two different weight sets is the failure to avoid; one id across nodes
-serving the SAME weights is correct and is what a promotion produces.
+`rolling_thor_release.py` is intentionally separate from `promote_model.sh`: the latter remains
+the established direct-copy promotion tool. The rolling tool currently ships only the stricter
+**signed planner**; it performs no SSH, `systemctl`, bake, transfer, release-pointer, remote-lock,
+or cleanup action. Its only mutation is recording an accepted receipt ID in its local anti-replay
+ledger. `--apply` is retained only for a fail-closed compatibility error and always refuses.
+
+The decision authority is the canonical shared-training JSON `hub_decision_receipt` produced through
+**The Hub** by an attributable `taey` or `family-chat` actor. A user is not an approver. The exact
+v1 envelope is:
+
+```json
+{
+  "schema_version": 1,
+  "receipt_id": "hub-decision-...",
+  "campaign_id": "thor-rolling-release",
+  "campaign_spec_sha256": "<64-character lowercase SHA-256>",
+  "transition": "promote",
+  "decision": "approved",
+  "authority": {
+    "surface": "the-hub",
+    "actor_type": "taey",
+    "actor_id": "taey-release-router",
+    "signer_identity": "taey-release-router",
+    "signature_namespace": "taey-release",
+    "trust_policy_sha256": "<64-character lowercase SHA-256 of allowed-signers>"
+  },
+  "authorization_plane": "taey-family-chats",
+  "issued_at": "2026-08-19T17:54:00Z",
+  "evidence": [{
+    "repository_commit": "<40-or-64-hex commit>",
+    "receipt_sha256": "<64-hex SHA-256>"
+  }],
+  "subject": {
+    "artifact_sha256": "<full 64-character lowercase SHA-256>",
+    "rollback_artifact_sha256": "<full 64-character lowercase SHA-256>",
+    "consumer_aliases": ["taey", "ep3"]
+  }
+}
+```
+
+The root, six-field `authority`, every `evidence` entry, and `subject` have exact required fields;
+no custom receipt translation, decision ID, `approved` boolean, or action literal is accepted. The
+planner parses only the authority fields needed to verify the detached OpenSSH signature, then runs
+`ssh-keygen -Y verify` using the signed `signer_identity` and canonical `taey-release` namespace.
+It calculates the complete SHA-256 of `--allowed-signers` and requires it to equal signed
+`authority.trust_policy_sha256`; it does not trust or consume any other receipt field before the
+signature passes. It enforces a 15-minute issuance window by default and atomically consumes
+`receipt_id` in the configured local ledger after validation, so retain the plan output and use a
+fresh receipt for a later plan. The emitted JSON preserves `campaign_id`,
+`campaign_spec_sha256`, `transition`, `hub_decision_receipt_sha256`, `artifact_sha256`,
+`rollback_artifact_sha256`, and `consumer_aliases` for a terminal collector.
+
+Candidate and rollback identifiers are full SHA-256 values—never short prefixes or checkpoint
+names. The receipt and `TAEY_SERVED_NAME` must retain exactly the stable client aliases **`taey`**
+and **`ep3`**, in that order. A version-specific alias is refused rather than treated as a release
+identifier.
+
+A future executor must use the following release layout under each configured
+`TAEY_NODE*_MODELS` directory:
+
+```text
+.taey-release/
+  releases/<full-artifact-sha256>/     # immutable retained artifact
+  staging/<full-artifact-sha256>/      # active candidate only
+  current -> releases/<full-artifact-sha256>
+  previous -> releases/<full-artifact-sha256>
+```
+
+`current` and `previous` must be relative symlinks replaced atomically, never edited in place. A
+future executor must validate both pointers, require that `current` is the declared rollback
+artifact on both nodes, and read the full content digest through it before stopping anything. The
+serve unit on each node must be configured once with
+`TAEY_MODEL_PATH=<TAEY_NODE*_MODELS>/.taey-release/current`,
+`TAEY_SERVED_NAME="taey ep3"`, and no `TAEY_LORA_PATH`; the tool must check that exact model-path
+contract before it stops a unit. `vllm_serve.sh` then mounts `.taey-release` and exposes the stable
+container path `/models/current` (override with `TAEY_CONTAINER_MODELS_ROOT` only if the image mount
+differs), so clients retain their aliases while the pointer changes. A fleet without these pointers
+is not implicitly migrated: bootstrap the immutable release directories, pointers, and serve drop-in
+during a separately reviewed maintenance window.
+
+The planner emits the following **required design sequence**; it does not perform it:
+
+1. One chosen staging Thor's declared pinned consumers are stopped and proven quiesced; its vLLM
+   unit is then stopped. The other Thor keeps serving the verified rollback/current artifact.
+2. Only with that vLLM stopped, the supplied bake hook writes the active staging directory, then
+   the supplied independent verification hook runs. This prohibition is deliberate: vLLM holds
+   about 92% of Thor UMA, so a same-node concurrent bake/merge OOMs.
+3. The staging artifact's complete per-file manifest is reduced to its full SHA-256 and must match
+   the Hub receipt. After it is byte-verified, staging is moved into its immutable `releases/`
+   directory before `current` changes or a service starts. The first Thor is then promoted,
+   restarted, checked under both aliases, content-checked again, and its consumers are restored.
+4. That verified release tree is copied node-to-node to the second Thor while it still serves
+   current. Only then is the second Thor quiesced, stopped, promoted, restarted, alias/generation
+   checked, content-checked, and restored.
+5. Both nodes are content-verified through `current` before cleanup. Successful finalization sets
+   `previous` to the pre-release current/declared rollback artifact—not the older previous pointer.
+   Retention is exactly **current + immediate previous + active staging**. Cleanup never runs
+   before both-node verification.
+
+Any future executor must use a controller lock plus atomically owned remote locks on both nodes
+before mutable preflight; bind every consumer action to an explicit configured host/controller; and
+prove the standby rollback node using node-local HTTP catalogue and generation checks invoked through
+that node's SSH session. It must reject all symlinks and special files in an artifact, verify that
+release roots/parents are real directories contained beneath the canonical model root, and use the
+same manifest digest semantics locally and remotely. On a failed bake, verification, copy, or serve
+gate, it must stop, restart, and reverify every node that may have served the candidate after
+repointing it to the declared rollback artifact, then delete **only the exact active staging
+directory**. It must not run general retention cleanup on a failed release. A rollback target,
+consumer declaration (use literal `none` only when true), digest, or valid signed Hub receipt missing
+at preflight is a refusal, not an interactive prompt.
 
 **Before any restart of a node carrying traffic:**
 ```bash
