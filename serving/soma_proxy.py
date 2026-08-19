@@ -1530,6 +1530,20 @@ _DRIVE_ACTIONS = {
 _DRIVE_MUTATIONS = {
     "click", "focus", "activate", "hover", "operate", "navigate", "type", "paste", "key", "focus_dialog",
 }
+_DRIVE_ACTION_ARGUMENTS = {
+    "observe": frozenset({"display", "action", "scope"}),
+    "click": frozenset({"display", "action", "ref"}),
+    "focus": frozenset({"display", "action", "ref"}),
+    "activate": frozenset({"display", "action", "ref"}),
+    "hover": frozenset({"display", "action", "ref"}),
+    "operate": frozenset({"display", "action", "ref"}),
+    "navigate": frozenset({"display", "action", "url"}),
+    "type": frozenset({"display", "action", "text"}),
+    "paste": frozenset({"display", "action", "text", "text_file"}),
+    "key": frozenset({"display", "action", "key"}),
+    "read_clipboard": frozenset({"display", "action", "output_file"}),
+    "focus_dialog": frozenset({"display", "action"}),
+}
 
 
 # ---------------------------------------------------------------------------
@@ -1674,6 +1688,20 @@ def _do_drive_chat(arguments: dict) -> str:
         }
         return _json.dumps(payload)
 
+    def _argument_refusal(msg: str) -> str:
+        if action in _DRIVE_MUTATIONS:
+            return _terminal_refusal(msg)
+        return _err(display, action, msg)
+
+    unexpected_arguments = sorted(
+        set(arguments) - _DRIVE_ACTION_ARGUMENTS[action]
+    )
+    if unexpected_arguments:
+        return _argument_refusal(
+            f"{action} received unsupported argument(s) {unexpected_arguments}; "
+            f"accepted arguments are {sorted(_DRIVE_ACTION_ARGUMENTS[action])}"
+        )
+
     expected_revision = ""
     if action in _DRIVE_MUTATIONS:
         terminal = sequence.get("terminal")
@@ -1699,11 +1727,6 @@ def _do_drive_chat(arguments: dict) -> str:
                 return _terminal_refusal(
                     "preceding observe did not provide a valid browser snapshot revision"
                 )
-
-    def _argument_refusal(msg: str) -> str:
-        if action in _DRIVE_MUTATIONS:
-            return _terminal_refusal(msg)
-        return _err(display, action, msg)
 
     lease_owner = f"taey-drive:{seat_id}:{process_generation}"
     drive_env = dict(os.environ)
