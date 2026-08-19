@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "receipt_id": "hub-promote-cpt-prod-v4",
+  "campaign_id": "cpt-prod-v4",
+  "campaign_spec_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "transition": "promote",
+  "decision": "approved",
+  "authority": {
+    "surface": "the-hub",
+    "actor_type": "taey",
+    "actor_id": "taey-release-router",
+    "signer_identity": "taey-release-router",
+    "signature_namespace": "taey-release",
+    "trust_policy_sha256": "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+  },
+  "authorization_plane": "taey-family-chats",
+  "issued_at": "2026-08-19T14:07:00Z",
+  "evidence": [
+    {
+      "repository_commit": "0123456789abcdef0123456789abcdef01234567",
+      "receipt_sha256": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+    }
+  ],
+  "subject": {
+    "artifact_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+    "rollback_artifact_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+    "consumer_aliases": [
+      "taey",
+      "ep3"
+    ]
+  }
+}
