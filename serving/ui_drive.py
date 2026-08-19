@@ -33,7 +33,11 @@ try:
     from consultation_v2.platforms_runtime import display_environment
     from consultation_v2.planner import selection_path_operation
     from consultation_v2.runtime import ConsultationRuntime
-    from consultation_v2.snapshot import build_menu_snapshot, build_snapshot
+    from consultation_v2.snapshot import (
+        build_app_root_snapshot,
+        build_menu_snapshot,
+        build_snapshot,
+    )
     from consultation_v2.types import ElementRef, Snapshot
     from consultation_v2.yaml_contract import CHAT_PLATFORMS, load_platform_yaml
 except ImportError as exc:  # fail LOUD and actionable, never a bare traceback
@@ -66,7 +70,7 @@ if LOCK_TTL_DEFAULT < _MONITOR_TTL_DEFAULT:
 
 
 REF_PREFIX = "atspi3."
-OBSERVE_SCOPES = ("base", "menu_snapshot")
+OBSERVE_SCOPES = ("base", "menu_snapshot", "app_root_snapshot")
 _LEASE_OWNER_RE = re.compile(r"taey-drive:[A-Za-z0-9._-]{1,64}:[0-9a-f]{32}")
 _PROCESS_GENERATION_RE = re.compile(r"[0-9a-f]{32}")
 _TRACE_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,159}")
@@ -297,12 +301,25 @@ def _snapshot(deps: SimpleNamespace, *, scope: str = "base") -> Snapshot:
         "base": build_snapshot,
         "menu_snapshot": build_menu_snapshot,
     }
-    builder = builders.get(scope)
-    if builder is None:
-        raise UiDriveError(
-            f"unsupported observation scope {scope!r}; expected one of {list(OBSERVE_SCOPES)}"
-        )
-    _firefox, _document, snapshot = builder(deps.platform)
+    if scope == "app_root_snapshot":
+        expected = _scope_expected_elements(deps.platform, scope)
+        snapshot = build_app_root_snapshot(deps.platform)
+        snapshot.mapped = {
+            key: list(snapshot.mapped.get(key) or [])
+            for key in expected
+            if snapshot.mapped.get(key)
+        }
+        snapshot.unknown = []
+        snapshot.sidebar = []
+        snapshot.menu_items = []
+    else:
+        builder = builders.get(scope)
+        if builder is None:
+            raise UiDriveError(
+                f"unsupported observation scope {scope!r}; expected one of "
+                f"{list(OBSERVE_SCOPES)}"
+            )
+        _firefox, _document, snapshot = builder(deps.platform)
     if snapshot.platform != deps.platform:
         raise UiDriveError(
             f"snapshot platform {snapshot.platform!r} does not match bound {deps.platform!r}"
