@@ -31,7 +31,10 @@ if TAEYS_HANDS not in sys.path:
 try:
     from consultation_v2.platforms import routing as platform_routing
     from consultation_v2.platforms_runtime import display_environment
-    from consultation_v2.planner import selection_path_operation
+    from consultation_v2.planner import (
+        selection_path_operation,
+        selection_trigger_operation,
+    )
     from consultation_v2.runtime import ConsultationRuntime
     from consultation_v2.snapshot import (
         build_app_root_snapshot,
@@ -627,17 +630,35 @@ def _declared_operation(
                 f"{platform} manual element_operation must return a mapping or null"
             )
 
-    action = selection_path_operation(platform, element_key)
-    if manual_declared is not None and action is not None:
-        if action not in (manual_declared.get("primitives") or []):
+    trigger_declared = selection_trigger_operation(
+        platform,
+        element_key,
+        states,
+    )
+    if manual_declared is not None and trigger_declared is not None:
+        comparable = ("method", "primitives", "allowed_now")
+        mismatches = [
+            field
+            for field in comparable
+            if manual_declared.get(field) != trigger_declared.get(field)
+        ]
+        if mismatches:
             raise UiDriveError(
-                f"{platform} element {element_key!r} conflicts between manual "
-                f"operation {manual_declared.get('method')!r} and YAML selection "
+                f"{platform} element {element_key!r} conflicts between "
+                f"platform-manual and YAML menu-open operations at {mismatches}"
+            )
+    declared = manual_declared or trigger_declared
+    action = selection_path_operation(platform, element_key)
+    if declared is not None and action is not None:
+        if action not in (declared.get("primitives") or []):
+            raise UiDriveError(
+                f"{platform} element {element_key!r} conflicts between declared "
+                f"operation {declared.get('method')!r} and YAML selection "
                 f"path action {action!r}"
             )
-        return manual_declared
-    if manual_declared is not None:
-        return manual_declared
+        return declared
+    if declared is not None:
+        return declared
     if action is None:
         return None
     if action not in {"click", "hover"}:
