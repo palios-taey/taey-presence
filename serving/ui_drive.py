@@ -395,6 +395,24 @@ def _snapshot_at_expected_revision(
     return snapshot
 
 
+def _snapshot_for_key_or_type(
+    args: argparse.Namespace,
+    deps: SimpleNamespace,
+) -> Snapshot | None:
+    native_dialog_active = bool(getattr(args, "native_dialog_active", False))
+    if native_dialog_active:
+        if getattr(args, "expected_revision", None):
+            raise UiDriveError(
+                "native-dialog mutation must not also provide a browser snapshot revision"
+            )
+        if not _file_dialog_is_active(args.display):
+            raise UiDriveError(
+                "native file dialog is not the active X11 window; refusing key/type input"
+            )
+        return None
+    return _snapshot_at_expected_revision(args, deps)
+
+
 def _public_element(
     item: ElementRef,
     *,
@@ -894,11 +912,12 @@ def _type_text(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str, Any
     """
     if not args.text:
         raise UiDriveError("type text must not be empty")
-    snapshot = _snapshot_at_expected_revision(args, deps)
-    manual = _manual_ui_module(deps.platform)
-    validate_type = getattr(manual, "validate_type_action", None) if manual else None
-    if validate_type is not None:
-        validate_type(args.text, snapshot)
+    snapshot = _snapshot_for_key_or_type(args, deps)
+    if snapshot is not None:
+        manual = _manual_ui_module(deps.platform)
+        validate_type = getattr(manual, "validate_type_action", None) if manual else None
+        if validate_type is not None:
+            validate_type(args.text, snapshot)
     if not deps.input.type_text(args.text):
         raise UiDriveError("type_text returned false")
     return {"typed_chars": len(args.text)}
@@ -1005,13 +1024,14 @@ def _xdo_key(display: str, key: str) -> bool:
 def _key(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str, Any]:
     if not args.key:
         raise UiDriveError("key must not be empty")
-    snapshot = _snapshot_at_expected_revision(args, deps)
-    manual = _manual_ui_module(deps.platform)
-    validate_key = getattr(manual, "validate_key_action", None) if manual else None
-    if validate_key is not None:
-        validate_key(args.key, snapshot)
-    elif manual is not None and manual.key_requires_state(args.key):
-        manual.validate_key_state(args.key, snapshot)
+    snapshot = _snapshot_for_key_or_type(args, deps)
+    if snapshot is not None:
+        manual = _manual_ui_module(deps.platform)
+        validate_key = getattr(manual, "validate_key_action", None) if manual else None
+        if validate_key is not None:
+            validate_key(args.key, snapshot)
+        elif manual is not None and manual.key_requires_state(args.key):
+            manual.validate_key_state(args.key, snapshot)
     if not _xdo_key(args.display, args.key):
         raise UiDriveError(f"xdotool key --clearmodifiers {args.key} failed")
     return {"key": args.key, "clearmodifiers": True}
@@ -1143,6 +1163,19 @@ def _add_expected_revision(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_key_or_type_surface(parser: argparse.ArgumentParser) -> None:
+    surface = parser.add_mutually_exclusive_group(required=True)
+    surface.add_argument(
+        "--expected-revision",
+        help="snapshot revision returned by the preceding explicit browser observe",
+    )
+    surface.add_argument(
+        "--native-dialog-active",
+        action="store_true",
+        help="require the native file dialog to be the active X11 window",
+    )
+
+
 
 def _parser() -> argparse.ArgumentParser:
     parser = JsonArgumentParser(prog="ui_drive.py")
@@ -1159,7 +1192,7 @@ def _parser() -> argparse.ArgumentParser:
 
     type_parser = commands.add_parser("type")
     _add_display(type_parser)
-    _add_expected_revision(type_parser)
+    _add_key_or_type_surface(type_parser)
     type_parser.add_argument("--text", required=True)
 
     paste = commands.add_parser("paste")
@@ -1174,7 +1207,7 @@ def _parser() -> argparse.ArgumentParser:
 
     key = commands.add_parser("key")
     _add_display(key)
-    _add_expected_revision(key)
+    _add_key_or_type_surface(key)
     key.add_argument("--key", required=True)
 
     navigate = commands.add_parser("navigate")

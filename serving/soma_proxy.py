@@ -1703,6 +1703,7 @@ def _do_drive_chat(arguments: dict) -> str:
         )
 
     expected_revision = ""
+    native_dialog_token = False
     if action in _DRIVE_MUTATIONS:
         terminal = sequence.get("terminal")
         if isinstance(terminal, dict):
@@ -1711,6 +1712,8 @@ def _do_drive_chat(arguments: dict) -> str:
             )
         if action == "navigate":
             observations.pop(display, None)
+        elif action == "focus_dialog":
+            observations.pop(display, None)
         else:
             observed = observations.pop(display, None)
             if not isinstance(observed, dict):
@@ -1718,15 +1721,22 @@ def _do_drive_chat(arguments: dict) -> str:
                     "UI mutation requires an explicit fresh observe on this display"
                 )
             observed_round = observed.get("tool_round")
-            expected_revision = str(observed.get("snapshot_revision") or "")
             if not isinstance(observed_round, int) or observed_round >= tool_round:
                 return _terminal_refusal(
                     "UI mutation requires an observe result seen in an earlier model round"
                 )
-            if not re.fullmatch(r"[0-9a-f]{64}", expected_revision):
-                return _terminal_refusal(
-                    "preceding observe did not provide a valid browser snapshot revision"
-                )
+            if observed.get("surface") == "native_dialog":
+                if action not in {"key", "type"}:
+                    return _terminal_refusal(
+                        "native-dialog verification permits only one key or type primitive"
+                    )
+                native_dialog_token = True
+            else:
+                expected_revision = str(observed.get("snapshot_revision") or "")
+                if not re.fullmatch(r"[0-9a-f]{64}", expected_revision):
+                    return _terminal_refusal(
+                        "preceding observe did not provide a valid browser snapshot revision"
+                    )
 
     lease_owner = f"taey-drive:{seat_id}:{process_generation}"
     drive_env = dict(os.environ)
@@ -1795,13 +1805,19 @@ def _do_drive_chat(arguments: dict) -> str:
                 f"{action} requires non-empty 'text'"
                 + (" or 'text_file'" if action == "paste" else "")
             )
-        cmd += ["--expected-revision", expected_revision]
+        if action == "type" and native_dialog_token:
+            cmd += ["--native-dialog-active"]
+        else:
+            cmd += ["--expected-revision", expected_revision]
     elif action == "key":
         key = arguments.get("key")
         if not key:
             return _argument_refusal("key requires a key name, e.g. Return")
         cmd += ["--key", str(key)]
-        cmd += ["--expected-revision", expected_revision]
+        if native_dialog_token:
+            cmd += ["--native-dialog-active"]
+        else:
+            cmd += ["--expected-revision", expected_revision]
     elif action == "navigate":
         url = arguments.get("url")
         if not isinstance(url, str) or not url:
@@ -1859,6 +1875,18 @@ def _do_drive_chat(arguments: dict) -> str:
                             "tool_round": tool_round,
                             "mutation_token_issued": True,
                         }
+                elif action == "focus_dialog":
+                    observations[display] = {
+                        "surface": "native_dialog",
+                        "snapshot_scope": "native_dialog",
+                        "tool_round": tool_round,
+                    }
+                    payload["ui_sequence"] = {
+                        "state": "native_dialog_observed",
+                        "snapshot_scope": "native_dialog",
+                        "tool_round": tool_round,
+                        "mutation_token_issued": True,
+                    }
                 elif action in _DRIVE_MUTATIONS:
                     payload["ui_sequence"] = {
                         "state": "mutation_complete",
@@ -1866,6 +1894,8 @@ def _do_drive_chat(arguments: dict) -> str:
                     }
                     if expected_revision:
                         payload["ui_sequence"]["consumed_snapshot_revision"] = expected_revision
+                    if native_dialog_token:
+                        payload["ui_sequence"]["consumed_snapshot_scope"] = "native_dialog"
                 return _json.dumps(payload)
             if action in _DRIVE_MUTATIONS:
                 detail = (
