@@ -562,24 +562,58 @@ def _element_action(
     declared = _declared_operation(
         deps.platform, row["element"], row
     )
-    if declared is not None and action not in declared["allowed_now"]:
+    if action == "operate":
+        if declared is None:
+            raise UiDriveError(
+                f"{row['element']} has no YAML-declared operation; use one exact "
+                "direct primitive"
+            )
+        allowed_now = declared.get("allowed_now")
+        if not isinstance(allowed_now, list) or len(allowed_now) != 1:
+            raise UiDriveError(
+                f"{row['element']} YAML operation is not singular in the fresh "
+                f"state (allowed_now={allowed_now!r})"
+            )
+        performed_primitive = allowed_now[0]
+    else:
+        if declared is not None:
+            raise UiDriveError(
+                f"{row['element']} has YAML-declared operation "
+                f"{declared['method']!r}; use operate with this exact ref"
+            )
+        performed_primitive = action
+    if not isinstance(performed_primitive, str) or not performed_primitive:
         raise UiDriveError(
-            f"{row['element']} YAML declares {declared['method']}; "
-            f"{action!r} is not allowed in the fresh state "
-            f"(allowed_now={declared['allowed_now']})"
+            f"{row['element']} YAML operation must be a non-empty string"
         )
-    primitive = {
-        "click": deps.interact.atspi_click,
-        "focus": deps.interact.atspi_focus,
-        "activate": deps.interact.atspi_activate,
-        "hover": lambda element: deps.input.hover(
-            int(element["x"]), int(element["y"])
-        ) if element.get("x") is not None and element.get("y") is not None else False,
-    }[action]
-    if not primitive(row):
-        raise UiDriveError(f"{action} primitive returned false")
+    if performed_primitive == "click":
+        performed = deps.interact.atspi_click(row)
+    elif performed_primitive == "focus":
+        performed = deps.interact.atspi_focus(row)
+    elif performed_primitive == "activate":
+        performed = deps.interact.atspi_activate(row)
+    elif performed_primitive == "hover":
+        performed = (
+            deps.input.hover(int(row["x"]), int(row["y"]))
+            if row.get("x") is not None and row.get("y") is not None
+            else False
+        )
+    elif performed_primitive.startswith("key:"):
+        key = performed_primitive.partition(":")[2]
+        performed = bool(key) and _xdo_key(deps.display, key)
+    elif performed_primitive.startswith("paste:"):
+        text = performed_primitive.partition(":")[2]
+        performed = bool(text) and deps.input.clipboard_paste(text)
+    else:
+        raise UiDriveError(
+            f"{row['element']} YAML operation {performed_primitive!r} has no "
+            "drive_chat primitive"
+        )
+    if not performed:
+        raise UiDriveError(f"{performed_primitive} primitive returned false")
     return {
         "performed": True,
+        "performed_primitive": performed_primitive,
         "element": {
             "category": "mapped",
             "element": row["element"],
@@ -872,7 +906,7 @@ def _parser() -> argparse.ArgumentParser:
     observe = commands.add_parser("observe")
     _add_display(observe)
 
-    for action in ("click", "focus", "activate", "hover"):
+    for action in ("click", "focus", "activate", "hover", "operate"):
         target = commands.add_parser(action)
         _add_display(target)
         _add_target(target)
@@ -922,7 +956,7 @@ def _parser() -> argparse.ArgumentParser:
 # Display mutations and clipboard extraction must hold the per-display lease. Observe remains
 # read-only: it reports lease state without creating, renewing, or transferring ownership.
 _LOCK_ACTION_OPS = {
-    "click", "focus", "activate", "hover", "type", "paste", "key",
+    "click", "focus", "activate", "hover", "operate", "type", "paste", "key",
     "focus-dialog", "read-clipboard", "extract",
 }
 
@@ -1129,7 +1163,7 @@ def _dispatch(args: argparse.Namespace, deps: SimpleNamespace) -> Any:
         lease_receipt = _guard_action(deps.display, lease, LOCK_TTL_DEFAULT)
     if args.action == "extract":
         result = _extract_response(args, deps)
-    elif args.action in {"click", "focus", "activate", "hover"}:
+    elif args.action in {"click", "focus", "activate", "hover", "operate"}:
         result = _element_action(args.action, args, deps)
     elif args.action == "type":
         result = _type_text(args, deps)

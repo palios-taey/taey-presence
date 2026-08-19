@@ -897,16 +897,19 @@ TOOLS = [
                     "action": {
                         "type": "string",
                         "enum": ["observe", "click", "type", "paste", "key",
-                                 "read_clipboard", "focus", "activate", "hover",
+                                 "read_clipboard", "focus", "activate", "hover", "operate",
                                  "focus_dialog"],
                         "description": (
-                            "the single action to perform; focus_dialog activates and verifies an "
+                            "the single action to perform; operate executes the one operation "
+                            "declared by platform YAML for the chosen revision-bound ref; direct "
+                            "click/focus/activate/hover are only for refs with no declaration; "
+                            "focus_dialog activates and verifies an "
                             "already-open native GTK file chooser so subsequent primitives address "
                             "that X11 window instead of the browser"
                         ),
                     },
                     "ref": {"type": "string",
-                            "description": "revision-bound element ref from the immediately preceding fresh observe; required for click/focus/activate/hover"},
+                            "description": "revision-bound element ref from the immediately preceding fresh observe; required for click/focus/activate/hover/operate"},
                     "text": {"type": "string", "description": "text to type or paste (use for SHORT input; for a large packet use text_file instead so you don't regenerate every character)"},
                     "text_file": {"type": "string", "description": "absolute path to a file whose EXACT bytes are pasted (paste action only). Prefer this for any large/verbatim content — pass the path, not the content; the tool reads and pastes it. Instant and byte-perfect."},
                     "output_file": {"type": "string", "description": "absolute destination path for read_clipboard; the file must not already exist"},
@@ -1452,11 +1455,11 @@ CHAT_DISPLAYS = tuple(
 _PASTE_INLINE_MAX_CHARS = int(os.environ.get("TAEY_PASTE_INLINE_MAX_CHARS", "800"))
 
 _DRIVE_ACTIONS = {
-    "observe", "click", "focus", "activate", "hover", "type", "paste", "key",
+    "observe", "click", "focus", "activate", "hover", "operate", "type", "paste", "key",
     "read_clipboard", "focus_dialog",
 }
 _DRIVE_MUTATIONS = {
-    "click", "focus", "activate", "hover", "type", "paste", "key", "focus_dialog",
+    "click", "focus", "activate", "hover", "operate", "type", "paste", "key", "focus_dialog",
 }
 
 
@@ -1644,7 +1647,7 @@ def _do_drive_chat(arguments: dict) -> str:
     cmd = [UI_DRIVE_PYTHON, UI_DRIVE_SCRIPT, sub, "--display", display]
     if output_file is not None:
         cmd += ["--output-file", output_file]
-    if action in ("click", "focus", "activate", "hover"):
+    if action in ("click", "focus", "activate", "hover", "operate"):
         ref = arguments.get("ref")
         if ref:
             cmd += ["--ref", str(ref)]
