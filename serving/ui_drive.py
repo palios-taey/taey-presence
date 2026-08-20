@@ -1300,10 +1300,19 @@ def _observe_lease(
                 "owned": False,
                 "expires_by_ttl": True,
             }
-        owned = record.get("owner_token") == lease.owner
+        owner_matches = record.get("owner_token") == lease.owner
+        turn_matches = record.get("last_turn_id") == lease.turn_id
+        owned = owner_matches and turn_matches
         return {
-            "state": "owned" if owned else "held_by_other",
+            "state": (
+                "owned"
+                if owned
+                else "same_generation_other_turn"
+                if owner_matches
+                else "held_by_other"
+            ),
             "owned": owned,
+            "turn_matches": turn_matches,
             "ttl_seconds": record.get("ttl_seconds"),
             "expires_by_ttl": True,
         }

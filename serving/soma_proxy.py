@@ -1568,59 +1568,83 @@ _DRIVE_ACTION_ARGUMENTS = {
 # notifies and records, it NEVER recovers or drives (that would be the banned
 # autonomous class).
 #
-# Contract: register at consult START, write last_seen on EVERY drive action
-# (age-since-start would false-flag a legitimately long consult; time-since-
-# last-action is the only non-false-flagging stall signal), deregister on
-# deliver. TTL backstop so a crashed driver cannot leak a record forever.
+# Contract: register only after a fresh canonical observation maps the YAML
+# Stop key and the exact observing turn owns the display lease. Pre-Send tree
+# scans can dismiss transient browser menus, so ordinary drive actions never
+# create a completion route. TTL is the crash-recovery backstop.
 # ---------------------------------------------------------------------------
 _MONITOR_TTL_SECS = int(os.environ.get("TAEY_CONSULT_MONITOR_TTL", "10800"))
-def _monitor_node() -> str:
-    return os.environ.get("TAEY_SESSION_NAME") or os.environ.get("SEAT_ID") or "taey"
+def _monitor_touch(
+    display: str,
+    platform: str,
+    action: str,
+    result: dict,
+    request_context: dict,
+) -> dict | None:
+    """Register one completion route after a canonical Stop-proven send."""
+    if action != "observe" or result.get("surface") != "browser":
+        return None
+    stop_keys = result.get("stop_keys")
+    mapped = result.get("mapped")
+    if not isinstance(stop_keys, list) or not isinstance(mapped, list):
+        return None
+    observed_stop_keys = sorted({
+        str(item.get("element"))
+        for item in mapped
+        if isinstance(item, dict) and item.get("element") in stop_keys
+    })
+    if not observed_stop_keys:
+        return None
+    lease = result.get("lease")
+    if not isinstance(lease, dict) or lease.get("owned") is not True:
+        raise RuntimeError("stop observation is not owned by this Taey turn")
 
+    client = _mira_redis or _redis
+    if client is None:
+        raise RuntimeError("Redis is unavailable")
+    requester = str(request_context.get("seat_id") or "")
+    turn_id = str(request_context.get("turn_id") or "")
+    process_generation = str(request_context.get("process_generation") or "")
+    if not requester or not turn_id or not process_generation:
+        raise RuntimeError("request-local turn identity is incomplete")
 
-def _monitor_touch(display: str, platform: str, action: str) -> None:
-    """Register-on-first-action, then write last_seen on every action.
-
-    Registration is AUTOMATIC rather than a step the driver must remember: a
-    monitor you can forget to start is a monitor that is not there the one time
-    it mattered. The record self-expires (TTL) so a crashed driver cannot leak
-    it, and the reader's stall signal is time-since-last_seen. Never raises: a
-    monitoring write must not break the action it is observing."""
-    try:
-        client = _mira_redis or _redis
-        if client is None:
-            return
-        node = _monitor_node()
-        setkey = f"taey:{node}:active_session_ids"
-        now = time.time()
-        found = False
-        for session_key in list(client.smembers(setkey) or []):
-            raw = client.get(session_key)
-            if not raw:
-                client.srem(setkey, session_key)
-                continue
-            rec = json.loads(raw)
-            if str(rec.get("display") or "") != display:
-                continue
-            rec["last_seen"] = now
-            rec["last_action"] = action
-            rec["platform"] = platform
-            client.set(session_key, json.dumps(rec), ex=_MONITOR_TTL_SECS)
-            found = True
-        if not found:
-            monitor_id = f"{node}-{display.lstrip(':')}-{int(now)}"
-            session_key = f"taey:{node}:active_session:{monitor_id}"
-            client.set(session_key, json.dumps({
-                "monitor_id": monitor_id, "display": display,
-                "platform": platform,
-                "requester": node, "mode": "supervised_step",
-                "timeout": _MONITOR_TTL_SECS,
-                "started_ts": now, "last_seen": now, "last_action": action,
-            }), ex=_MONITOR_TTL_SECS)
-            client.sadd(setkey, session_key)
-            log.info("consult monitor registered %s display=%s", monitor_id, display)
-    except Exception as exc:  # observation must never break execution
-        log.debug("monitor touch skipped: %s", exc)
+    monitor_id = f"{requester}-{display.lstrip(':')}-{turn_id}"
+    session_key = f"taey:{requester}:active_session:{monitor_id}"
+    set_key = f"taey:{requester}:active_session_ids"
+    now = time.time()
+    record = {
+        "monitor_id": monitor_id,
+        "display": display,
+        "platform": platform,
+        "requester": requester,
+        "mode": "supervised_manual",
+        "phase": "awaiting_completion",
+        "stop_proven": True,
+        "stop_keys": stop_keys,
+        "observed_stop_keys": observed_stop_keys,
+        "snapshot_revision": str(result.get("snapshot_revision") or ""),
+        "url": str(result.get("current_url") or ""),
+        "turn_id": turn_id,
+        "process_generation": process_generation,
+        "timeout": _MONITOR_TTL_SECS,
+        "started_ts": now,
+        "last_seen": now,
+        "last_action": "stop_proven_observe",
+    }
+    client.set(session_key, json.dumps(record), ex=_MONITOR_TTL_SECS)
+    client.sadd(set_key, session_key)
+    log.info(
+        "consult completion monitor registered %s display=%s stop_keys=%s",
+        monitor_id,
+        display,
+        observed_stop_keys,
+    )
+    return {
+        "state": "registered",
+        "monitor_id": monitor_id,
+        "requester": requester,
+        "observed_stop_keys": observed_stop_keys,
+    }
 
 
 def _do_drive_chat(arguments: dict) -> str:
@@ -1901,9 +1925,8 @@ def _do_drive_chat(arguments: dict) -> str:
                 and payload["platform"]
             )
             if succeeded:
-                _monitor_touch(display, payload["platform"], action)
+                result = payload.get("result") or {}
                 if action == "observe":
-                    result = payload.get("result") or {}
                     revision = str(result.get("snapshot_revision") or "")
                     if not re.fullmatch(r"[0-9a-f]{64}", revision):
                         return _terminal_refusal(
@@ -1926,6 +1949,21 @@ def _do_drive_chat(arguments: dict) -> str:
                                 f"expected {expected_surface!r} observation but received "
                                 f"{observed_surface!r}",
                             )
+                        try:
+                            monitor_receipt = _monitor_touch(
+                                display,
+                                payload["platform"],
+                                action,
+                                result,
+                                context,
+                            )
+                        except Exception as exc:
+                            return _terminal_refusal(
+                                "Stop-proven send could not register its completion "
+                                f"monitor: {type(exc).__name__}: {exc}"
+                            )
+                        if monitor_receipt is not None:
+                            result["completion_monitor"] = monitor_receipt
                         observations[display] = {
                             "surface": observed_surface,
                             "snapshot_revision": revision,
