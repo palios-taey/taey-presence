@@ -37,11 +37,12 @@ class DurableSeatTurnErrorTests(unittest.TestCase):
         )
         start = source.index("start_session() {")
         body = source[start : source.index("\n}", start)]
-        hold = body.index("/bin/sleep 2147483647")
-        harden = body.index("harden_session")
+        hold = body.index("new-session")
+        harden = body.index("remain-on-exit on")
         respawn = body.index("respawn_seat_pane")
         self.assertLess(hold, harden)
         self.assertLess(harden, respawn)
+        self.assertIn("\\;", body)
         preserve = source[
             source.index("preserve_dead_pane_evidence() {") : source.index(
                 "respawn_seat_pane() {"
@@ -146,21 +147,20 @@ class DurableSeatTurnErrorTests(unittest.TestCase):
                     "-d",
                     "-s",
                     session,
-                    "--",
-                    "/bin/sleep",
-                    "2147483647",
+                    "-c",
+                    "/tmp",
+                    ";",
+                    "set-option",
+                    "-t",
+                    session,
+                    "remain-on-exit",
+                    "on",
                 ],
                 check=True,
                 capture_output=True,
                 text=True,
             )
             del created
-            subprocess.run(
-                [tmux, "set-option", "-t", session, "remain-on-exit", "on"],
-                check=True,
-                capture_output=True,
-                text=True,
-            )
             subprocess.run(
                 [
                     tmux,

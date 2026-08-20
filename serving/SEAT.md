@@ -63,8 +63,8 @@ another's. Both of those show up in `seat_liveness.py` and neither shows up in a
 A live turn failing is not permission to destroy the seat. `taey_seat.py` logs a turn
 error to `$TAEY_SESSIONS_DIR/<session>.process.log` and keeps the stdin loop; a process-log
 write failure is printed explicitly and does not terminate that loop. The supervisor
-creates the named session with a holding process, sets `remain-on-exit` before launching
-the seat pane, records `#{pane_dead_status}` plus a pane capture under
+creates the named session as a holding shell and sets `remain-on-exit` in that same
+tmux client before launching the seat pane, records `#{pane_dead_status}` plus a pane capture under
 `$TAEY_SESSIONS_DIR/<session>/exit-evidence/` (tmux status/capture failures are fatal),
 and respawns the same pane. A missing session (external `kill-session`) is still fatal
 and distinct from a dead pane.

@@ -120,6 +120,10 @@ preserve_dead_pane_evidence() {
         fail "cannot read dead-pane status for $SESSION" || return
     [[ "$status" == *"dead="* && "$status" == *"status="* && "$status" == *"pid="* ]] ||
         fail "incomplete dead-pane status for $SESSION: $status" || return
+    if [[ "$status" == *"dead=1"* ]]; then
+        [[ "$status" == *"status="[0-9]* ]] ||
+            fail "dead pane missing pane_dead_status for $SESSION: $status" || return
+    fi
     printf '%s\n' "$status" > "$dir/$stamp.status" ||
         fail "cannot write status evidence $dir/$stamp.status" || return
     [[ -s "$dir/$stamp.status" ]] ||
@@ -153,9 +157,9 @@ recover_dead_pane() {
 }
 
 start_session() {
-    "$TMUX_BIN" new-session -d -s "$SESSION" -c "$ROOT" -- /bin/sleep 2147483647 ||
-        fail "cannot create holding session $SESSION" || return
-    harden_session || return
+    "$TMUX_BIN" new-session -d -s "$SESSION" -c "$ROOT" \; \
+        set-option -t "=$SESSION" remain-on-exit on ||
+        fail "cannot create hardened holding session $SESSION" || return
     respawn_seat_pane || return
 }
 
