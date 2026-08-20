@@ -103,7 +103,7 @@ harden_session() {
 
 read_pane_dead() {
     local dead
-    dead="$("$TMUX_BIN" display-message -t "=$SESSION" -p '#{pane_dead}')" ||
+    dead="$("$TMUX_BIN" display-message -t "$SESSION:0.0" -p '#{pane_dead}')" ||
         fail "cannot read pane_dead for $SESSION" || return
     [[ "$dead" == 0 || "$dead" == 1 ]] ||
         fail "pane_dead for $SESSION is not 0 or 1: $dead" || return
@@ -115,7 +115,7 @@ preserve_dead_pane_evidence() {
     dir="$SESSIONS_DIR/$SESSION/exit-evidence"
     mkdir -p "$dir" || fail "cannot create evidence dir $dir" || return
     stamp="$(date -u +%Y%m%dT%H%M%SZ)"
-    status="$("$TMUX_BIN" display-message -t "=$SESSION" -p \
+    status="$("$TMUX_BIN" display-message -t "$SESSION:0.0" -p \
         'dead=#{pane_dead} status=#{pane_dead_status} pid=#{pane_pid}')" ||
         fail "cannot read dead-pane status for $SESSION" || return
     [[ "$status" == *"dead="* && "$status" == *"status="* && "$status" == *"pid="* ]] ||
@@ -128,7 +128,7 @@ preserve_dead_pane_evidence() {
         fail "cannot write status evidence $dir/$stamp.status" || return
     [[ -s "$dir/$stamp.status" ]] ||
         fail "empty status evidence $dir/$stamp.status" || return
-    "$TMUX_BIN" capture-pane -t "=$SESSION" -p -S -500 \
+    "$TMUX_BIN" capture-pane -t "$SESSION:0.0" -p -S -500 \
         > "$dir/$stamp.capture" ||
         fail "cannot capture dead pane for $SESSION" || return
     [[ -f "$dir/$stamp.capture" ]] ||
@@ -137,7 +137,7 @@ preserve_dead_pane_evidence() {
 }
 
 respawn_seat_pane() {
-    "$TMUX_BIN" respawn-pane -k -t "=$SESSION" "$(seat_command)" ||
+    "$TMUX_BIN" respawn-pane -k -t "$SESSION:0.0" "$(seat_command)" ||
         fail "cannot respawn seat pane for $SESSION" || return
     for _ in {1..20}; do
         if validate_session 2>/dev/null; then
