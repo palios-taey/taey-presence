@@ -97,7 +97,7 @@ seat_command() {
 }
 
 harden_session() {
-    "$TMUX_BIN" set-option -t "=$SESSION" remain-on-exit on ||
+    "$TMUX_BIN" set-option -t "$SESSION" remain-on-exit on ||
         fail "cannot set remain-on-exit on $SESSION" || return
 }
 
@@ -158,7 +158,7 @@ recover_dead_pane() {
 
 start_session() {
     "$TMUX_BIN" new-session -d -s "$SESSION" -c "$ROOT" \; \
-        set-option -t "=$SESSION" remain-on-exit on ||
+        set-option -t "$SESSION" remain-on-exit on ||
         fail "cannot create hardened holding session $SESSION" || return
     respawn_seat_pane || return
 }
