@@ -1841,7 +1841,9 @@ def _do_drive_chat(arguments: dict) -> str:
         expected_surface = str(expected_surfaces.get(display) or "browser")
         if expected_surface not in {"browser", "native_dialog"}:
             return _terminal_refusal("invalid expected UI surface; refusing")
-        cmd += ["--surface", expected_surface, "--scope", scope]
+        cmd += ["--surface", expected_surface]
+        if expected_surface == "browser":
+            cmd += ["--scope", scope]
     if output_file is not None:
         cmd += ["--output-file", output_file]
     if action in ("click", "focus", "activate", "hover", "operate"):
