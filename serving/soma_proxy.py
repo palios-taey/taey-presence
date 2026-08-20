@@ -1632,20 +1632,7 @@ def _do_drive_chat(arguments: dict) -> str:
 
     display = str(arguments.get("display", "")).strip()
     action = str(arguments.get("action", "")).strip()
-    if display not in CHAT_DISPLAYS:
-        return _err(display, action,
-                    f"display not permitted; drive_chat is scoped to the Chat displays "
-                    f"{list(CHAT_DISPLAYS)} (:0 and non-chat displays are refused)")
-    if action not in _DRIVE_ACTIONS:
-        return _err(display, action,
-                    f"unknown action {action!r}; valid: {sorted(_DRIVE_ACTIONS)}")
     scope = arguments.get("scope")
-    if action == "observe":
-        scope = str(scope or "base")
-        if scope not in {"base", "menu_snapshot", "app_root_snapshot"}:
-            return _err(display, action, f"unsupported observation scope {scope!r}")
-    elif scope is not None:
-        return _err(display, action, "scope is valid only for observe")
 
     context = dict(_request_context.get())
     seat_id = str(context.get("seat_id") or "")
@@ -1689,6 +1676,14 @@ def _do_drive_chat(arguments: dict) -> str:
             }
             sequence["terminal"] = terminal
             observations.clear()
+        profile_state = context.get("_tool_profile_state")
+        if isinstance(profile_state, dict) and not isinstance(
+            profile_state.get("terminal"), dict
+        ):
+            profile_state["terminal"] = {
+                "tool": "drive_chat",
+                "reason": terminal["reason"],
+            }
         payload = {
             "ok": False,
             "action": action,
@@ -1704,9 +1699,30 @@ def _do_drive_chat(arguments: dict) -> str:
         return _json.dumps(payload)
 
     def _argument_refusal(msg: str) -> str:
-        if action in _DRIVE_MUTATIONS:
-            return _terminal_refusal(msg)
-        return _err(display, action, msg)
+        return _terminal_refusal(msg)
+
+    if isinstance(sequence.get("terminal"), dict):
+        return _terminal_refusal(
+            "a prior drive_chat failure ended this turn; all later UI calls are refused"
+        )
+
+    if display not in CHAT_DISPLAYS:
+        return _terminal_refusal(
+            f"display not permitted; drive_chat is scoped to the Chat displays "
+            f"{list(CHAT_DISPLAYS)} (:0 and non-chat displays are refused)"
+        )
+    if action not in _DRIVE_ACTIONS:
+        return _terminal_refusal(
+            f"unknown action {action!r}; valid: {sorted(_DRIVE_ACTIONS)}"
+        )
+    if action == "observe":
+        scope = str(scope or "base")
+        if scope not in {"base", "menu_snapshot", "app_root_snapshot"}:
+            return _terminal_refusal(
+                f"unsupported observation scope {scope!r}"
+            )
+    elif scope is not None:
+        return _terminal_refusal("scope is valid only for observe")
 
     unexpected_arguments = sorted(
         set(arguments) - _DRIVE_ACTION_ARGUMENTS[action]
@@ -1890,9 +1906,7 @@ def _do_drive_chat(arguments: dict) -> str:
                     result = payload.get("result") or {}
                     revision = str(result.get("snapshot_revision") or "")
                     if not re.fullmatch(r"[0-9a-f]{64}", revision):
-                        return _err(
-                            display,
-                            action,
+                        return _terminal_refusal(
                             "explicit observe returned no valid snapshot revision",
                         )
                     terminal = sequence.get("terminal")
@@ -1908,9 +1922,7 @@ def _do_drive_chat(arguments: dict) -> str:
                             expected_surfaces.get(display) or "browser"
                         )
                         if observed_surface != expected_surface:
-                            return _err(
-                                display,
-                                action,
+                            return _terminal_refusal(
                                 f"expected {expected_surface!r} observation but received "
                                 f"{observed_surface!r}",
                             )
@@ -1955,29 +1967,21 @@ def _do_drive_chat(arguments: dict) -> str:
                         payload["ui_sequence"]["consumed_snapshot_revision"] = native_dialog_revision
                         payload["ui_sequence"]["expected_next_surface"] = expected_surfaces[display]
                 return _json.dumps(payload)
-            if action in _DRIVE_MUTATIONS:
-                detail = (
-                    str(payload.get("error") or "")
-                    if isinstance(payload, dict)
-                    else f"ui_drive exit={r.returncode}; stderr={(r.stderr or '')[:300]}"
-                )
-                return _terminal_refusal(detail or "UI mutation failed")
-            return out  # ui_drive.py emits exactly one JSON object
+            detail = (
+                str(payload.get("error") or "")
+                if isinstance(payload, dict)
+                else f"ui_drive exit={r.returncode}; stderr={(r.stderr or '')[:300]}"
+            )
+            return _terminal_refusal(detail or "drive_chat failed")
         msg = f"ui_drive exit={r.returncode}, no output; stderr={(r.stderr or '')[:300]}"
-        if action in _DRIVE_MUTATIONS:
-            return _terminal_refusal(msg)
-        return _err(display, action, msg)
+        return _terminal_refusal(msg)
     except subprocess.TimeoutExpired:
         _audit("drive_chat", {"display": display, "action": action, "rc": "timeout"})
-        if action in _DRIVE_MUTATIONS:
-            return _terminal_refusal("drive_chat timed out after 90s")
-        return _err(display, action, "drive_chat timed out after 90s")
+        return _terminal_refusal("drive_chat timed out after 90s")
     except Exception as e:
         _audit("drive_chat", {"display": display, "action": action, "error": str(e)[:200]})
         msg = f"{type(e).__name__}: {e}"
-        if action in _DRIVE_MUTATIONS:
-            return _terminal_refusal(msg)
-        return _err(display, action, msg)
+        return _terminal_refusal(msg)
 
 
 def _do_list_dir(path: str, pattern: str = "") -> str:

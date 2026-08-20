@@ -279,7 +279,8 @@ def _platform_for_display(display: str) -> str:
 
 def _scope_expected_elements(platform: str, scope: str) -> tuple[str, ...]:
     cfg = load_platform_yaml(platform)
-    selection = ((cfg.get("workflow") or {}).get("selection") or {})
+    workflow = cfg.get("workflow") or {}
+    selection = workflow.get("selection") or {}
     menus = selection.get("menus") or {}
     expected: set[str] = set()
     if isinstance(menus, dict):
@@ -304,6 +305,11 @@ def _scope_expected_elements(platform: str, scope: str) -> tuple[str, ...]:
                     path_element = step.get("element")
                     if isinstance(path_element, str) and path_element:
                         expected.add(path_element)
+    attachment = workflow.get("attachment") or {}
+    if isinstance(attachment, dict) and attachment.get("scope") == scope:
+        menu_target = attachment.get("menu_target")
+        if isinstance(menu_target, str) and menu_target:
+            expected.add(menu_target)
     if not expected:
         raise UiDriveError(
             f"{platform} YAML does not declare observation scope {scope!r}"
