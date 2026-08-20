@@ -15,6 +15,12 @@ not listed here or linked from a listed index is not operating authority.
 `CLAUDE.md`, `AGENTS.md`, `presence-engine/docs/`, and the systemd READMEs govern repository maintenance and
 service installation. They do not replace the operating order above.
 
+## Design, not operating authority
+
+- `docs/READ_SCORER_CAPTURE_CONTRACT.md` — proposed `read-scorer` tool-profile capture
+  for Git/orchestration scorers on the live `/v1/chat/completions` loop. Not implemented.
+  Topology facts inside it are dated observations and must be re-measured before use.
+
 ## Dated evidence, not current authority
 
 - `serving/DEPLOYMENT_TOPOLOGY.md`
