@@ -165,8 +165,6 @@ _MANUAL_CHAT_UI_TOOL_PROFILE = "manual-chat-ui"
 _TOOL_PROFILE_ALLOWED: dict[str, frozenset[str] | None] = {
     _FULL_TOOL_PROFILE: None,
     _MANUAL_CHAT_UI_TOOL_PROFILE: frozenset({
-        "read_file",
-        "list_dir",
         "drive_chat",
     }),
 }
