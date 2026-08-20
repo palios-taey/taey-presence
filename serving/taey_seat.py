@@ -132,8 +132,15 @@ def _record_process_event(message: str) -> None:
             )
             handle.flush()
             os.fsync(handle.fileno())
-    except OSError:
-        pass
+    except OSError as exc:
+        notice = (
+            f"[taey-seat] PROCESS LOG WRITE FAILED: {type(exc).__name__}: {exc}"
+        )
+        print(notice, file=sys.stderr, flush=True)
+        print(
+            f"[taey-seat] process log write failed; seat remains: {exc}",
+            flush=True,
+        )
 
 
 class SeatFailure(RuntimeError):

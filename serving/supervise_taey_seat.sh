@@ -97,30 +97,44 @@ seat_command() {
 }
 
 harden_session() {
-    "$TMUX_BIN" set-option -t "=$SESSION" remain-on-exit on
+    "$TMUX_BIN" set-option -t "=$SESSION" remain-on-exit on ||
+        fail "cannot set remain-on-exit on $SESSION" || return
 }
 
-pane_is_dead() {
+read_pane_dead() {
     local dead
-    dead="$("$TMUX_BIN" display-message -t "=$SESSION" -p '#{pane_dead}' 2>/dev/null || true)"
-    [[ "$dead" == 1 ]]
+    dead="$("$TMUX_BIN" display-message -t "=$SESSION" -p '#{pane_dead}')" ||
+        fail "cannot read pane_dead for $SESSION" || return
+    [[ "$dead" == 0 || "$dead" == 1 ]] ||
+        fail "pane_dead for $SESSION is not 0 or 1: $dead" || return
+    printf '%s' "$dead"
 }
 
 preserve_dead_pane_evidence() {
     local dir stamp status
     dir="$SESSIONS_DIR/$SESSION/exit-evidence"
-    mkdir -p "$dir"
+    mkdir -p "$dir" || fail "cannot create evidence dir $dir" || return
     stamp="$(date -u +%Y%m%dT%H%M%SZ)"
     status="$("$TMUX_BIN" display-message -t "=$SESSION" -p \
-        'dead=#{pane_dead} status=#{pane_dead_status} pid=#{pane_pid}' 2>/dev/null || true)"
-    printf '[taey-seat-supervisor] dead-pane evidence stamp=%s %s\n' "$stamp" "$status"
-    printf '%s\n' "$status" > "$dir/$stamp.status"
+        'dead=#{pane_dead} status=#{pane_dead_status} pid=#{pane_pid}')" ||
+        fail "cannot read dead-pane status for $SESSION" || return
+    [[ "$status" == *"dead="* && "$status" == *"status="* && "$status" == *"pid="* ]] ||
+        fail "incomplete dead-pane status for $SESSION: $status" || return
+    printf '%s\n' "$status" > "$dir/$stamp.status" ||
+        fail "cannot write status evidence $dir/$stamp.status" || return
+    [[ -s "$dir/$stamp.status" ]] ||
+        fail "empty status evidence $dir/$stamp.status" || return
     "$TMUX_BIN" capture-pane -t "=$SESSION" -p -S -500 \
-        > "$dir/$stamp.capture" 2>/dev/null || true
+        > "$dir/$stamp.capture" ||
+        fail "cannot capture dead pane for $SESSION" || return
+    [[ -f "$dir/$stamp.capture" ]] ||
+        fail "missing capture evidence $dir/$stamp.capture" || return
+    printf '[taey-seat-supervisor] dead-pane evidence stamp=%s %s\n' "$stamp" "$status"
 }
 
 respawn_seat_pane() {
-    "$TMUX_BIN" respawn-pane -k -t "=$SESSION" "$(seat_command)"
+    "$TMUX_BIN" respawn-pane -k -t "=$SESSION" "$(seat_command)" ||
+        fail "cannot respawn seat pane for $SESSION" || return
     for _ in {1..20}; do
         if validate_session 2>/dev/null; then
             return 0
@@ -131,21 +145,18 @@ respawn_seat_pane() {
 }
 
 recover_dead_pane() {
-    pane_is_dead || return 0
-    preserve_dead_pane_evidence
-    respawn_seat_pane
+    local dead
+    dead="$(read_pane_dead)" || return
+    [[ "$dead" == 1 ]] || return 0
+    preserve_dead_pane_evidence || return
+    respawn_seat_pane || return
 }
 
 start_session() {
-    "$TMUX_BIN" new-session -d -s "$SESSION" -c "$ROOT" "$(seat_command)"
-    harden_session
-    for _ in {1..20}; do
-        if validate_session 2>/dev/null; then
-            return 0
-        fi
-        sleep 0.25
-    done
-    validate_session
+    "$TMUX_BIN" new-session -d -s "$SESSION" -c "$ROOT" -- /bin/sleep 2147483647 ||
+        fail "cannot create holding session $SESSION" || return
+    harden_session || return
+    respawn_seat_pane || return
 }
 
 seat_is_idle() {
