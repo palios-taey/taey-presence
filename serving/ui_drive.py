@@ -77,7 +77,9 @@ OBSERVE_SCOPES = ("base", "menu_snapshot", "app_root_snapshot")
 _LEASE_OWNER_RE = re.compile(r"taey-drive:[A-Za-z0-9._-]{1,64}:[0-9a-f]{32}")
 _PROCESS_GENERATION_RE = re.compile(r"[0-9a-f]{32}")
 _TRACE_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,159}")
-_DRIVE_GENERATION_FENCE_KEY = "taey:soma:drive_process_generation"
+_GENERATION_FENCE_KEY_RE = re.compile(
+    r"taey:soma:drive_process_generation:[A-Za-z0-9][A-Za-z0-9_-]{0,63}"
+)
 
 
 class UiDriveError(RuntimeError):
@@ -158,7 +160,12 @@ def _lease_context(*, required: bool = True) -> SimpleNamespace | None:
     seat_id = os.environ.get("TAEY_DRIVE_LEASE_SEAT", "")
     turn_id = os.environ.get("TAEY_DRIVE_LEASE_TURN", "")
     process_generation = os.environ.get("TAEY_DRIVE_LEASE_GENERATION", "")
-    if not any((owner, seat_id, turn_id, process_generation)) and not required:
+    generation_fence_key = os.environ.get(
+        "TAEY_DRIVE_GENERATION_FENCE_KEY", ""
+    )
+    if not any(
+        (owner, seat_id, turn_id, process_generation, generation_fence_key)
+    ) and not required:
         return None
     if not _LEASE_OWNER_RE.fullmatch(owner):
         raise UiDriveError("missing or invalid proxy-issued display lease owner")
@@ -168,6 +175,8 @@ def _lease_context(*, required: bool = True) -> SimpleNamespace | None:
         raise UiDriveError("missing or invalid proxy-issued display lease turn")
     if not _PROCESS_GENERATION_RE.fullmatch(process_generation):
         raise UiDriveError("missing or invalid proxy-issued process generation")
+    if not _GENERATION_FENCE_KEY_RE.fullmatch(generation_fence_key):
+        raise UiDriveError("missing or invalid proxy-issued generation fence key")
     expected_owner = f"taey-drive:{seat_id}:{process_generation}"
     if owner != expected_owner:
         raise UiDriveError("proxy-issued display lease identity is inconsistent")
@@ -176,6 +185,7 @@ def _lease_context(*, required: bool = True) -> SimpleNamespace | None:
         seat_id=seat_id,
         turn_id=turn_id,
         process_generation=process_generation,
+        generation_fence_key=generation_fence_key,
     )
 
 
@@ -1313,6 +1323,7 @@ if not raw_lock then
         owner_token=ARGV[2],
         seat_id=ARGV[3],
         last_turn_id=ARGV[4],
+        generation_fence_key=KEYS[2],
         actor_type='taey-drive_chat',
         holder_pid=tonumber(ARGV[6]),
         holder_starttime=ARGV[7],
@@ -1330,6 +1341,9 @@ local previous_owner = tostring(record['owner_token'] or '')
 if tostring(record['actor_type'] or '') ~= 'taey-drive_chat' then
     return {'refused_actor', previous_owner}
 end
+if tostring(record['generation_fence_key'] or '') ~= KEYS[2] then
+    return {'refused_other_process_namespace', previous_owner}
+end
 if tostring(record['seat_id'] or '') ~= ARGV[3] then
     return {'refused_other_seat', previous_owner}
 end
@@ -1338,6 +1352,7 @@ if previous_owner == ARGV[2] then
     record['last_turn_id'] = ARGV[4]
     record['holder_pid'] = tonumber(ARGV[6])
     record['holder_starttime'] = ARGV[7]
+    record['generation_fence_key'] = KEYS[2]
     redis.call('SET', KEYS[1], cjson.encode(record), 'EX', tonumber(ARGV[5]))
     return {'renewed', ''}
 end
@@ -1359,6 +1374,7 @@ record['previous_owner_token'] = previous_owner
 record['owner_token'] = ARGV[2]
 record['seat_id'] = ARGV[3]
 record['last_turn_id'] = ARGV[4]
+record['generation_fence_key'] = KEYS[2]
 record['actor_type'] = 'taey-drive_chat'
 record['holder_pid'] = tonumber(ARGV[6])
 record['holder_starttime'] = ARGV[7]
@@ -1391,7 +1407,7 @@ def _guard_action(
             _FENCED_DISPLAY_LEASE_LUA,
             4,
             _plan_lock_key(display),
-            _DRIVE_GENERATION_FENCE_KEY,
+            lease.generation_fence_key,
             f"taey:{lease.seat_id}:turn_context",
             f"taey:{lease.seat_id}:active_turns",
             lease.process_generation,
