@@ -1439,9 +1439,6 @@ end
 if tostring(record['generation_fence_key'] or '') ~= KEYS[2] then
     return {'refused_other_process_namespace', previous_owner}
 end
-if tostring(record['seat_id'] or '') ~= ARGV[3] then
-    return {'refused_other_seat', previous_owner}
-end
 
 if previous_owner == ARGV[2] then
     record['last_turn_id'] = ARGV[4]
@@ -1452,7 +1449,8 @@ if previous_owner == ARGV[2] then
     return {'renewed', ''}
 end
 
-local owner_prefix = 'taey-drive:' .. ARGV[3] .. ':'
+local previous_seat = tostring(record['seat_id'] or '')
+local owner_prefix = 'taey-drive:' .. previous_seat .. ':'
 if string.sub(previous_owner, 1, string.len(owner_prefix)) ~= owner_prefix then
     return {'refused_owner_shape', previous_owner}
 end
@@ -1462,10 +1460,14 @@ if string.len(previous_generation) ~= 32
     return {'refused_owner_shape', previous_owner}
 end
 if previous_generation == ARGV[1] then
+    if previous_seat ~= ARGV[3] then
+        return {'refused_other_seat', previous_owner}
+    end
     return {'refused_current_generation_owner', previous_owner}
 end
 
 record['previous_owner_token'] = previous_owner
+record['previous_seat_id'] = previous_seat
 record['owner_token'] = ARGV[2]
 record['seat_id'] = ARGV[3]
 record['last_turn_id'] = ARGV[4]
