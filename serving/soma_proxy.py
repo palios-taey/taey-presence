@@ -1671,6 +1671,9 @@ def _do_drive_chat(arguments: dict) -> str:
     observations = sequence.get("observations")
     if not isinstance(observations, dict):
         return _err(display, action, "invalid request-local observe/action state; refusing")
+    expected_surfaces = sequence.setdefault("expected_surfaces", {})
+    if not isinstance(expected_surfaces, dict):
+        return _err(display, action, "invalid request-local UI surface state; refusing")
     tool_round = context.get("tool_round")
     if not isinstance(tool_round, int) or tool_round < 1:
         return _err(display, action, "drive_chat requires a positive tool round; refusing")
@@ -1715,16 +1718,22 @@ def _do_drive_chat(arguments: dict) -> str:
         )
 
     expected_revision = ""
-    native_dialog_token = False
+    native_dialog_revision = ""
     if action in _DRIVE_MUTATIONS:
         terminal = sequence.get("terminal")
         if isinstance(terminal, dict):
             return _terminal_refusal(
                 "a prior UI mutation failed in this turn; further UI mutations are refused"
             )
+        expected_surface = str(expected_surfaces.get(display) or "browser")
+        if expected_surface == "native_dialog" and action not in {"key", "type"}:
+            return _terminal_refusal(
+                "native-dialog state requires a fresh canonical native observe followed "
+                "by exactly one key or type primitive"
+            )
+        if expected_surface not in {"browser", "native_dialog"}:
+            return _terminal_refusal("invalid expected UI surface; refusing mutation")
         if action == "navigate":
-            observations.pop(display, None)
-        elif action == "focus_dialog":
             observations.pop(display, None)
         else:
             observed = observations.pop(display, None)
@@ -1737,12 +1746,24 @@ def _do_drive_chat(arguments: dict) -> str:
                 return _terminal_refusal(
                     "UI mutation requires an observe result seen in an earlier model round"
                 )
-            if observed.get("surface") == "native_dialog":
+            observed_surface = str(observed.get("surface") or "")
+            if observed_surface != expected_surface:
+                return _terminal_refusal(
+                    f"expected {expected_surface!r} observation before mutation but "
+                    f"received {observed_surface!r}"
+                )
+            if observed_surface == "native_dialog":
                 if action not in {"key", "type"}:
                     return _terminal_refusal(
                         "native-dialog verification permits only one key or type primitive"
                     )
-                native_dialog_token = True
+                native_dialog_revision = str(
+                    observed.get("snapshot_revision") or ""
+                )
+                if not re.fullmatch(r"[0-9a-f]{64}", native_dialog_revision):
+                    return _terminal_refusal(
+                        "preceding observe did not provide a valid native-dialog revision"
+                    )
             else:
                 expected_revision = str(observed.get("snapshot_revision") or "")
                 if not re.fullmatch(r"[0-9a-f]{64}", expected_revision):
@@ -1771,7 +1792,10 @@ def _do_drive_chat(arguments: dict) -> str:
            "focus_dialog": "focus-dialog"}.get(action, action)
     cmd = [UI_DRIVE_PYTHON, UI_DRIVE_SCRIPT, sub, "--display", display]
     if action == "observe":
-        cmd += ["--scope", scope]
+        expected_surface = str(expected_surfaces.get(display) or "browser")
+        if expected_surface not in {"browser", "native_dialog"}:
+            return _err(display, action, "invalid expected UI surface; refusing")
+        cmd += ["--surface", expected_surface, "--scope", scope]
     if output_file is not None:
         cmd += ["--output-file", output_file]
     if action in ("click", "focus", "activate", "hover", "operate"):
@@ -1818,8 +1842,8 @@ def _do_drive_chat(arguments: dict) -> str:
                 f"{action} requires non-empty 'text'"
                 + (" or 'text_file'" if action == "paste" else "")
             )
-        if action == "type" and native_dialog_token:
-            cmd += ["--native-dialog-active"]
+        if action == "type" and native_dialog_revision:
+            cmd += ["--native-dialog-revision", native_dialog_revision]
         else:
             cmd += ["--expected-revision", expected_revision]
     elif action == "key":
@@ -1827,8 +1851,8 @@ def _do_drive_chat(arguments: dict) -> str:
         if not key:
             return _argument_refusal("key requires a key name, e.g. Return")
         cmd += ["--key", str(key)]
-        if native_dialog_token:
-            cmd += ["--native-dialog-active"]
+        if native_dialog_revision:
+            cmd += ["--native-dialog-revision", native_dialog_revision]
         else:
             cmd += ["--expected-revision", expected_revision]
     elif action == "navigate":
@@ -1836,6 +1860,8 @@ def _do_drive_chat(arguments: dict) -> str:
         if not isinstance(url, str) or not url:
             return _argument_refusal("navigate requires the exact YAML urls.fresh value")
         cmd += ["--url", url]
+    elif action == "focus_dialog":
+        cmd += ["--expected-revision", expected_revision]
     try:
         r = subprocess.run(
             cmd,
@@ -1861,7 +1887,8 @@ def _do_drive_chat(arguments: dict) -> str:
             if succeeded:
                 _monitor_touch(display, payload["platform"], action)
                 if action == "observe":
-                    revision = str((payload.get("result") or {}).get("snapshot_revision") or "")
+                    result = payload.get("result") or {}
+                    revision = str(result.get("snapshot_revision") or "")
                     if not re.fullmatch(r"[0-9a-f]{64}", revision):
                         return _err(
                             display,
@@ -1876,39 +1903,57 @@ def _do_drive_chat(arguments: dict) -> str:
                             "mutation_token_issued": False,
                         }
                     else:
+                        observed_surface = str(result.get("surface") or "")
+                        expected_surface = str(
+                            expected_surfaces.get(display) or "browser"
+                        )
+                        if observed_surface != expected_surface:
+                            return _err(
+                                display,
+                                action,
+                                f"expected {expected_surface!r} observation but received "
+                                f"{observed_surface!r}",
+                            )
                         observations[display] = {
+                            "surface": observed_surface,
                             "snapshot_revision": revision,
-                            "snapshot_scope": str((payload.get("result") or {}).get("scope") or ""),
+                            "snapshot_scope": str(result.get("scope") or ""),
                             "tool_round": tool_round,
                         }
                         payload["ui_sequence"] = {
                             "state": "observed",
+                            "surface": observed_surface,
                             "snapshot_revision": revision,
-                            "snapshot_scope": str((payload.get("result") or {}).get("scope") or ""),
+                            "snapshot_scope": str(result.get("scope") or ""),
                             "tool_round": tool_round,
                             "mutation_token_issued": True,
                         }
                 elif action == "focus_dialog":
-                    observations[display] = {
-                        "surface": "native_dialog",
-                        "snapshot_scope": "native_dialog",
-                        "tool_round": tool_round,
-                    }
+                    expected_surfaces[display] = "native_dialog"
                     payload["ui_sequence"] = {
-                        "state": "native_dialog_observed",
-                        "snapshot_scope": "native_dialog",
-                        "tool_round": tool_round,
-                        "mutation_token_issued": True,
+                        "state": "mutation_complete",
+                        "consumed_snapshot_revision": expected_revision,
+                        "observe_required_before_next_mutation": True,
+                        "expected_next_surface": "native_dialog",
+                        "mutation_token_issued": False,
                     }
                 elif action in _DRIVE_MUTATIONS:
+                    if native_dialog_revision:
+                        expected_surfaces[display] = (
+                            "browser"
+                            if action == "key" and str(arguments.get("key")) == "Return"
+                            else "native_dialog"
+                        )
                     payload["ui_sequence"] = {
                         "state": "mutation_complete",
                         "observe_required_before_next_mutation": True,
                     }
                     if expected_revision:
                         payload["ui_sequence"]["consumed_snapshot_revision"] = expected_revision
-                    if native_dialog_token:
+                    if native_dialog_revision:
                         payload["ui_sequence"]["consumed_snapshot_scope"] = "native_dialog"
+                        payload["ui_sequence"]["consumed_snapshot_revision"] = native_dialog_revision
+                        payload["ui_sequence"]["expected_next_surface"] = expected_surfaces[display]
                 return _json.dumps(payload)
             if action in _DRIVE_MUTATIONS:
                 detail = (
