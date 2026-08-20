@@ -35,6 +35,7 @@ try:
         selection_path_operation,
         selection_trigger_operation,
     )
+    from consultation_v2.native_dialog_snapshot import build_native_dialog_snapshot
     from consultation_v2.runtime import ConsultationRuntime
     from consultation_v2.snapshot import (
         build_app_root_snapshot,
@@ -74,6 +75,7 @@ if LOCK_TTL_DEFAULT < _MONITOR_TTL_DEFAULT:
 
 REF_PREFIX = "atspi3."
 OBSERVE_SCOPES = ("base", "menu_snapshot", "app_root_snapshot")
+OBSERVE_SURFACES = ("browser", "native_dialog")
 _LEASE_OWNER_RE = re.compile(r"taey-drive:[A-Za-z0-9._-]{1,64}:[0-9a-f]{32}")
 _PROCESS_GENERATION_RE = re.compile(r"[0-9a-f]{32}")
 _TRACE_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,159}")
@@ -409,16 +411,16 @@ def _snapshot_for_key_or_type(
     args: argparse.Namespace,
     deps: SimpleNamespace,
 ) -> Snapshot | None:
-    native_dialog_active = bool(getattr(args, "native_dialog_active", False))
-    if native_dialog_active:
+    native_dialog_revision = str(
+        getattr(args, "native_dialog_revision", "") or ""
+    )
+    if native_dialog_revision:
         if getattr(args, "expected_revision", None):
             raise UiDriveError(
                 "native-dialog mutation must not also provide a browser snapshot revision"
             )
-        if not _file_dialog_is_active(args.display):
-            raise UiDriveError(
-                "native file dialog is not the active X11 window; refusing key/type input"
-            )
+        snapshot = build_native_dialog_snapshot(deps.platform)
+        snapshot.assert_revision(native_dialog_revision)
         return None
     return _snapshot_at_expected_revision(args, deps)
 
@@ -703,6 +705,40 @@ def _declared_operation(
 
 
 def _observe(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str, Any]:
+    if args.surface == "native_dialog":
+        if args.scope != "base":
+            raise UiDriveError(
+                "native-dialog observe does not accept a browser observation scope"
+            )
+        snapshot = build_native_dialog_snapshot(deps.platform)
+        mapped = [
+            {
+                "category": "mapped",
+                "element": key,
+                "name": item.name,
+                "role": item.role,
+                "states": list(item.states),
+                "scope": item.scope,
+                "path": item.path,
+                **({"text": item.text} if item.text is not None else {}),
+                "match_count": len(items),
+            }
+            for key in sorted(snapshot.mapped)
+            for items in (snapshot.mapped[key],)
+            for item in items
+        ]
+        return {
+            "platform": snapshot.platform,
+            "surface": snapshot.surface,
+            "scope": "native_dialog",
+            "snapshot_revision": snapshot.revision,
+            "contract_sha256": snapshot.contract_sha256,
+            "root_key": snapshot.root_key,
+            "raw_count": snapshot.raw_count,
+            "counts": {"mapped": len(mapped)},
+            "mapped": mapped,
+        }
+
     scope = args.scope
     snapshot = _snapshot(deps, scope=scope)
     revision = _snapshot_revision(snapshot, scope=scope)
@@ -933,23 +969,6 @@ def _type_text(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str, Any
     return {"typed_chars": len(args.text)}
 
 
-def _file_dialog_is_active(display: str) -> bool:
-    """True when the ACTIVE X11 window is a GTK file chooser. Read-only probe;
-    never raises — a focus question must not break the action."""
-    import subprocess
-    try:
-        env = dict(os.environ); env["DISPLAY"] = display
-        active = subprocess.run(("xdotool", "getactivewindow"), capture_output=True,
-                                text=True, env=env, timeout=5).stdout.strip()
-        if not active:
-            return False
-        name = subprocess.run(("xdotool", "getwindowname", active), capture_output=True,
-                              text=True, env=env, timeout=5).stdout.strip()
-        return any(title.lower() in name.lower() for title in _FILE_DIALOG_TITLES)
-    except Exception:
-        return False
-
-
 def _focus_dialog(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str, Any]:
     """Activate the GTK file-chooser at the X11 WINDOW level.
 
@@ -960,6 +979,7 @@ def _focus_dialog(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str, 
     activation. Mirrors consultation_v2/runtime.py focus_file_dialog.
     """
     import subprocess
+    _snapshot_at_expected_revision(args, deps)
     env = dict(os.environ)
     env["DISPLAY"] = args.display
 
@@ -1180,9 +1200,8 @@ def _add_key_or_type_surface(parser: argparse.ArgumentParser) -> None:
         help="snapshot revision returned by the preceding explicit browser observe",
     )
     surface.add_argument(
-        "--native-dialog-active",
-        action="store_true",
-        help="require the native file dialog to be the active X11 window",
+        "--native-dialog-revision",
+        help="revision returned by the preceding canonical native-dialog observe",
     )
 
 
@@ -1193,6 +1212,7 @@ def _parser() -> argparse.ArgumentParser:
 
     observe = commands.add_parser("observe")
     _add_display(observe)
+    observe.add_argument("--surface", choices=OBSERVE_SURFACES, default="browser")
     observe.add_argument("--scope", choices=OBSERVE_SCOPES, default="base")
 
     for action in ("click", "focus", "activate", "hover", "operate"):
@@ -1226,6 +1246,7 @@ def _parser() -> argparse.ArgumentParser:
 
     focus_dialog = commands.add_parser("focus-dialog")
     _add_display(focus_dialog)
+    _add_expected_revision(focus_dialog)
 
     grammar = commands.add_parser("attach-grammar")
     _add_display(grammar)
