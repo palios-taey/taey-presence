@@ -848,6 +848,8 @@ def _element_action(
                 f"{row['element']} has no YAML-declared operation; use one exact "
                 "direct primitive"
             )
+        if declared.get("method") == "focus_and_key_open":
+            return _focus_and_key_open_operation(row, declared, deps)
         allowed_now = declared.get("allowed_now")
         if not isinstance(allowed_now, list) or len(allowed_now) != 1:
             raise UiDriveError(
@@ -894,6 +896,63 @@ def _element_action(
     return {
         "performed": True,
         "performed_primitive": performed_primitive,
+        "element": {
+            "category": "mapped",
+            "element": row["element"],
+            "name": str(row.get("name") or ""),
+            "role": str(row.get("role") or ""),
+            "states": list(row.get("states") or []),
+            "ref": row["ref"],
+        },
+    }
+
+
+def _focus_and_key_open_operation(
+    row: dict[str, Any],
+    declared: dict[str, Any],
+    deps: SimpleNamespace,
+) -> dict[str, Any]:
+    primitives = declared.get("primitives")
+    if (
+        not isinstance(primitives, list)
+        or len(primitives) != 2
+        or primitives[0] != "focus"
+        or not isinstance(primitives[1], str)
+        or not primitives[1].startswith("key:")
+    ):
+        raise UiDriveError(
+            f"{row['element']} focus_and_key_open requires exact "
+            f"['focus', 'key:<open_key>'] primitives"
+        )
+    allowed_now = declared.get("allowed_now")
+    if allowed_now == []:
+        raise UiDriveError(
+            f"{row['element']} focus_and_key_open is already expanded; refusing toggle"
+        )
+    if allowed_now not in (["focus"], [primitives[1]]):
+        raise UiDriveError(
+            f"{row['element']} focus_and_key_open has unexpected live state "
+            f"(allowed_now={allowed_now!r})"
+        )
+    open_key = primitives[1].partition(":")[2]
+    if not open_key:
+        raise UiDriveError(
+            f"{row['element']} focus_and_key_open has an empty open key"
+        )
+
+    if not deps.interact.atspi_focus(row):
+        raise UiDriveError(
+            f"{row['element']} focus_and_key_open could not focus the exact mapped ref"
+        )
+    if not _xdo_key(deps.display, open_key):
+        raise UiDriveError(
+            f"{row['element']} focus_and_key_open key:{open_key} returned false"
+        )
+    return {
+        "performed": True,
+        "performed_primitive": "focus_and_key_open",
+        "performed_operation": "focus_and_key_open",
+        "performed_primitives": list(primitives),
         "element": {
             "category": "mapped",
             "element": row["element"],

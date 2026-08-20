@@ -887,8 +887,12 @@ TOOLS = [
                 ":5 grok, :6 perplexity; second displays are :21 claude, :22 gemini, :23 grok, "
                 ":24 perplexity. Resolve controls, chooser opening, attachment, composer input, "
                 "submission and manual extraction from that display's YAML and "
-                "the newly observed tree, one primitive at a time; do not use remembered platform "
+                "the newly observed tree, one YAML-declared semantic operation at a time; do not use remembered platform "
                 "labels, platform shortcuts, coordinates, URLs, chooser routes, or send recipes. "
+                "For focus_and_key_open, call operate once: the driver focuses the exact ref, "
+                "verifies focus, and sends the exact YAML open key; then observe the declared "
+                "menu scope and require its exact target. Never split that method into separate "
+                "model-issued focus and key calls. "
                 "For an opened selection menu, use the exact observation scope declared by that "
                 "menu's YAML operate.scope; the returned refs remain bound to that scope. "
                 "The native GTK file chooser is a shared driver boundary rather than platform UI: "
@@ -1513,7 +1517,7 @@ def _do_run_command(command: str, cwd: str = "", timeout_seconds: int = 120) -> 
 # sibling serving/ui_drive.py under the AT-SPI interpreter (the displays live on this
 # workstation, where the proxy runs its tools), so the same proven primitives that drive
 # :2-:6 and the second set :21-:24 are what Taey uses. The step-by-step discipline
-# lives in the model and the prompt; this surface performs one primitive and returns the
+# lives in the model and the prompt; this surface performs one semantic operation and returns the
 # observed JSON. :0 (Jesse's monitor) and any non-chat display are REFUSED here, never
 # merely absent from the schema.
 # ---------------------------------------------------------------------------

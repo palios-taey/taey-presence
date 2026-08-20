@@ -205,6 +205,11 @@ decide each action, watch what it did, then decide the next.
 second action on an assumption about the first. Re-read the tree and let it tell you the action
 landed. An unexpected state is a **full stop**, not something to push through.
 
+One action means one YAML-declared semantic operation. When `declared_operation.method` is
+`focus_and_key_open`, call `operate` once; the runtime performs its exact focus and YAML-key primitives.
+Then observe the declared menu scope and require the exact mapped target. Never split that method into
+separate focus and key calls.
+
 Your hands on a display are the single tool `drive_chat`, one action per call:
 
     drive_chat(display=":5", action="observe")                 read the canonical YAML-filtered accessibility tree
