@@ -103,6 +103,46 @@ EVENT_LOG = Path(
 ).expanduser()
 
 
+def _process_log_path() -> Path:
+    return Path(
+        os.environ.get(
+            "TAEY_SEAT_PROCESS_LOG",
+            str(
+                Path(
+                    os.environ.get(
+                        "TAEY_SESSIONS_DIR",
+                        str(Path.home() / "taey_sessions"),
+                    )
+                ).expanduser()
+                / f"{SESSION}.process.log"
+            ),
+        )
+    ).expanduser()
+
+
+def _record_process_event(message: str) -> None:
+    """Write seat-process evidence outside tmux so pane death cannot erase it."""
+    print(message, file=sys.stderr, flush=True)
+    path = _process_log_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(
+                f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} {message}\n"
+            )
+            handle.flush()
+            os.fsync(handle.fileno())
+    except OSError as exc:
+        notice = (
+            f"[taey-seat] PROCESS LOG WRITE FAILED: {type(exc).__name__}: {exc}"
+        )
+        print(notice, file=sys.stderr, flush=True)
+        print(
+            f"[taey-seat] process log write failed; seat remains: {exc}",
+            flush=True,
+        )
+
+
 class SeatFailure(RuntimeError):
     pass
 
@@ -915,10 +955,8 @@ def main() -> int:
         inbox = ExecutiveInbox(client, store)
         recovery = inbox.recover()
     except Exception as exc:
-        print(
-            f"[taey-seat] FATAL startup: {type(exc).__name__}: {exc}",
-            file=sys.stderr,
-            flush=True,
+        _record_process_event(
+            f"[taey-seat] FATAL startup: {type(exc).__name__}: {exc}"
         )
         return 1
     print(
@@ -936,12 +974,14 @@ def main() -> int:
         try:
             reply = _run_turn(text, inbox=inbox, store=store, proxy=proxy)
         except Exception as exc:
+            _record_process_event(
+                f"[taey-seat] TURN ERROR: {type(exc).__name__}: {exc}"
+            )
             print(
-                f"[taey-seat] FATAL turn: {type(exc).__name__}: {exc}",
-                file=sys.stderr,
+                f"[taey-seat] turn failed; seat remains: {type(exc).__name__}: {exc}",
                 flush=True,
             )
-            return 1
+            continue
         print(reply, flush=True)
     return 0
 

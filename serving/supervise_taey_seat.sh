@@ -79,7 +79,7 @@ validate_session() {
     done
 }
 
-start_session() {
+seat_command() {
     local command
     local -a argv=(
         env
@@ -92,9 +92,53 @@ start_session() {
         -u
         serving/taey_seat.py
     )
-
     printf -v command '%q ' "${argv[@]}"
-    "$TMUX_BIN" new-session -d -s "$SESSION" -c "$ROOT" "exec $command"
+    printf '%s' "exec $command"
+}
+
+harden_session() {
+    "$TMUX_BIN" set-option -t "=$SESSION" remain-on-exit on ||
+        fail "cannot set remain-on-exit on $SESSION" || return
+}
+
+read_pane_dead() {
+    local dead
+    dead="$("$TMUX_BIN" display-message -t "=$SESSION" -p '#{pane_dead}')" ||
+        fail "cannot read pane_dead for $SESSION" || return
+    [[ "$dead" == 0 || "$dead" == 1 ]] ||
+        fail "pane_dead for $SESSION is not 0 or 1: $dead" || return
+    printf '%s' "$dead"
+}
+
+preserve_dead_pane_evidence() {
+    local dir stamp status
+    dir="$SESSIONS_DIR/$SESSION/exit-evidence"
+    mkdir -p "$dir" || fail "cannot create evidence dir $dir" || return
+    stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+    status="$("$TMUX_BIN" display-message -t "=$SESSION" -p \
+        'dead=#{pane_dead} status=#{pane_dead_status} pid=#{pane_pid}')" ||
+        fail "cannot read dead-pane status for $SESSION" || return
+    [[ "$status" == *"dead="* && "$status" == *"status="* && "$status" == *"pid="* ]] ||
+        fail "incomplete dead-pane status for $SESSION: $status" || return
+    if [[ "$status" == *"dead=1"* ]]; then
+        [[ "$status" == *"status="[0-9]* ]] ||
+            fail "dead pane missing pane_dead_status for $SESSION: $status" || return
+    fi
+    printf '%s\n' "$status" > "$dir/$stamp.status" ||
+        fail "cannot write status evidence $dir/$stamp.status" || return
+    [[ -s "$dir/$stamp.status" ]] ||
+        fail "empty status evidence $dir/$stamp.status" || return
+    "$TMUX_BIN" capture-pane -t "=$SESSION" -p -S -500 \
+        > "$dir/$stamp.capture" ||
+        fail "cannot capture dead pane for $SESSION" || return
+    [[ -f "$dir/$stamp.capture" ]] ||
+        fail "missing capture evidence $dir/$stamp.capture" || return
+    printf '[taey-seat-supervisor] dead-pane evidence stamp=%s %s\n' "$stamp" "$status"
+}
+
+respawn_seat_pane() {
+    "$TMUX_BIN" respawn-pane -k -t "=$SESSION" "$(seat_command)" ||
+        fail "cannot respawn seat pane for $SESSION" || return
     for _ in {1..20}; do
         if validate_session 2>/dev/null; then
             return 0
@@ -102,6 +146,21 @@ start_session() {
         sleep 0.25
     done
     validate_session
+}
+
+recover_dead_pane() {
+    local dead
+    dead="$(read_pane_dead)" || return
+    [[ "$dead" == 1 ]] || return 0
+    preserve_dead_pane_evidence || return
+    respawn_seat_pane || return
+}
+
+start_session() {
+    "$TMUX_BIN" new-session -d -s "$SESSION" -c "$ROOT" \; \
+        set-option -t "=$SESSION" remain-on-exit on ||
+        fail "cannot create hardened holding session $SESSION" || return
+    respawn_seat_pane || return
 }
 
 seat_is_idle() {
@@ -159,6 +218,8 @@ esac
 trap stop_session TERM INT HUP
 
 if "$TMUX_BIN" has-session -t "=$SESSION" 2>/dev/null; then
+    harden_session
+    recover_dead_pane || exit 1
     validate_session || exit 78
     printf '[taey-seat-supervisor] adopted session=%s root=%s proxy=%s\n' \
         "$SESSION" "$ROOT" "$PROXY"
@@ -169,5 +230,8 @@ else
 fi
 
 while sleep "$POLL_SECONDS"; do
+    "$TMUX_BIN" has-session -t "=$SESSION" 2>/dev/null ||
+        fail "tmux session $SESSION does not exist" || exit 1
+    recover_dead_pane || exit 1
     validate_session || exit 1
 done
