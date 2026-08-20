@@ -1810,7 +1810,7 @@ def _do_drive_chat(arguments: dict) -> str:
     if action == "observe":
         expected_surface = str(expected_surfaces.get(display) or "browser")
         if expected_surface not in {"browser", "native_dialog"}:
-            return _err(display, action, "invalid expected UI surface; refusing")
+            return _terminal_refusal("invalid expected UI surface; refusing")
         cmd += ["--surface", expected_surface, "--scope", scope]
     if output_file is not None:
         cmd += ["--output-file", output_file]
