@@ -369,6 +369,14 @@ valid_component() {  # single path component: starts alphanumeric, then alnum . 
 }
 valid_abs_dir() { case "$1" in /*) case "$1" in *..*|*[\'\"\$\`\;\&\|\<\>]*) return 1 ;; *) return 0 ;; esac ;; *) return 1 ;; esac; }
 
+assert_not_quarantined() {  # <model-dir-name> — permanent serving-boundary refusals
+  case "$1" in
+    servable_cpt_qwen38_v3)
+      die "DO-NOT-PROMOTE: model '$1' is preserved evidence from a quarantined training corpus and is forbidden from serving"
+      ;;
+  esac
+}
+
 valid_abs_dir "$NODE1_MODELS" || die "TAEY_NODE1_MODELS must be an absolute path with no '..' or shell metacharacters"
 valid_abs_dir "$NODE2_MODELS" || die "TAEY_NODE2_MODELS must be an absolute path with no '..' or shell metacharacters"
 valid_component "$UNIT" || die "TAEY_SERVE_UNIT must be a single safe component (got: $UNIT)"
@@ -389,6 +397,9 @@ case "${1:-}" in
 esac
 [ $# -eq 2 ] || die "usage: promote_model.sh <node1|node2> <model-dir-name>  |  promote_model.sh --check"
 SRC="$1"; MODEL="$2"
+valid_component "$MODEL" \
+  || die "model must be a single directory name matching [A-Za-z0-9][A-Za-z0-9._-]* — got: $MODEL"
+assert_not_quarantined "$MODEL"
 # Promotion restarts serving nodes, so from here the consumer declaration is mandatory.
 [ -n "$NODE1_CONSUMERS" ] || die "set TAEY_NODE1_CONSUMERS to the systemd --user units pinned to node1, or the literal: none"
 [ -n "$NODE2_CONSUMERS" ] || die "set TAEY_NODE2_CONSUMERS to the systemd --user units pinned to node2, or the literal: none"
@@ -416,8 +427,6 @@ for pair in "node1:$NODE1_HOST:$NODE1_CONSUMERS" "node2:$NODE2_HOST:$NODE2_CONSU
 Add them (they must be stopped for the maintenance window) or stop them first. Refusing to restart a node while an undeclared consumer can admit work."
 done
 log "consumer declarations cover every active unit targeting each node"
-valid_component "$MODEL" \
-  || die "model must be a single directory name matching [A-Za-z0-9][A-Za-z0-9._-]* — got: $MODEL"
 
 case "$SRC" in
   node1) src_ssh="$NODE1_SSH"; src_dir="$NODE1_MODELS"; dst_ssh="$NODE2_SSH"; dst_dir="$NODE2_MODELS" ;;
