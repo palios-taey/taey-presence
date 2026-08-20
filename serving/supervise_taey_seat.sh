@@ -79,7 +79,7 @@ validate_session() {
     done
 }
 
-start_session() {
+seat_command() {
     local command
     local -a argv=(
         env
@@ -92,9 +92,53 @@ start_session() {
         -u
         serving/taey_seat.py
     )
-
     printf -v command '%q ' "${argv[@]}"
-    "$TMUX_BIN" new-session -d -s "$SESSION" -c "$ROOT" "exec $command"
+    printf '%s' "exec $command"
+}
+
+harden_session() {
+    "$TMUX_BIN" set-option -t "=$SESSION" remain-on-exit on
+}
+
+pane_is_dead() {
+    local dead
+    dead="$("$TMUX_BIN" display-message -t "=$SESSION" -p '#{pane_dead}' 2>/dev/null || true)"
+    [[ "$dead" == 1 ]]
+}
+
+preserve_dead_pane_evidence() {
+    local dir stamp status
+    dir="$SESSIONS_DIR/$SESSION/exit-evidence"
+    mkdir -p "$dir"
+    stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+    status="$("$TMUX_BIN" display-message -t "=$SESSION" -p \
+        'dead=#{pane_dead} status=#{pane_dead_status} pid=#{pane_pid}' 2>/dev/null || true)"
+    printf '[taey-seat-supervisor] dead-pane evidence stamp=%s %s\n' "$stamp" "$status"
+    printf '%s\n' "$status" > "$dir/$stamp.status"
+    "$TMUX_BIN" capture-pane -t "=$SESSION" -p -S -500 \
+        > "$dir/$stamp.capture" 2>/dev/null || true
+}
+
+respawn_seat_pane() {
+    "$TMUX_BIN" respawn-pane -k -t "=$SESSION" "$(seat_command)"
+    for _ in {1..20}; do
+        if validate_session 2>/dev/null; then
+            return 0
+        fi
+        sleep 0.25
+    done
+    validate_session
+}
+
+recover_dead_pane() {
+    pane_is_dead || return 0
+    preserve_dead_pane_evidence
+    respawn_seat_pane
+}
+
+start_session() {
+    "$TMUX_BIN" new-session -d -s "$SESSION" -c "$ROOT" "$(seat_command)"
+    harden_session
     for _ in {1..20}; do
         if validate_session 2>/dev/null; then
             return 0
@@ -159,6 +203,8 @@ esac
 trap stop_session TERM INT HUP
 
 if "$TMUX_BIN" has-session -t "=$SESSION" 2>/dev/null; then
+    harden_session
+    recover_dead_pane || exit 1
     validate_session || exit 78
     printf '[taey-seat-supervisor] adopted session=%s root=%s proxy=%s\n' \
         "$SESSION" "$ROOT" "$PROXY"
@@ -169,5 +215,8 @@ else
 fi
 
 while sleep "$POLL_SECONDS"; do
+    "$TMUX_BIN" has-session -t "=$SESSION" 2>/dev/null ||
+        fail "tmux session $SESSION does not exist" || exit 1
+    recover_dead_pane || exit 1
     validate_session || exit 1
 done

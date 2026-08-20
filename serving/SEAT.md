@@ -59,3 +59,10 @@ read `data[0].root`, never the alias in `data[0].id`.
 A stopped seat is not an error state by itself; seats are started for work. What *is* an
 error is a seat that is running and not reachable, or a seat whose namespace collides with
 another's. Both of those show up in `seat_liveness.py` and neither shows up in a count.
+
+A live turn failing is not permission to destroy the seat. `taey_seat.py` logs a turn
+error to `$TAEY_SESSIONS_DIR/<session>.process.log` and keeps the stdin loop. The
+supervisor sets `remain-on-exit` so a pane exit leaves the named tmux session in place,
+records `#{pane_dead_status}` plus a pane capture under
+`$TAEY_SESSIONS_DIR/<session>/exit-evidence/`, and respawns the same pane. A missing
+session (external `kill-session`) is still fatal and distinct from a dead pane.
