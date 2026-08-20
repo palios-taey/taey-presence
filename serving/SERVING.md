@@ -383,7 +383,7 @@ For other model families, set the parsers your model expects.
 
 ---
 
-## soma_proxy.py configuration (all env, all optional except the persona)
+## soma_proxy.py configuration
 
 | env | default | meaning |
 |-----|---------|---------|
@@ -402,6 +402,18 @@ For other model families, set the parsers your model expects.
 | `TAEY_LIVENESS_REQUIRED` | `1` | refuse proxy startup/turn admission when Redis cannot provide attributable liveness |
 | `TAEY_TURN_LEASE_SECS` | `120` | active-turn lease; expiry is archived as an abandoned turn |
 | `TAEY_TURN_HEARTBEAT_SECS` | `30` | lease-renewal interval, capped at one-third of the lease |
+| `TAEY_DRIVE_CHAT_CAPTURE_ROOT` | *(empty → `drive_chat` refused)* | private write-once evidence root; required before any UI action |
+
+Create `TAEY_DRIVE_CHAT_CAPTURE_ROOT` as the proxy service user with mode `0700`
+and set the same absolute, non-symlink path in every proxy that exposes
+`drive_chat`. Each call creates one private exchange directory beneath
+`<seat>/<event>/<turn>/`, writes the exact arguments to `request.json` before the
+UI primitive runs, then writes the exact returned payload and its SHA-256 to
+`result.json`. Directories are `0700`; records are created once with mode `0600`.
+The capture can contain raw accessibility trees, paths, URLs, and account details.
+Never commit it or feed it to a public receipt builder. A missing or unsafe root
+refuses the action before mutation; a result-finalization failure terminalizes the
+turn so Taey cannot continue without its evidence.
 
 The durable seat has no fixed elapsed-time deadline for a complete proxy turn.
 `VLLM_REQUEST_TIMEOUT_SECS` applies to one upstream inference request, while the
