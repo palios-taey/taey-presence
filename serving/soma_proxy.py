@@ -1999,7 +1999,8 @@ def _do_drive_chat(arguments: dict) -> str:
                     if native_dialog_revision:
                         expected_surfaces[display] = (
                             "browser"
-                            if action == "key" and str(arguments.get("key")) == "Return"
+                            if action == "key"
+                            and str(arguments.get("key")) in {"Return", "Escape"}
                             else "native_dialog"
                         )
                     payload["ui_sequence"] = {
