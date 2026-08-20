@@ -149,7 +149,14 @@ class TurnContext:
 
 
 PROCESS_GENERATION = uuid.uuid4().hex
-_DRIVE_GENERATION_FENCE_KEY = "taey:soma:drive_process_generation"
+_PROXY_NAMESPACE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
+if not _PROXY_NAMESPACE_RE.fullmatch(TAEY_DEFAULT_SEAT):
+    raise RuntimeError(
+        "TAEY_SESSION_NAME must match [A-Za-z0-9][A-Za-z0-9_-]{0,63}"
+    )
+_DRIVE_GENERATION_FENCE_KEY = (
+    f"taey:soma:drive_process_generation:{TAEY_DEFAULT_SEAT}"
+)
 _serving_socket_reserved = False
 _active_turns: dict[str, TurnContext] = {}
 
@@ -275,6 +282,11 @@ async def startup():
         raise RuntimeError(
             "display-owner generation could not be published; proxy startup refused"
         ) from exc
+    log.info(
+        "Published UI generation fence key=%s generation=%s",
+        _DRIVE_GENERATION_FENCE_KEY,
+        PROCESS_GENERATION,
+    )
 
     log.info("Proxying to vLLM at %s", VLLM_BASE)
 
@@ -1745,6 +1757,7 @@ def _do_drive_chat(arguments: dict) -> str:
         "TAEY_DRIVE_LEASE_SEAT": seat_id,
         "TAEY_DRIVE_LEASE_TURN": turn_id,
         "TAEY_DRIVE_LEASE_GENERATION": process_generation,
+        "TAEY_DRIVE_GENERATION_FENCE_KEY": _DRIVE_GENERATION_FENCE_KEY,
     })
 
     output_file = arguments.get("output_file")
