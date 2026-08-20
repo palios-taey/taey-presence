@@ -1602,21 +1602,23 @@ def _monitor_touch(
     client = _mira_redis or _redis
     if client is None:
         raise RuntimeError("Redis is unavailable")
-    requester = str(request_context.get("seat_id") or "")
+    actor_seat_id = str(request_context.get("seat_id") or "")
     turn_id = str(request_context.get("turn_id") or "")
     process_generation = str(request_context.get("process_generation") or "")
-    if not requester or not turn_id or not process_generation:
+    if not actor_seat_id or not turn_id or not process_generation:
         raise RuntimeError("request-local turn identity is incomplete")
 
-    monitor_id = f"{requester}-{display.lstrip(':')}-{turn_id}"
-    session_key = f"taey:{requester}:active_session:{monitor_id}"
-    set_key = f"taey:{requester}:active_session_ids"
+    requester = "taey"
+    monitor_id = f"{actor_seat_id}-{display.lstrip(':')}-{turn_id}"
+    session_key = f"taey:{actor_seat_id}:active_session:{monitor_id}"
+    set_key = f"taey:{actor_seat_id}:active_session_ids"
     now = time.time()
     record = {
         "monitor_id": monitor_id,
         "display": display,
         "platform": platform,
         "requester": requester,
+        "actor_seat_id": actor_seat_id,
         "mode": "supervised_manual",
         "phase": "awaiting_completion",
         "stop_proven": True,
