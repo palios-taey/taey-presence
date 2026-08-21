@@ -1164,7 +1164,8 @@ TOOLS = [
                 "key Return. Finally observe the platform tree and verify the attachment before any "
                 "composer or send action. observe returns the current URL, YAML fresh URL, YAML "
                 "Stop keys, actionable mapped elements, and non-actionable unknown/sidebar drift. "
-                "Only an exact mapped singleton receives a ref. If the live tree shows a changed "
+                "Only an exact mapped singleton or exact YAML-selected target receives a ref. "
+                "If the live tree shows a changed "
                 "name, role, missing mapping, duplicate mapping, or unexpected drift, stop for an "
                 "exact YAML tree-filter update. Missing or "
                 "ambiguous mappings fail loudly: do not retry blindly, substitute pixels, or "
@@ -1210,7 +1211,7 @@ TOOLS = [
                         "description": (
                             "readable element key from the immediately preceding fresh observe; "
                             "for click/focus/activate/hover/operate Presence resolves the exact "
-                            "mapped singleton ref without model transcription"
+                            "canonical mapped ref without model transcription"
                         ),
                     },
                     "ref": {
@@ -1218,7 +1219,7 @@ TOOLS = [
                         "description": (
                             "transitional revision-bound ref from the immediately preceding fresh "
                             "observe; when element is also supplied it must equal Presence's stored "
-                            "singleton ref"
+                            "canonical mapped ref"
                         ),
                     },
                     "text": {"type": "string", "description": "text to type or paste (use for SHORT input; for a large packet use text_file instead so you don't regenerate every character)"},
@@ -2127,12 +2128,12 @@ def _do_drive_chat(arguments: dict) -> str:
         if element is not None:
             if not isinstance(element, str) or not element:
                 return _argument_refusal(f"{action} element must be a non-empty string")
-            singleton_refs = (
-                observed.get("singleton_refs") if isinstance(observed, dict) else None
+            canonical_refs = (
+                observed.get("canonical_refs") if isinstance(observed, dict) else None
             )
             canonical_ref = (
-                singleton_refs.get(element)
-                if isinstance(singleton_refs, dict)
+                canonical_refs.get(element)
+                if isinstance(canonical_refs, dict)
                 else None
             )
             if not isinstance(canonical_ref, str) or not canonical_ref:
@@ -2142,14 +2143,14 @@ def _do_drive_chat(arguments: dict) -> str:
             if ref is not None and ref != canonical_ref:
                 return _terminal_refusal(
                     f"supplied {element!r} ref does not equal the preceding observe's "
-                    "canonical singleton ref"
+                    "canonical mapped ref"
                 )
             ref = canonical_ref
         if isinstance(ref, str) and ref:
             cmd += ["--ref", ref]
         else:
             return _argument_refusal(
-                f"{action} requires element=<exact mapped singleton from the immediately "
+                f"{action} requires element=<canonical mapped target from the immediately "
                 "preceding fresh observe> or a transitional ref"
             )
     elif action in ("type", "paste"):
@@ -2270,7 +2271,7 @@ def _do_drive_chat(arguments: dict) -> str:
                             )
                         if monitor_receipt is not None:
                             result["completion_monitor"] = monitor_receipt
-                        singleton_refs = {}
+                        canonical_refs = {}
                         mapped = result.get("mapped")
                         if observed_surface == "browser":
                             if not isinstance(mapped, list):
@@ -2279,14 +2280,14 @@ def _do_drive_chat(arguments: dict) -> str:
                                 )
                             refs_by_element = {}
                             for item in mapped:
-                                if not isinstance(item, dict) or item.get("match_count") != 1:
+                                if not isinstance(item, dict):
                                     continue
                                 element = item.get("element")
                                 ref = item.get("ref")
                                 if not isinstance(element, str) or not isinstance(ref, str):
                                     continue
                                 refs_by_element.setdefault(element, []).append(ref)
-                            singleton_refs = {
+                            canonical_refs = {
                                 element: refs[0]
                                 for element, refs in refs_by_element.items()
                                 if len(refs) == 1
@@ -2296,7 +2297,7 @@ def _do_drive_chat(arguments: dict) -> str:
                             "snapshot_revision": revision,
                             "snapshot_scope": str(result.get("scope") or ""),
                             "tool_round": tool_round,
-                            "singleton_refs": singleton_refs,
+                            "canonical_refs": canonical_refs,
                         }
                         payload["ui_sequence"] = {
                             "state": "observed",
