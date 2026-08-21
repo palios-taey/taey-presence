@@ -436,8 +436,10 @@ Redis seat namespace with `X-Taey-Seat-Id`; startup, the liveness reaper, and
 `liveness.active_turns` is the authoritative fleet-wide count used by restart and
 model-promotion gates, while `default_seat` remains identity metadata. A
 multi-worker Uvicorn launch is not supported: startup reconciliation deliberately
-classifies leases from a different process generation as abandoned after a
-service restart.
+classifies leases from a different process generation in the same
+`TAEY_SESSION_NAME` proxy namespace as abandoned after a service restart. Turns
+owned by another proxy namespace remain live; old records without an owner
+namespace recover through ordinary lease expiry.
 
 ## Durable tmux seat configuration
 

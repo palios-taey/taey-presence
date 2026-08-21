@@ -149,6 +149,7 @@ class TurnContext:
     event_id: str
     correlation_id: str
     tool_profile: str
+    proxy_namespace: str
     process_generation: str
     started_at: float
 
@@ -229,7 +230,10 @@ async def startup():
     if _redis is not None:
         try:
             _reconcile_registered_liveness(
-                current_process_generation=PROCESS_GENERATION,
+                current_process_identity=(
+                    TAEY_DEFAULT_SEAT,
+                    PROCESS_GENERATION,
+                ),
             )
         except Exception as e:
             _set_liveness_error(
@@ -2650,11 +2654,12 @@ for _, turn_id in ipairs(active) do
     local reason = nil
     if deadline <= tonumber(ARGV[1]) then
         reason = 'lease_expired'
-    elseif ARGV[2] ~= '' then
+    elseif ARGV[2] ~= '' and ARGV[3] ~= '' then
         local ok, decoded = pcall(cjson.decode, context or '')
         if not ok or type(decoded) ~= 'table' then
             reason = 'invalid_context'
-        elseif tostring(decoded['process_generation'] or '') ~= ARGV[2] then
+        elseif tostring(decoded['proxy_namespace'] or '') == ARGV[2]
+            and tostring(decoded['process_generation'] or '') ~= ARGV[3] then
             reason = 'process_restarted'
         end
     end
@@ -2828,6 +2833,7 @@ def _turn_context(request: Request, body: dict) -> TurnContext:
         event_id=event_id,
         correlation_id=correlation_id,
         tool_profile=tool_profile,
+        proxy_namespace=TAEY_DEFAULT_SEAT,
         process_generation=PROCESS_GENERATION,
         started_at=time.time(),
     )
@@ -2840,6 +2846,7 @@ def _turn_payload(turn: TurnContext) -> dict:
         "event_id": turn.event_id,
         "correlation_id": turn.correlation_id,
         "tool_profile": turn.tool_profile,
+        "proxy_namespace": turn.proxy_namespace,
         "process_generation": turn.process_generation,
         "started_at": turn.started_at,
     }
@@ -2877,17 +2884,19 @@ def _mark_liveness_success() -> None:
 def _reconcile_liveness(
     seat_id: str,
     *,
-    current_process_generation: str = "",
+    current_process_identity: Optional[tuple[str, str]] = None,
 ) -> tuple[int, int, int]:
     if _redis is None:
         raise LivenessUnavailable("Redis client is unavailable")
     now = time.time()
+    proxy_namespace, process_generation = current_process_identity or ("", "")
     result = _redis.eval(
         _RECONCILE_LIVENESS_LUA,
         len(_liveness_keys(seat_id)),
         *_liveness_keys(seat_id),
         now,
-        current_process_generation,
+        proxy_namespace,
+        process_generation,
     )
     count, recovered, global_count = (
         int(result[0]),
@@ -2923,7 +2932,7 @@ def _registered_seat_ids() -> list[str]:
 
 def _reconcile_registered_liveness(
     *,
-    current_process_generation: str = "",
+    current_process_identity: Optional[tuple[str, str]] = None,
 ) -> tuple[int, int, list[str]]:
     registered_seats = _registered_seat_ids()
     recovered_count = 0
@@ -2931,7 +2940,7 @@ def _reconcile_registered_liveness(
     for seat_id in registered_seats:
         _, recovered, global_count = _reconcile_liveness(
             seat_id,
-            current_process_generation=current_process_generation,
+            current_process_identity=current_process_identity,
         )
         recovered_count += recovered
     return global_count, recovered_count, registered_seats
