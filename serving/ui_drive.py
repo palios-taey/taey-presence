@@ -940,19 +940,33 @@ def _focus_and_key_open_operation(
             f"{row['element']} focus_and_key_open has an empty open key"
         )
 
-    if not deps.interact.atspi_focus(row):
+    runtime = ConsultationRuntime(deps.platform)
+    evidence = runtime.focus_and_key_open(
+        ElementRef(
+            key=str(row["element"]),
+            name=str(row.get("name") or ""),
+            role=str(row.get("role") or ""),
+            x=row.get("x"),
+            y=row.get("y"),
+            states=list(row.get("states") or []),
+            text=row.get("text"),
+            description=row.get("description"),
+            atspi_obj=row.get("atspi_obj"),
+            raw=row,
+        ),
+        key=open_key,
+    )
+    if evidence.get("ok") is not True:
         raise UiDriveError(
-            f"{row['element']} focus_and_key_open could not focus the exact mapped ref"
-        )
-    if not _xdo_key(deps.display, open_key):
-        raise UiDriveError(
-            f"{row['element']} focus_and_key_open key:{open_key} returned false"
+            f"{row['element']} focus_and_key_open failed: "
+            + json.dumps(evidence, ensure_ascii=False, sort_keys=True)
         )
     return {
         "performed": True,
         "performed_primitive": "focus_and_key_open",
         "performed_operation": "focus_and_key_open",
         "performed_primitives": list(primitives),
+        "operation_evidence": evidence,
         "element": {
             "category": "mapped",
             "element": row["element"],
