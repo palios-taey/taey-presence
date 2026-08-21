@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# promote_model.sh — put ONE model on BOTH serving nodes under the same alias, and prove it.
+# promote_model.sh — put one model on an explicit serving scope under the same alias, and prove it.
 #
 # WHY THIS EXISTS. On 2026-07-30 the two nodes were found serving DIFFERENT WEIGHTS under the
 # SAME alias: node1 `ep3` -> cpt_v7_eps1fix_servable, node2 `ep3` -> module5_merged. Because
@@ -26,13 +26,16 @@
 # is recoverable; promoting blindly onto both is not.
 #
 # Usage:
-#   promote_model.sh <node1|node2> <model-dir-name>       # promote a bake living on <source-node>
-#   promote_model.sh --check           # served-root agreement only; fast, mutates nothing
-#   promote_model.sh --check-content   # also compares per-file sha256 manifests; slow, reads every byte
+#   promote_model.sh --target node1 [--source-path /absolute/artifact --artifact-seal <sha256>] <model-dir-name>
+#   promote_model.sh --target node2 [--source-path /absolute/artifact --artifact-seal <sha256>] <model-dir-name>
+#   promote_model.sh --target both --source <node1|node2> <model-dir-name>
+#   promote_model.sh --check --target <node1|node2|both>
+#   promote_model.sh --check-content --target <node1|node2|both>
 #
 # Example:
 #   TAEY_NODE1_SSH=user@host1 TAEY_NODE1_MODELS=/srv/models \
-#     TAEY_NODE2_SSH=user@host2 TAEY_NODE2_MODELS=/srv/models promote_model.sh node1 my_checkpoint
+#     TAEY_NODE2_SSH=user@host2 TAEY_NODE2_MODELS=/srv/models \
+#     promote_model.sh --target both --source node1 my_checkpoint
 set -Eeuo pipefail
 
 # Load site config if present. This script and list_ep3_consumers.sh are the ONLY consumers of
@@ -49,6 +52,81 @@ for _cfg in "${TAEY_FLEET_ENV:-}" "$_here/fleet.env" "$_here/../fleet.env"; do
   fi
 done
 
+log() { printf '[promote] %s\n' "$*"; }
+die() { printf '[promote] FAIL: %s\n' "$*" >&2; exit 1; }
+
+usage() {
+  cat <<'EOF'
+usage:
+  promote_model.sh --target node1 [--source-path /absolute/artifact --artifact-seal <sha256>] <model-dir-name>
+  promote_model.sh --target node2 [--source-path /absolute/artifact --artifact-seal <sha256>] <model-dir-name>
+  promote_model.sh --target both --source <node1|node2> <model-dir-name>
+  promote_model.sh --check --target <node1|node2|both>
+  promote_model.sh --check-content --target <node1|node2|both>
+
+Single-node mode never contacts, syncs, restarts, or drift-checks the sibling node.
+Dual-node behavior runs only with the explicit target "both".
+EOF
+}
+
+MODE="promote"
+TARGET=""
+SOURCE=""
+SOURCE_PATH=""
+ARTIFACT_SEAL=""
+POSITIONAL=()
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --target) TARGET="${2:?--target needs a value}"; shift 2 ;;
+    --source) SOURCE="${2:?--source needs a value}"; shift 2 ;;
+    --source-path) SOURCE_PATH="${2:?--source-path needs a value}"; shift 2 ;;
+    --artifact-seal) ARTIFACT_SEAL="${2:?--artifact-seal needs a value}"; shift 2 ;;
+    --check)
+      [ "$MODE" = "promote" ] || die "choose exactly one check mode"
+      MODE="check"; shift
+      ;;
+    --check-content)
+      [ "$MODE" = "promote" ] || die "choose exactly one check mode"
+      MODE="check-content"; shift
+      ;;
+    -h|--help) usage; exit 0 ;;
+    --) shift; while [ "$#" -gt 0 ]; do POSITIONAL+=("$1"); shift; done ;;
+    -*) die "unknown argument: $1" ;;
+    *) POSITIONAL+=("$1"); shift ;;
+  esac
+done
+
+case "$TARGET" in
+  node1|node2|both) ;;
+  "") die "--target node1|node2|both is required" ;;
+  *) die "--target must be node1, node2, or both (got: $TARGET)" ;;
+esac
+
+if [ "$MODE" != "promote" ]; then
+  [ "${#POSITIONAL[@]}" -eq 0 ] || die "$MODE does not accept a model name"
+  [ -z "$SOURCE" ] || die "$MODE does not accept --source"
+  [ -z "$SOURCE_PATH" ] || die "$MODE does not accept --source-path"
+  [ -z "$ARTIFACT_SEAL" ] || die "$MODE does not accept --artifact-seal"
+else
+  [ "${#POSITIONAL[@]}" -eq 1 ] || { usage >&2; die "promotion requires exactly one model directory name"; }
+  MODEL="${POSITIONAL[0]}"
+  if [ "$TARGET" = "both" ]; then
+    case "$SOURCE" in node1|node2) ;; *) die "--target both requires --source node1|node2" ;; esac
+    [ -z "$SOURCE_PATH" ] || die "--source-path is only valid for a single-node target"
+    [ -z "$ARTIFACT_SEAL" ] || die "--artifact-seal is only valid with --source-path"
+  else
+    [ -z "$SOURCE" ] || [ "$SOURCE" = "$TARGET" ] \
+      || die "single-node target $TARGET cannot source from or mutate sibling $SOURCE"
+    SOURCE="$TARGET"
+    if [ -n "$SOURCE_PATH" ]; then
+      printf '%s' "$ARTIFACT_SEAL" | grep -qE '^[0-9a-f]{64}$' \
+        || die "--source-path requires --artifact-seal with exactly 64 lowercase hex characters"
+    else
+      [ -z "$ARTIFACT_SEAL" ] || die "--artifact-seal requires --source-path"
+    fi
+  fi
+fi
+
 # NODE CONFIG — every operator-specific value is an env var with a documented default, because a
 # downloaded Taey plus the public repos must be a working system: a fresh Jetson Thor owner changes
 # these and nothing else. Hardcoding an operator's hostnames or home directories here would make the
@@ -60,12 +138,12 @@ done
 #   TAEY_SERVED_NAME                      space-separated stable aliases promoted together
 #   TAEY_PRIMARY_SERVED_NAME              alias used for the generation gate
 #   TAEY_SERVE_UNIT                       systemd unit that serves the model
-NODE1_SSH="${TAEY_NODE1_SSH:?set TAEY_NODE1_SSH, e.g. taey@node1.local}"
-NODE2_SSH="${TAEY_NODE2_SSH:?set TAEY_NODE2_SSH, e.g. taey@node2.local}"
+NODE1_SSH="${TAEY_NODE1_SSH:-}"
+NODE2_SSH="${TAEY_NODE2_SSH:-}"
 NODE1_HOST="${TAEY_NODE1_HOST:-${NODE1_SSH#*@}}"
 NODE2_HOST="${TAEY_NODE2_HOST:-${NODE2_SSH#*@}}"
-NODE1_MODELS="${TAEY_NODE1_MODELS:?set TAEY_NODE1_MODELS, the host dir mounted at /models}"
-NODE2_MODELS="${TAEY_NODE2_MODELS:?set TAEY_NODE2_MODELS, the host dir mounted at /models}"
+NODE1_MODELS="${TAEY_NODE1_MODELS:-}"
+NODE2_MODELS="${TAEY_NODE2_MODELS:-}"
 SERVE_PORT="${TAEY_SERVE_PORT:-8000}"
 # CONSUMERS PINNED TO EACH NODE. Restarting a serving node takes its pinned consumers' backend away
 # mid-flight, and the proxies have NO admission gate — there is no way to tell one "stop accepting
@@ -88,9 +166,6 @@ LEGACY_PROMOTION_DROPIN="zzz-taey-promoted-model.conf"
 # operator workstation drops transfer from ~112MB/s to ~7MB/s because OpenSSH 9+ routes
 # remote-to-remote scp through the local host.
 LOAD_TIMEOUT="${TAEY_LOAD_TIMEOUT:-900}"
-
-log() { printf '[promote] %s\n' "$*"; }
-die() { printf '[promote] FAIL: %s\n' "$*" >&2; exit 1; }
 
 served_root() {  # <host> <alias> -> the model directory the node opened FOR THIS ALIAS
   # Select by IDENTITY, never by position. A node may advertise several models — this fleet's
@@ -261,6 +336,35 @@ drift_check() {  # $1 = "deep" to additionally compare per-file content manifest
   return 0
 }
 
+single_node_check() {  # <node-label> [$2 = "deep"]
+  local label="$1" deep="${2:-}" ssh_t host models alias root resolved_root="" content_manifest
+  case "$label" in
+    node1) ssh_t="$NODE1_SSH"; host="$NODE1_HOST"; models="$NODE1_MODELS" ;;
+    node2) ssh_t="$NODE2_SSH"; host="$NODE2_HOST"; models="$NODE2_MODELS" ;;
+    *) die "internal error: invalid single-node check target $label" ;;
+  esac
+  log "SCOPE PROOF: target=$label sibling=untouched (no sibling SSH, sync, restart, or drift check)"
+  assert_no_identity_conflicts "$ssh_t" "$host"
+  for alias in "${SERVED_ALIASES[@]}"; do
+    root="$(served_root "$host" "$alias")"
+    printf '  %s %s -> %s\n' "$label" "$alias" "${root:-UNRESOLVED}"
+    [ -n "$root" ] || { echo "  INCONCLUSIVE: alias '$alias' did not resolve to exactly one model with a root on $label"; return 2; }
+    if [ -n "$resolved_root" ] && [ "$root" != "$resolved_root" ]; then
+      echo "  DRIFT: stable aliases on $label resolve to different model roots ('$resolved_root' versus '$root')"
+      return 1
+    fi
+    resolved_root="$root"
+  done
+  if [ "$deep" != "deep" ]; then
+    echo "  OK (selected-node served root): $label serves '$resolved_root' for aliases '${SERVED_ALIASES[*]}'."
+    echo "     CONTENT NOT VERIFIED — use --check-content --target $label to hash the selected tree."
+    return 0
+  fi
+  content_manifest="$(manifest "$ssh_t" "$models/${resolved_root##*/}" || true)"
+  [ -n "$content_manifest" ] || { echo "  INCONCLUSIVE: could not compute the selected-node manifest"; return 2; }
+  echo "  OK (selected-node content verified): $label root '$resolved_root' manifest $content_manifest"
+}
+
 consumers_for() { case "$1" in node1) printf '%s' "$NODE1_CONSUMERS" ;; node2) printf '%s' "$NODE2_CONSUMERS" ;; esac; }
 declare -A QUIESCED_CONSUMERS=()
 
@@ -369,6 +473,73 @@ valid_component() {  # single path component: starts alphanumeric, then alnum . 
 }
 valid_abs_dir() { case "$1" in /*) case "$1" in *..*|*[\'\"\$\`\;\&\|\<\>]*) return 1 ;; *) return 0 ;; esac ;; *) return 1 ;; esac; }
 
+require_node_config() {
+  case "$1" in
+    node1)
+      [ -n "$NODE1_SSH" ] || die "set TAEY_NODE1_SSH for target node1"
+      [ -n "$NODE1_HOST" ] || die "set TAEY_NODE1_HOST for target node1"
+      valid_abs_dir "$NODE1_MODELS" || die "TAEY_NODE1_MODELS must be an absolute path with no '..' or shell metacharacters"
+      ;;
+    node2)
+      [ -n "$NODE2_SSH" ] || die "set TAEY_NODE2_SSH for target node2"
+      [ -n "$NODE2_HOST" ] || die "set TAEY_NODE2_HOST for target node2"
+      valid_abs_dir "$NODE2_MODELS" || die "TAEY_NODE2_MODELS must be an absolute path with no '..' or shell metacharacters"
+      ;;
+  esac
+}
+
+stage_single_node_artifact() {  # <node-label> <source-path> <model-name> <artifact-seal>
+  local label="$1" source_path="$2" model="$3" artifact_seal="$4" ssh_t models source_manifest final_manifest
+  case "$label" in
+    node1) ssh_t="$NODE1_SSH"; models="$NODE1_MODELS" ;;
+    node2) ssh_t="$NODE2_SSH"; models="$NODE2_MODELS" ;;
+  esac
+  [ -n "$source_path" ] || source_path="$models/$model"
+  ssh -o ConnectTimeout=10 "$ssh_t" "test -d '$source_path'" \
+    || die "$label: source artifact $source_path not found"
+  if [ -n "$artifact_seal" ]; then
+    log "$label: verifying the externally recorded artifact seal before staging"
+    ssh -o ConnectTimeout=10 "$ssh_t" "
+      set -eu
+      cd '$source_path'
+      [ -f ARTIFACT_SHA256SUMS ]
+      actual=\$(sha256sum ARTIFACT_SHA256SUMS | cut -d' ' -f1)
+      [ \"\$actual\" = '$artifact_seal' ]
+      sha256sum --strict --quiet -c ARTIFACT_SHA256SUMS
+    " || die "$label: artifact seal or a sealed file failed verification"
+  fi
+  source_manifest="$(manifest "$ssh_t" "$source_path" || true)"
+  [ -n "$source_manifest" ] || die "$label: could not compute source artifact manifest"
+
+  if [ "$source_path" != "$models/$model" ]; then
+    log "$label: staging immutable artifact into the canonical serve root with same-filesystem hardlinks"
+    ssh -o ConnectTimeout=10 "$ssh_t" "
+      set -eu
+      source='$source_path'
+      final='$models/$model'
+      stage='$models/.incoming-$model.$USER.$$'
+      [ \"\$(stat -c %d \"\$source\")\" = \"\$(stat -c %d '$models')\" ] \
+        || { echo 'source and serve root are on different filesystems; hardlink staging is impossible' >&2; exit 71; }
+      chmod -R a-w \"\$source\"
+      if [ ! -e \"\$final\" ]; then
+        [ ! -e \"\$stage\" ]
+        mkdir \"\$stage\"
+        cp -al \"\$source/.\" \"\$stage/\"
+        mv \"\$stage\" \"\$final\"
+      fi
+      chmod -R a-w \"\$final\"
+      [ -z \"\$(find \"\$source\" -perm /022 -print -quit)\" ]
+      [ -z \"\$(find \"\$final\" -perm /022 -print -quit)\" ]
+    " || die "$label: atomic hardlink staging into $models/$model failed"
+  fi
+
+  final_manifest="$(manifest "$ssh_t" "$models/$model" || true)"
+  [ -n "$final_manifest" ] || die "$label: could not compute staged artifact manifest"
+  [ "$source_manifest" = "$final_manifest" ] \
+    || die "$label: staged artifact differs from source (source=$source_manifest final=$final_manifest)"
+  log "$label: selected artifact manifest verified: $final_manifest"
+}
+
 assert_not_quarantined() {  # <model-dir-name> — permanent serving-boundary refusals
   case "$1" in
     servable_cpt_qwen38_v3)
@@ -377,8 +548,11 @@ assert_not_quarantined() {  # <model-dir-name> — permanent serving-boundary re
   esac
 }
 
-valid_abs_dir "$NODE1_MODELS" || die "TAEY_NODE1_MODELS must be an absolute path with no '..' or shell metacharacters"
-valid_abs_dir "$NODE2_MODELS" || die "TAEY_NODE2_MODELS must be an absolute path with no '..' or shell metacharacters"
+case "$TARGET" in
+  node1) require_node_config node1 ;;
+  node2) require_node_config node2 ;;
+  both) require_node_config node1; require_node_config node2 ;;
+esac
 valid_component "$UNIT" || die "TAEY_SERVE_UNIT must be a single safe component (got: $UNIT)"
 [ "${#SERVED_ALIASES[@]}" -gt 0 ] || die "TAEY_SERVED_NAME must name at least one stable alias"
 for alias in "${SERVED_ALIASES[@]}"; do
@@ -391,18 +565,34 @@ case " ${SERVED_ALIASES[*]} " in
   *) die "TAEY_PRIMARY_SERVED_NAME '$PRIMARY_ALIAS' is not present in TAEY_SERVED_NAME '$SERVED_NAME_LIST'" ;;
 esac
 
-case "${1:-}" in
-  --check)         drift_check;      exit $? ;;
-  --check-content) drift_check deep; exit $? ;;
-esac
-[ $# -eq 2 ] || die "usage: promote_model.sh <node1|node2> <model-dir-name>  |  promote_model.sh --check"
-SRC="$1"; MODEL="$2"
+if [ "$MODE" != "promote" ]; then
+  case "$TARGET:$MODE" in
+    both:check) drift_check; exit $? ;;
+    both:check-content) drift_check deep; exit $? ;;
+    node1:check|node2:check) single_node_check "$TARGET"; exit $? ;;
+    node1:check-content|node2:check-content) single_node_check "$TARGET" deep; exit $? ;;
+  esac
+fi
+
 valid_component "$MODEL" \
   || die "model must be a single directory name matching [A-Za-z0-9][A-Za-z0-9._-]* — got: $MODEL"
 assert_not_quarantined "$MODEL"
+if [ -n "$SOURCE_PATH" ]; then
+  valid_abs_dir "$SOURCE_PATH" || die "--source-path must be an absolute path with no '..' or shell metacharacters"
+  source_name="${SOURCE_PATH%/}"; source_name="${source_name##*/}"
+  [ "$source_name" = "$MODEL" ] \
+    || die "--source-path basename '$source_name' must match model directory name '$MODEL'"
+fi
 # Promotion restarts serving nodes, so from here the consumer declaration is mandatory.
-[ -n "$NODE1_CONSUMERS" ] || die "set TAEY_NODE1_CONSUMERS to the systemd --user units pinned to node1, or the literal: none"
-[ -n "$NODE2_CONSUMERS" ] || die "set TAEY_NODE2_CONSUMERS to the systemd --user units pinned to node2, or the literal: none"
+case "$TARGET" in
+  node1) TARGET_NODES=(node1) ;;
+  node2) TARGET_NODES=(node2) ;;
+  both) TARGET_NODES=(node1 node2) ;;
+esac
+for label in "${TARGET_NODES[@]}"; do
+  [ -n "$(consumers_for "$label")" ] \
+    || die "set TAEY_NODE${label#node}_CONSUMERS for target $label, or the literal: none"
+done
 
 # A NON-EMPTY DECLARATION IS NOT A COMPLETE ONE. Checking only that the operator typed something
 # lets an undeclared consumer keep admitting work while its node restarts — observed on this fleet,
@@ -419,15 +609,32 @@ undeclared_for() {  # <node-host> <declared-list> -> units targeting that host b
     case " $declared " in *" $u "*) ;; *) printf '%s ' "$u" ;; esac
   done
 }
-for pair in "node1:$NODE1_HOST:$NODE1_CONSUMERS" "node2:$NODE2_HOST:$NODE2_CONSUMERS"; do
-  lbl="${pair%%:*}"; rest="${pair#*:}"; host="${rest%%:*}"; decl="${rest#*:}"
+for lbl in "${TARGET_NODES[@]}"; do
+  case "$lbl" in
+    node1) host="$NODE1_HOST"; decl="$NODE1_CONSUMERS" ;;
+    node2) host="$NODE2_HOST"; decl="$NODE2_CONSUMERS" ;;
+  esac
   [ "$decl" = "none" ] && decl=""
   missing="$(undeclared_for "$host" "$decl")"
   [ -z "$missing" ] || die "$lbl: these ACTIVE units target $host but are not in TAEY_NODE${lbl#node}_CONSUMERS: $missing
 Add them (they must be stopped for the maintenance window) or stop them first. Refusing to restart a node while an undeclared consumer can admit work."
 done
-log "consumer declarations cover every active unit targeting each node"
+log "consumer declarations cover every active unit targeting: ${TARGET_NODES[*]}"
 
+if [ "$TARGET" != "both" ]; then
+  case "$TARGET" in
+    node1) target_ssh="$NODE1_SSH"; target_models="$NODE1_MODELS"; target_host="$NODE1_HOST" ;;
+    node2) target_ssh="$NODE2_SSH"; target_models="$NODE2_MODELS"; target_host="$NODE2_HOST" ;;
+  esac
+  log "SCOPE PROOF: target=$TARGET source=$SOURCE sibling=untouched (no sibling SSH, sync, restart, or drift check)"
+  assert_no_identity_conflicts "$target_ssh" "$target_host"
+  stage_single_node_artifact "$TARGET" "$SOURCE_PATH" "$MODEL" "$ARTIFACT_SEAL"
+  promote_node "$target_ssh" "$target_models" "$target_host" "$MODEL" "$TARGET"
+  log "PROMOTED: $MODEL is live on $TARGET only as '${SERVED_ALIASES[*]}'; sibling untouched"
+  exit 0
+fi
+
+SRC="$SOURCE"
 case "$SRC" in
   node1) src_ssh="$NODE1_SSH"; src_dir="$NODE1_MODELS"; dst_ssh="$NODE2_SSH"; dst_dir="$NODE2_MODELS" ;;
   node2) src_ssh="$NODE2_SSH"; src_dir="$NODE2_MODELS"; dst_ssh="$NODE1_SSH"; dst_dir="$NODE1_MODELS" ;;

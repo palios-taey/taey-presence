@@ -159,13 +159,23 @@ than a habit — a habit is what lapses at 2am.
 #   --served-name <id>   a node serving a CANDIDATE its peers lack -> stale callers get a clean 404
 #   --keep-served-name   a fleet-wide PROMOTION -> every caller of that id should move together
 
-# PUT ONE CHECKPOINT ON BOTH NODES, and prove they match. deploy_thor.sh above swaps ONE node;
-# this is what makes the pair identical. It syncs node-to-node (never relaying through your
+# SWAP ONE NODE while deliberately preserving its sibling. The explicit target is load-bearing;
+# omitted target fails closed. A source outside the mounted serve root is staged atomically with
+# same-filesystem hardlinks, which avoids duplicating a 52GB artifact on the selected Thor.
+./serving/promote_model.sh --check --target node1
+./serving/promote_model.sh --target node1 \
+  --source-path /srv/taey/incoming/<checkpoint-dir-name> \
+  --artifact-seal <sha256-of-ARTIFACT_SHA256SUMS> \
+  <checkpoint-dir-name>
+
+# PUT ONE CHECKPOINT ON BOTH NODES, and prove they match. This explicit `both` mode makes the pair
+# identical. It syncs node-to-node (never relaying through your
 # workstation, which costs ~16x throughput), refuses unless a per-file sha256 manifest matches on
 # both sides, then promotes ONE NODE AT A TIME inside a maintenance window: the consumers pinned to
 # that node are STOPPED, the node is restarted and must serve the right root AND return a real
 # completion, and only then are the consumers restarted. Config comes from serving/fleet.env.
-./serving/promote_model.sh node1 <checkpoint-dir-name>
+./serving/promote_model.sh --check --target both
+./serving/promote_model.sh --target both --source node1 <checkpoint-dir-name>
 
 # PLAN A BOUNDED THOR ROLLING RELEASE. This signed planner requires an attributable Hub
 # receipt, immutable taey+ep3 aliases, a declared rollback artifact, and full SHA-256 values.
@@ -188,8 +198,8 @@ python3 serving/rolling_thor_release.py \
 # No live rolling-release executor is shipped by this repository revision.
 
 # THE STANDING DRIFT GATE. Run it after any serving change, and on a schedule.
-./serving/promote_model.sh --check            # served-root agreement; fast, mutates nothing
-./serving/promote_model.sh --check-content    # also compares per-file manifests; reads every byte
+./serving/promote_model.sh --check --target both         # served-root agreement; fast, read-only
+./serving/promote_model.sh --check-content --target both # compare per-file manifests; reads every byte
 
 # PROMOTE AN ALREADY-SERVED RELEASE INTO MAIN TAEY. This waits for zero open turns
 # across Main and every registered supporting seat,
@@ -204,8 +214,9 @@ python3 serving/rolling_thor_release.py \
 ```
 
 **The tools have distinct scopes; none silently replaces another.** `deploy_thor.sh` installs the
-stack and swaps an artifact on ONE node. `promote_model.sh` is the established direct-copy path
-that makes BOTH nodes hold and serve the same checkpoint. `rolling_thor_release.py` is a signed,
+stack. `promote_model.sh` requires an explicit `node1`, `node2`, or `both` target; single-node mode
+does not contact the sibling, while `both` is the established direct-copy path that makes both nodes
+hold and serve the same checkpoint. `rolling_thor_release.py` is a signed,
 replay-protected planner for the bounded release contract; it is not a live release path in this
 revision. `promote_main_model.sh` points the UI-facing proxy at an endpoint that is already serving
 correctly. Do not mix existing tool mutations in one window.
