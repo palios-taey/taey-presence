@@ -36,6 +36,12 @@ try:
         selection_trigger_operation,
     )
     from consultation_v2.native_dialog_snapshot import build_native_dialog_snapshot
+    from consultation_v2.post_action_barrier import (
+        PostActionLineage,
+        PostActionTransition,
+        resolve_post_action_transition,
+        run_resolved_post_action_barrier,
+    )
     from consultation_v2.runtime import ConsultationRuntime
     from consultation_v2.snapshot import (
         build_app_root_snapshot,
@@ -1543,6 +1549,70 @@ def _guard_action(
     )
 
 
+def _grok_retry_transition(
+    args: argparse.Namespace,
+    deps: SimpleNamespace,
+) -> PostActionTransition | None:
+    if args.action != "click" or deps.platform != "grok":
+        return None
+    ref = getattr(args, "ref", None)
+    if not isinstance(ref, str) or not ref:
+        return None
+    descriptor = _decode_ref(ref)
+    if descriptor["element"] != "retry_button":
+        return None
+    return resolve_post_action_transition("grok", "usage_limit_retry")
+
+
+def _grok_retry_barrier_receipt(
+    transition: PostActionTransition,
+    result: dict[str, Any],
+    deps: SimpleNamespace,
+) -> dict[str, Any]:
+    element = result.get("element")
+    if (
+        result.get("performed") is not True
+        or result.get("performed_primitive") != "click"
+        or not isinstance(element, dict)
+        or element.get("element") != "retry_button"
+    ):
+        raise UiDriveError("Grok Retry mutation returned an invalid action receipt")
+    ref = element.get("ref")
+    if not isinstance(ref, str) or not ref:
+        raise UiDriveError("Grok Retry mutation returned no exact action ref")
+    descriptor = _decode_ref(ref)
+    lease = _lease_context()
+    assert lease is not None
+    atspi_bus_address = os.environ.get("AT_SPI_BUS_ADDRESS", "")
+    if not atspi_bus_address:
+        raise UiDriveError("Grok Retry mutation has no AT-SPI bus identity")
+    receipt = run_resolved_post_action_barrier(
+        transition,
+        lineage=PostActionLineage(
+            seat_id=lease.seat_id,
+            turn_id=lease.turn_id,
+            process_generation=lease.process_generation,
+            display=deps.display,
+            atspi_bus_address=atspi_bus_address,
+            pre_action_revision=descriptor["revision"],
+        ),
+        action_receipt={
+            "action": result["performed_primitive"],
+            "element": element["element"],
+            "mutation_count": 1,
+            "outcome": "applied",
+            "ref": ref,
+            "revision": descriptor["revision"],
+        },
+    )
+    if receipt.get("next_mutation_authorized") is not True:
+        raise UiDriveError(
+            "Grok Retry post-action barrier HALT receipt="
+            + json.dumps(receipt, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+        )
+    return receipt
+
+
 def _dispatch(args: argparse.Namespace, deps: SimpleNamespace) -> Any:
     if args.action == "observe":
         result = _observe(args, deps)
@@ -1552,6 +1622,7 @@ def _dispatch(args: argparse.Namespace, deps: SimpleNamespace) -> Any:
             LOCK_TTL_DEFAULT,
         )
         return result
+    post_action_transition = _grok_retry_transition(args, deps)
     lease_receipt = None
     if args.action in _LOCK_ACTION_OPS:
         lease = _lease_context()
@@ -1561,6 +1632,12 @@ def _dispatch(args: argparse.Namespace, deps: SimpleNamespace) -> Any:
         result = _extract_response(args, deps)
     elif args.action in {"click", "focus", "activate", "hover", "operate"}:
         result = _element_action(args.action, args, deps)
+        if post_action_transition is not None:
+            result["post_action_barrier"] = _grok_retry_barrier_receipt(
+                post_action_transition,
+                result,
+                deps,
+            )
     elif args.action == "type":
         result = _type_text(args, deps)
     elif args.action == "paste":
