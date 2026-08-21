@@ -964,8 +964,22 @@ TOOLS = [
                         "enum": ["base", "menu_snapshot", "app_root_snapshot"],
                         "description": "observe only: canonical Hands observation scope; use the exact workflow.selection menu operate.scope from platform YAML; defaults to base",
                     },
-                    "ref": {"type": "string",
-                            "description": "revision-bound element ref from the immediately preceding fresh observe; required for click/focus/activate/hover/operate"},
+                    "element": {
+                        "type": "string",
+                        "description": (
+                            "readable element key from the immediately preceding fresh observe; "
+                            "for click/focus/activate/hover/operate Presence resolves the exact "
+                            "mapped singleton ref without model transcription"
+                        ),
+                    },
+                    "ref": {
+                        "type": "string",
+                        "description": (
+                            "transitional revision-bound ref from the immediately preceding fresh "
+                            "observe; when element is also supplied it must equal Presence's stored "
+                            "singleton ref"
+                        ),
+                    },
                     "text": {"type": "string", "description": "text to type or paste (use for SHORT input; for a large packet use text_file instead so you don't regenerate every character)"},
                     "text_file": {"type": "string", "description": "absolute path to a file whose EXACT bytes are pasted (paste action only). Prefer this for any large/verbatim content — pass the path, not the content; the tool reads and pastes it. Instant and byte-perfect."},
                     "output_file": {"type": "string", "description": "absolute destination path for read_clipboard; the file must not already exist"},
@@ -1567,11 +1581,11 @@ _DRIVE_MUTATIONS = {
 }
 _DRIVE_ACTION_ARGUMENTS = {
     "observe": frozenset({"display", "action", "scope"}),
-    "click": frozenset({"display", "action", "ref"}),
-    "focus": frozenset({"display", "action", "ref"}),
-    "activate": frozenset({"display", "action", "ref"}),
-    "hover": frozenset({"display", "action", "ref"}),
-    "operate": frozenset({"display", "action", "ref"}),
+    "click": frozenset({"display", "action", "element", "ref"}),
+    "focus": frozenset({"display", "action", "element", "ref"}),
+    "activate": frozenset({"display", "action", "element", "ref"}),
+    "hover": frozenset({"display", "action", "element", "ref"}),
+    "operate": frozenset({"display", "action", "element", "ref"}),
     "navigate": frozenset({"display", "action", "url"}),
     "type": frozenset({"display", "action", "text"}),
     "paste": frozenset({"display", "action", "text", "text_file"}),
@@ -1784,6 +1798,7 @@ def _do_drive_chat(arguments: dict) -> str:
 
     expected_revision = ""
     native_dialog_revision = ""
+    observed = None
     if action in _DRIVE_MUTATIONS:
         terminal = sequence.get("terminal")
         if isinstance(terminal, dict):
@@ -1867,11 +1882,34 @@ def _do_drive_chat(arguments: dict) -> str:
         cmd += ["--output-file", output_file]
     if action in ("click", "focus", "activate", "hover", "operate"):
         ref = arguments.get("ref")
-        if ref:
-            cmd += ["--ref", str(ref)]
+        element = arguments.get("element")
+        if element is not None:
+            if not isinstance(element, str) or not element:
+                return _argument_refusal(f"{action} element must be a non-empty string")
+            singleton_refs = (
+                observed.get("singleton_refs") if isinstance(observed, dict) else None
+            )
+            canonical_ref = (
+                singleton_refs.get(element)
+                if isinstance(singleton_refs, dict)
+                else None
+            )
+            if not isinstance(canonical_ref, str) or not canonical_ref:
+                return _terminal_refusal(
+                    f"preceding observe did not map exactly one canonical {element!r} target"
+                )
+            if ref is not None and ref != canonical_ref:
+                return _terminal_refusal(
+                    f"supplied {element!r} ref does not equal the preceding observe's "
+                    "canonical singleton ref"
+                )
+            ref = canonical_ref
+        if isinstance(ref, str) and ref:
+            cmd += ["--ref", ref]
         else:
             return _argument_refusal(
-                f"{action} requires ref=<from the immediately preceding fresh observe>"
+                f"{action} requires element=<exact mapped singleton from the immediately "
+                "preceding fresh observe> or a transitional ref"
             )
     elif action in ("type", "paste"):
         # Prefer text_file: the model passes a PATH and ui_drive pastes the exact
@@ -1991,11 +2029,33 @@ def _do_drive_chat(arguments: dict) -> str:
                             )
                         if monitor_receipt is not None:
                             result["completion_monitor"] = monitor_receipt
+                        singleton_refs = {}
+                        mapped = result.get("mapped")
+                        if observed_surface == "browser":
+                            if not isinstance(mapped, list):
+                                return _terminal_refusal(
+                                    "browser observe returned no canonical mapped element list"
+                                )
+                            refs_by_element = {}
+                            for item in mapped:
+                                if not isinstance(item, dict) or item.get("match_count") != 1:
+                                    continue
+                                element = item.get("element")
+                                ref = item.get("ref")
+                                if not isinstance(element, str) or not isinstance(ref, str):
+                                    continue
+                                refs_by_element.setdefault(element, []).append(ref)
+                            singleton_refs = {
+                                element: refs[0]
+                                for element, refs in refs_by_element.items()
+                                if len(refs) == 1
+                            }
                         observations[display] = {
                             "surface": observed_surface,
                             "snapshot_revision": revision,
                             "snapshot_scope": str(result.get("scope") or ""),
                             "tool_round": tool_round,
+                            "singleton_refs": singleton_refs,
                         }
                         payload["ui_sequence"] = {
                             "state": "observed",
