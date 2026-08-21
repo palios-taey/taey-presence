@@ -22,6 +22,7 @@ import operator
 import re
 import socket
 import uuid
+from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -98,6 +99,9 @@ TAEY_TURN_HEARTBEAT_SECS = max(
         TAEY_TURN_LEASE_SECS // 3,
     ),
 )
+TAEY_DRIVE_CHAT_CAPTURE_ROOT = os.environ.get(
+    "TAEY_DRIVE_CHAT_CAPTURE_ROOT", ""
+).strip()
 
 app = FastAPI(title="Taey Soma Proxy", version="1.0.0")
 
@@ -585,7 +589,11 @@ async def execute_tool_call_async(
     token = _request_context.set(context)
     _audit("tool_start", {"name": name, "arguments": arguments})
     try:
-        result = await asyncio.to_thread(execute_tool_call, name, arguments)
+        result = await asyncio.to_thread(
+            _execute_tool_call_with_capture,
+            name,
+            arguments,
+        )
         _audit("tool_end", _tool_receipt(name, arguments, result, ok=True))
         return result
     except Exception as exc:
@@ -593,6 +601,232 @@ async def execute_tool_call_async(
         raise
     finally:
         _request_context.reset(token)
+
+
+_CAPTURE_COMPONENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$")
+
+
+def _capture_component(context: dict, key: str) -> str:
+    value = str(context.get(key) or "")
+    if not _CAPTURE_COMPONENT_RE.fullmatch(value):
+        raise RuntimeError(f"drive_chat capture requires a valid {key}")
+    return value
+
+
+def _open_private_directory(parent_fd: int, component: str) -> int:
+    created = False
+    try:
+        os.mkdir(component, 0o700, dir_fd=parent_fd)
+        created = True
+    except FileExistsError:
+        pass
+    if created:
+        os.fsync(parent_fd)
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    child_fd = os.open(component, flags, dir_fd=parent_fd)
+    try:
+        metadata = os.fstat(child_fd)
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise RuntimeError("drive_chat capture path component is not a directory")
+        if (
+            metadata.st_uid != os.geteuid()
+            or stat.S_IMODE(metadata.st_mode) != 0o700
+        ):
+            raise RuntimeError(
+                "drive_chat capture directories must be owned by the proxy user with mode 0700"
+            )
+        return child_fd
+    except Exception:
+        os.close(child_fd)
+        raise
+
+
+def _write_private_json(parent_fd: int, name: str, payload: dict) -> None:
+    body = (
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        + "\n"
+    ).encode("utf-8")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+    fd = os.open(name, flags, 0o600, dir_fd=parent_fd)
+    try:
+        os.fchmod(fd, 0o600)
+        view = memoryview(body)
+        while view:
+            written = os.write(fd, view)
+            if written <= 0:
+                raise OSError("short write while storing drive_chat capture")
+            view = view[written:]
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    os.fsync(parent_fd)
+
+
+def _prepare_drive_chat_capture(arguments: dict) -> tuple[int, dict]:
+    context = dict(_request_context.get())
+    root = TAEY_DRIVE_CHAT_CAPTURE_ROOT
+    if not root:
+        raise RuntimeError(
+            "TAEY_DRIVE_CHAT_CAPTURE_ROOT is required before drive_chat can execute"
+        )
+    absolute_root = os.path.abspath(root)
+    if root != absolute_root or os.path.realpath(root) != absolute_root:
+        raise RuntimeError(
+            "TAEY_DRIVE_CHAT_CAPTURE_ROOT must be an absolute, non-symlink path"
+        )
+    with ExitStack() as opened:
+        root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        opened.callback(os.close, root_fd)
+        root_metadata = os.fstat(root_fd)
+        if (
+            root_metadata.st_uid != os.geteuid()
+            or stat.S_IMODE(root_metadata.st_mode) != 0o700
+        ):
+            raise RuntimeError(
+                "TAEY_DRIVE_CHAT_CAPTURE_ROOT must be owned by the proxy user with mode 0700"
+            )
+        identity = {
+            key: _capture_component(context, key)
+            for key in (
+                "seat_id",
+                "event_id",
+                "turn_id",
+                "correlation_id",
+                "process_generation",
+            )
+        }
+        round_num = context.get("tool_round")
+        if not isinstance(round_num, int) or round_num <= 0:
+            raise RuntimeError("drive_chat capture requires a positive tool_round")
+        tool_call_id = str(context.get("tool_call_id") or "")
+        if not tool_call_id:
+            raise RuntimeError("drive_chat capture requires a tool_call_id")
+        current_fd = root_fd
+        for component in (
+            identity["seat_id"],
+            identity["event_id"],
+            identity["turn_id"],
+        ):
+            current_fd = _open_private_directory(current_fd, component)
+            opened.callback(os.close, current_fd)
+        exchange = (
+            f"{round_num:04d}-"
+            f"{hashlib.sha256(tool_call_id.encode('utf-8')).hexdigest()[:16]}-"
+            f"{uuid.uuid4().hex}"
+        )
+        exchange_fd = _open_private_directory(current_fd, exchange)
+        envelope = {
+            "schema": "taey.drive_chat.exchange.v1",
+            **identity,
+            "tool_call_id": tool_call_id,
+            "tool_round": round_num,
+        }
+        try:
+            _write_private_json(
+                exchange_fd,
+                "request.json",
+                {**envelope, "arguments": arguments},
+            )
+            return exchange_fd, envelope
+        except Exception:
+            os.close(exchange_fd)
+            raise
+
+
+def _terminalize_capture_failure(message: str, arguments: dict) -> None:
+    context = _request_context.get()
+    sequence = context.get("_ui_sequence")
+    if isinstance(sequence, dict) and not isinstance(sequence.get("terminal"), dict):
+        sequence["terminal"] = {
+            "display": str(arguments.get("display") or ""),
+            "action": str(arguments.get("action") or ""),
+            "tool_round": context.get("tool_round"),
+            "reason": message,
+        }
+        observations = sequence.get("observations")
+        if isinstance(observations, dict):
+            observations.clear()
+    profile_state = context.get("_tool_profile_state")
+    if isinstance(profile_state, dict) and not isinstance(
+        profile_state.get("terminal"), dict
+    ):
+        profile_state["terminal"] = {
+            "tool": "drive_chat",
+            "reason": message,
+        }
+
+
+def _returned_drive_chat_status(body: str) -> object:
+    try:
+        payload = json.loads(body)
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return payload.get("ok")
+
+
+def _execute_tool_call_with_capture(name: str, arguments: dict) -> str:
+    if name != "drive_chat":
+        return execute_tool_call(name, arguments)
+    try:
+        exchange_fd, envelope = _prepare_drive_chat_capture(arguments)
+    except Exception as exc:
+        message = f"drive_chat evidence preflight failed: {type(exc).__name__}: {exc}"
+        _terminalize_capture_failure(message, arguments)
+        raise RuntimeError(message) from exc
+    try:
+        try:
+            result = execute_tool_call(name, arguments)
+        except Exception as exc:
+            body = f"{type(exc).__name__}: {exc}"
+            try:
+                _write_private_json(
+                    exchange_fd,
+                    "result.json",
+                    {
+                        **envelope,
+                        "returned": False,
+                        "exception_type": type(exc).__name__,
+                        "result": body,
+                        **_digest(body),
+                    },
+                )
+            except Exception as capture_exc:
+                message = (
+                    "drive_chat evidence finalization failed after tool exception: "
+                    f"{type(capture_exc).__name__}: {capture_exc}"
+                )
+                _terminalize_capture_failure(message, arguments)
+                raise RuntimeError(message) from capture_exc
+            _terminalize_capture_failure(
+                f"drive_chat execution failed: {type(exc).__name__}: {exc}",
+                arguments,
+            )
+            raise
+        try:
+            body = result if isinstance(result, str) else str(result)
+            _write_private_json(
+                exchange_fd,
+                "result.json",
+                {
+                    **envelope,
+                    "returned": True,
+                    "tool_ok": _returned_drive_chat_status(body),
+                    "result": body,
+                    **_digest(body),
+                },
+            )
+        except Exception as exc:
+            message = (
+                "drive_chat evidence finalization failed after UI execution: "
+                f"{type(exc).__name__}: {exc}"
+            )
+            _terminalize_capture_failure(message, arguments)
+            raise RuntimeError(message) from exc
+        return result
+    finally:
+        os.close(exchange_fd)
 
 def inject_preamble(body: dict) -> dict:
     """Enrich the request with ecosystem state and somatic data.
