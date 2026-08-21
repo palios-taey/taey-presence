@@ -79,6 +79,10 @@ SYSTEM_PROMPT_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
     "TAEY_OPERATING_PROMPT.md",
 )
+MANUAL_CHAT_UI_SYSTEM_PROMPT_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "TAEY_CHAT_UI_SYSTEM.md",
+)
 # Optional second always-on prefix (e.g. a constitution/kernel). Empty = none.
 # Set PERMANENT_KERNEL_PATH to a file to prepend it ahead of the persona.
 PERMANENT_KERNEL_PATH = os.environ.get("PERMANENT_KERNEL_PATH", "")
@@ -102,6 +106,7 @@ _mira_redis: Optional[redis.Redis] = None
 _http: Optional[httpx.AsyncClient] = None
 _ecosystem_http: Optional[httpx.Client] = None
 _system_prompt: str = ""
+_manual_chat_ui_system_prompt: str = ""
 _permanent_kernel: str = ""
 _static_system_prefix: str = ""
 
@@ -192,7 +197,8 @@ SOMATIC_BLOCK_RE = re.compile(
 @app.on_event("startup")
 async def startup():
     global _redis, _mira_redis, _http, _ecosystem_http
-    global _permanent_kernel, _static_system_prefix, _system_prompt
+    global _manual_chat_ui_system_prompt, _permanent_kernel
+    global _static_system_prefix, _system_prompt
     global _liveness_reaper_task
     if not _serving_socket_reserved:
         raise RuntimeError(
@@ -259,10 +265,25 @@ async def startup():
         log.warning("Permanent kernel not found at %s", PERMANENT_KERNEL_PATH)
 
     _system_prompt = _read_canonical_system_prompt()
+    manual_chat_prompt_path = Path(MANUAL_CHAT_UI_SYSTEM_PROMPT_PATH)
+    if not manual_chat_prompt_path.is_file():
+        raise RuntimeError(
+            f"manual chat UI system prompt is missing or not a regular file: {manual_chat_prompt_path}"
+        )
+    _manual_chat_ui_system_prompt = manual_chat_prompt_path.read_text(encoding="utf-8")
+    if not _manual_chat_ui_system_prompt.strip():
+        raise RuntimeError(
+            f"manual chat UI system prompt is empty: {manual_chat_prompt_path}"
+        )
     log.info(
         "Canonical system prompt loaded from %s (%d chars)",
         SYSTEM_PROMPT_PATH,
         len(_system_prompt),
+    )
+    log.info(
+        "Manual chat UI system prompt loaded from %s (%d chars)",
+        manual_chat_prompt_path,
+        len(_manual_chat_ui_system_prompt),
     )
 
     _static_system_prefix = _permanent_kernel
@@ -3213,7 +3234,18 @@ async def _chat_completions_for_turn(
 
     # Strip model field -- let vLLM use its loaded model
     body.pop("model", None)
-    body = inject_preamble(body)
+    if turn.tool_profile == _MANUAL_CHAT_UI_TOOL_PROFILE:
+        messages = [
+            message
+            for message in body.get("messages", [])
+            if message.get("role") != "system"
+        ]
+        body["messages"] = [
+            {"role": "system", "content": _manual_chat_ui_system_prompt},
+            *messages,
+        ]
+    else:
+        body = inject_preamble(body)
     is_stream = body.get("stream", False)
 
     # BOUND HERE BECAUSE THE STREAMING CLOSURE READS THEM UNCONDITIONALLY.
