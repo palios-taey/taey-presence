@@ -850,8 +850,8 @@ def _element_action(
             )
         if declared.get("method") == "focus_and_key_open":
             return _focus_and_key_open_operation(row, declared, deps)
-        if declared.get("method") == "mapped_pointer_open":
-            return _mapped_pointer_open_operation(row, declared, deps)
+        if declared.get("method") == "mapped_pointer_activate":
+            return _mapped_pointer_activate_operation(row, declared, deps)
         allowed_now = declared.get("allowed_now")
         if not isinstance(allowed_now, list) or len(allowed_now) != 1:
             raise UiDriveError(
@@ -909,56 +909,52 @@ def _element_action(
     }
 
 
-def _mapped_pointer_open_operation(
+def _mapped_pointer_activate_operation(
     row: dict[str, Any],
     declared: dict[str, Any],
     deps: SimpleNamespace,
 ) -> dict[str, Any]:
     primitives = declared.get("primitives")
-    if primitives != ["mapped_pointer_click"]:
+    if primitives != ["mapped_pointer_activate"]:
         raise UiDriveError(
-            f"{row['element']} mapped_pointer_open requires exact "
-            "['mapped_pointer_click'] primitives"
+            f"{row['element']} mapped_pointer_activate requires exact "
+            "['mapped_pointer_activate'] primitives"
         )
     allowed_now = declared.get("allowed_now")
     if allowed_now == []:
         raise UiDriveError(
-            f"{row['element']} mapped_pointer_open is already expanded; refusing toggle"
+            f"{row['element']} mapped_pointer_activate is already expanded; refusing toggle"
         )
-    if allowed_now != ["mapped_pointer_click"]:
+    if allowed_now != ["mapped_pointer_activate"]:
         raise UiDriveError(
-            f"{row['element']} mapped_pointer_open has unexpected live state "
+            f"{row['element']} mapped_pointer_activate has unexpected live state "
             f"(allowed_now={allowed_now!r})"
-        )
-    if row.get("x") is None or row.get("y") is None:
-        raise UiDriveError(
-            f"{row['element']} mapped_pointer_open requires a fresh mapped extent"
         )
 
     runtime = ConsultationRuntime(deps.platform)
-    evidence = runtime.mapped_pointer_open(
+    evidence = runtime.mapped_pointer_activate(
         ElementRef(
             key=str(row["element"]),
             name=str(row.get("name") or ""),
             role=str(row.get("role") or ""),
-            x=row.get("x"),
-            y=row.get("y"),
+            x=None,
+            y=None,
             states=list(row.get("states") or []),
             text=row.get("text"),
             description=row.get("description"),
             atspi_obj=row.get("atspi_obj"),
-            raw=row,
+            raw={},
         )
     )
     if evidence.get("ok") is not True:
         raise UiDriveError(
-            f"{row['element']} mapped_pointer_open failed: "
+            f"{row['element']} mapped_pointer_activate failed: "
             + json.dumps(evidence, ensure_ascii=False, sort_keys=True)
         )
     return {
         "performed": True,
-        "performed_primitive": "mapped_pointer_open",
-        "performed_operation": "mapped_pointer_open",
+        "performed_primitive": "mapped_pointer_activate",
+        "performed_operation": "mapped_pointer_activate",
         "performed_primitives": list(primitives),
         "operation_evidence": evidence,
         "element": {
