@@ -1189,11 +1189,13 @@ TOOLS = [
                         "type": "string",
                         "enum": ["observe", "click", "type", "paste", "key",
                                  "read_clipboard", "focus", "activate", "hover", "operate", "navigate",
-                                 "focus_dialog"],
+                                 "focus_dialog", "scroll_to_bottom"],
                         "description": (
                             "the single action to perform; operate executes the one operation "
                             "declared by platform YAML for the chosen revision-bound ref; direct "
                             "click/focus/activate/hover are only for refs with no declaration; "
+                            "scroll_to_bottom executes only the first assistant_text extraction "
+                            "step declared by platform YAML, anchored to its exact mapped element; "
                             "navigate opens only this platform's exact YAML urls.fresh through "
                             "the shared self-verifying navigation primitive; "
                             "focus_dialog activates and verifies an "
@@ -1816,10 +1818,11 @@ _PASTE_INLINE_MAX_CHARS = int(os.environ.get("TAEY_PASTE_INLINE_MAX_CHARS", "800
 
 _DRIVE_ACTIONS = {
     "observe", "click", "focus", "activate", "hover", "operate", "navigate", "type", "paste", "key",
-    "read_clipboard", "focus_dialog",
+    "read_clipboard", "focus_dialog", "scroll_to_bottom",
 }
 _DRIVE_MUTATIONS = {
     "click", "focus", "activate", "hover", "operate", "navigate", "type", "paste", "key", "focus_dialog",
+    "scroll_to_bottom",
 }
 _DRIVE_ACTION_ARGUMENTS = {
     "observe": frozenset({"display", "action", "scope"}),
@@ -1828,6 +1831,7 @@ _DRIVE_ACTION_ARGUMENTS = {
     "activate": frozenset({"display", "action", "element", "ref"}),
     "hover": frozenset({"display", "action", "element", "ref"}),
     "operate": frozenset({"display", "action", "element", "ref"}),
+    "scroll_to_bottom": frozenset({"display", "action", "element", "ref"}),
     "navigate": frozenset({"display", "action", "url"}),
     "type": frozenset({"display", "action", "text"}),
     "paste": frozenset({"display", "action", "text", "text_file"}),
@@ -2122,7 +2126,7 @@ def _do_drive_chat(arguments: dict) -> str:
             cmd += ["--scope", scope]
     if output_file is not None:
         cmd += ["--output-file", output_file]
-    if action in ("click", "focus", "activate", "hover", "operate"):
+    if action in ("click", "focus", "activate", "hover", "operate", "scroll_to_bottom"):
         ref = arguments.get("ref")
         element = arguments.get("element")
         if element is not None:
