@@ -195,6 +195,23 @@ def _lease_context(*, required: bool = True) -> SimpleNamespace | None:
     )
 
 
+def _target_fingerprint(item: ElementRef, *, match_count: int) -> str:
+    payload = {
+        "description": item.description or "",
+        "match_count": match_count,
+        "name": item.name,
+        "role": item.role,
+        "text": item.text or "",
+    }
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def _encode_ref(
     *,
     display: str,
@@ -202,16 +219,20 @@ def _encode_ref(
     scope: str,
     revision: str,
     element: str,
+    current_url: str,
+    target_sha256: str,
     pick: str | None = None,
 ) -> str:
     descriptor = {
-        "v": 5,
+        "v": 6,
         "display": display,
         "platform": platform,
         "surface": "browser",
         "scope": scope,
         "revision": revision,
         "element": element,
+        "url": current_url,
+        "target_sha256": target_sha256,
     }
     if pick is not None:
         descriptor["pick"] = pick
@@ -241,10 +262,12 @@ def _decode_ref(value: str) -> dict[str, Any]:
         if set(payload) != required:
             raise UiDriveError("invalid ref schema")
         payload["scope"] = "base"
-    elif version == 5:
+    elif version in {5, 6}:
         required = {
             "v", "display", "platform", "surface", "scope", "revision", "element",
         }
+        if version == 6:
+            required.update({"url", "target_sha256"})
         if "pick" in payload:
             required.add("pick")
         if set(payload) != required:
@@ -263,6 +286,11 @@ def _decode_ref(value: str) -> dict[str, Any]:
         raise UiDriveError("invalid ref revision")
     if not isinstance(payload.get("element"), str) or not payload["element"]:
         raise UiDriveError("invalid ref element")
+    if version == 6:
+        if not isinstance(payload.get("url"), str) or not payload["url"]:
+            raise UiDriveError("invalid ref URL")
+        if not re.fullmatch(r"[0-9a-f]{64}", payload.get("target_sha256") or ""):
+            raise UiDriveError("invalid ref target fingerprint")
     if "pick" in payload and payload.get("pick") != "last_by_y":
         raise UiDriveError("invalid ref pick strategy")
     return payload
@@ -606,7 +634,7 @@ def _resolve_target(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str
     scope = descriptor["scope"]
     snapshot = _snapshot(deps, scope=scope)
     revision = _snapshot_revision(snapshot, scope=scope)
-    if descriptor["revision"] != revision:
+    if descriptor["v"] < 6 and descriptor["revision"] != revision:
         raise UiDriveError(
             "stale browser snapshot ref; observe again and decide from the fresh tree"
         )
@@ -624,6 +652,16 @@ def _resolve_target(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str
             f"ref pick strategy {descriptor.get('pick')!r} does not match current "
             f"YAML strategy {pick!r} for {element_key!r}"
         )
+    target_sha256 = _target_fingerprint(item, match_count=len(matches))
+    if descriptor["v"] == 6:
+        if descriptor["url"] != snapshot.url:
+            raise UiDriveError(
+                "browser URL changed after the preceding observe; observe again before acting"
+            )
+        if descriptor["target_sha256"] != target_sha256:
+            raise UiDriveError(
+                "mapped browser target changed after the preceding observe; observe again before acting"
+            )
     return {
         **dict(item.raw),
         "element": element_key,
@@ -633,6 +671,8 @@ def _resolve_target(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str
             scope=scope,
             revision=revision,
             element=element_key,
+            current_url=snapshot.url,
+            target_sha256=target_sha256,
             pick=pick,
         ),
     }
@@ -771,6 +811,11 @@ def _observe(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str, Any]:
                     scope=scope,
                     revision=revision,
                     element=element_key,
+                    current_url=snapshot.url,
+                    target_sha256=_target_fingerprint(
+                        item,
+                        match_count=len(items),
+                    ),
                     pick=pick,
                 )
             public_item = _public_element(
