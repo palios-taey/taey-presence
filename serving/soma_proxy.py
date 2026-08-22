@@ -2339,11 +2339,14 @@ def _do_drive_chat(arguments: dict) -> str:
                         payload["ui_sequence"]["consumed_snapshot_revision"] = native_dialog_revision
                         payload["ui_sequence"]["expected_next_surface"] = expected_surfaces[display]
                 return _json.dumps(payload)
-            detail = (
-                str(payload.get("error") or "")
-                if isinstance(payload, dict)
-                else f"ui_drive exit={r.returncode}; stderr={(r.stderr or '')[:300]}"
-            )
+            stderr_excerpt = (r.stderr or "").strip()[:1000]
+            if isinstance(payload, dict):
+                detail_parts = [str(payload.get("error") or "").strip()]
+                if stderr_excerpt:
+                    detail_parts.append(f"ui_drive_stderr={stderr_excerpt}")
+                detail = "; ".join(part for part in detail_parts if part)
+            else:
+                detail = f"ui_drive exit={r.returncode}; stderr={stderr_excerpt}"
             return _terminal_refusal(detail or "drive_chat failed")
         msg = f"ui_drive exit={r.returncode}, no output; stderr={(r.stderr or '')[:300]}"
         return _terminal_refusal(msg)
