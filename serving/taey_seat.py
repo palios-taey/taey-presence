@@ -202,6 +202,10 @@ QUEUES = (
 )
 POINTER_BACKOFF_KEY = f"{KEY_PREFIX}:{SESSION}:pointer_inject_backoff"
 NON_ACTIONABLE_MESSAGE_TYPES = frozenset({"peer_idle"})
+CONSULT_TERMINAL_RECEIPT_SCHEMA = "taey.consult_terminal_receipt.v1"
+CONSULT_TERMINAL_RECEIPT_SENDER = "consult-monitor"
+CONSULT_TERMINAL_RECEIPT_TYPE = "result"
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 _HANDOFF_RECEIPT_LUA = """
 local raw = redis.call('GET', KEYS[1])
@@ -788,6 +792,86 @@ def _split_actionable_claims(
     return actionable, skipped
 
 
+def _consult_terminal_receipt(claim: ClaimedMessage) -> dict[str, Any] | None:
+    if (
+        claim.payload.get("type") != CONSULT_TERMINAL_RECEIPT_TYPE
+        or claim.payload.get("from") != CONSULT_TERMINAL_RECEIPT_SENDER
+    ):
+        return None
+    body = claim.payload.get("body")
+    if not isinstance(body, str):
+        return None
+    try:
+        receipt = json.loads(body)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(receipt, dict):
+        return None
+    if receipt.get("schema") != CONSULT_TERMINAL_RECEIPT_SCHEMA:
+        return None
+
+    required_strings = ("monitor_id", "platform", "display", "extraction_status")
+    if any(
+        not isinstance(receipt.get(field), str) or not receipt[field].strip()
+        for field in required_strings
+    ):
+        return None
+    if not re.fullmatch(r":\d+", receipt["display"]):
+        return None
+    if receipt.get("terminal") is not True:
+        return None
+
+    extraction_status = receipt["extraction_status"]
+    if extraction_status == "succeeded":
+        success_strings = (
+            "response_file",
+            "request_json",
+            "headers",
+            "response_json",
+            "event",
+            "correlation",
+        )
+        if any(
+            not isinstance(receipt.get(field), str) or not receipt[field].strip()
+            for field in success_strings
+        ):
+            return None
+        if (
+            isinstance(receipt.get("bytes"), bool)
+            or not isinstance(receipt.get("bytes"), int)
+            or receipt["bytes"] <= 0
+        ):
+            return None
+        if (
+            not isinstance(receipt.get("sha"), str)
+            or not _SHA256_RE.fullmatch(receipt["sha"])
+        ):
+            return None
+    elif extraction_status == "failed":
+        if not isinstance(receipt.get("error"), str) or not receipt["error"].strip():
+            return None
+    else:
+        return None
+    return receipt
+
+
+def _split_record_only_receipts(
+    claims: list[ClaimedMessage],
+) -> tuple[
+    list[ClaimedMessage],
+    list[tuple[ClaimedMessage, dict[str, Any]]],
+]:
+    actionable: list[ClaimedMessage] = []
+    receipts: list[tuple[ClaimedMessage, dict[str, Any]]] = []
+    for claim in claims:
+        receipt = _consult_terminal_receipt(claim)
+        if receipt is None:
+            actionable.append(claim)
+        else:
+            receipts.append((claim, receipt))
+    return actionable, receipts
+
+
 def _format_non_actionable_reply(claims: list[ClaimedMessage]) -> str:
     message_types = sorted({_message_type(claim) for claim in claims})
     return (
@@ -826,6 +910,47 @@ def _ack_non_actionable_claims(
     return reply
 
 
+def _record_consult_terminal_receipts(
+    receipt_claims: list[tuple[ClaimedMessage, dict[str, Any]]],
+    *,
+    inbox: ReliableInbox,
+    store: EventStore,
+) -> str:
+    claims = [claim for claim, _receipt in receipt_claims]
+    receipts = [receipt for _claim, receipt in receipt_claims]
+    prompt = _format_claims(claims)
+    event_id, correlation_id = _lineage(claims)
+    message_ids = [claim.message_id for claim in claims]
+    summary = ", ".join(
+        f"{receipt['platform']}{receipt['display']}:{receipt['extraction_status']}"
+        for receipt in receipts
+    )
+    reply = (
+        f"[taey-seat] recorded {len(receipts)} consultation terminal "
+        f"receipt(s): {summary}"
+    )
+    fields = {
+        "event_id": event_id,
+        "correlation_id": correlation_id,
+        "message_ids": message_ids,
+        "prompt": prompt,
+        "skipped_inference": True,
+        "record_only_receipts": receipts,
+    }
+    store.append("turn_attempt", **fields)
+    store.append(
+        "turn_outcome",
+        ok=True,
+        reply=reply,
+        kind="consult_terminal_receipt",
+        conversation_visible=False,
+        **fields,
+    )
+    inbox.acknowledge(claims)
+    store.completed_message_ids.update(message_ids)
+    return reply
+
+
 def _prompt_for(text: str, claims: list[ClaimedMessage]) -> str:
     if not claims:
         return text
@@ -856,16 +981,27 @@ def _run_turn(
 ) -> str:
     claims = inbox.claim_available()
     claims, skipped_claims = _split_actionable_claims(claims)
-    skipped_reply = ""
+    claims, receipt_claims = _split_record_only_receipts(claims)
+    acknowledgement_replies: list[str] = []
     if skipped_claims:
-        skipped_reply = _ack_non_actionable_claims(
-            skipped_claims,
-            inbox=inbox,
-            store=store,
+        acknowledgement_replies.append(
+            _ack_non_actionable_claims(
+                skipped_claims,
+                inbox=inbox,
+                store=store,
+            )
+        )
+    if receipt_claims:
+        acknowledgement_replies.append(
+            _record_consult_terminal_receipts(
+                receipt_claims,
+                inbox=inbox,
+                store=store,
+            )
         )
     if not claims and _POINTER_RE.match(text):
-        if skipped_reply:
-            return skipped_reply
+        if acknowledgement_replies:
+            return "\n".join(acknowledgement_replies)
         inbox.release_pointer()
         return "[taey-seat] notification pointer contained no pending messages"
     prompt = _prompt_for(text, claims)

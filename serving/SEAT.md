@@ -68,3 +68,19 @@ tmux client before launching the seat pane, records `#{pane_dead_status}` plus a
 `$TAEY_SESSIONS_DIR/<session>/exit-evidence/` (tmux status/capture failures are fatal),
 and respawns the same pane. A missing session (external `kill-session`) is still fatal
 and distinct from a dead pane.
+
+## Consultation completion is recorded, not inferred over
+
+The completion monitor sends Taey a `result` notification from `consult-monitor` whose
+body is canonical JSON with schema `taey.consult_terminal_receipt.v1`. The executive
+seat validates that exact sender, type, and schema tuple, fsyncs the structured receipt
+into its event log, and only then acknowledges the notification. This path never calls
+the model and never drives a display. A malformed receipt, a different sender, or any
+other `result` remains an ordinary actionable fleet message.
+
+A successful v1 receipt contains `monitor_id`, `platform`, `display`,
+`extraction_status`, `terminal`, `response_file`, `bytes`, `sha`, `request_json`,
+`headers`, `response_json`, `event`, and `correlation`. A failed receipt contains the
+common identity fields plus a non-empty `error`; any available artifact lineage may be
+included. Completion receipts accumulate as durable facts. A later synthesis is a
+separate explicitly dispatched Taey task, not an automatic monitor turn.
