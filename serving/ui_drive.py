@@ -219,7 +219,7 @@ def _encode_ref(
     scope: str,
     revision: str,
     element: str,
-    current_url: str,
+    current_url: str | None,
     target_sha256: str,
     pick: str | None = None,
 ) -> str:
@@ -287,7 +287,10 @@ def _decode_ref(value: str) -> dict[str, Any]:
     if not isinstance(payload.get("element"), str) or not payload["element"]:
         raise UiDriveError("invalid ref element")
     if version == 6:
-        if not isinstance(payload.get("url"), str) or not payload["url"]:
+        ref_url = payload.get("url")
+        if ref_url is not None and (
+            not isinstance(ref_url, str) or not ref_url
+        ):
             raise UiDriveError("invalid ref URL")
         if not re.fullmatch(r"[0-9a-f]{64}", payload.get("target_sha256") or ""):
             raise UiDriveError("invalid ref target fingerprint")
