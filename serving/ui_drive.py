@@ -850,6 +850,8 @@ def _element_action(
             )
         if declared.get("method") == "focus_and_key_open":
             return _focus_and_key_open_operation(row, declared, deps)
+        if declared.get("method") == "mapped_pointer_activate":
+            return _mapped_pointer_activate_operation(row, declared, deps)
         allowed_now = declared.get("allowed_now")
         if not isinstance(allowed_now, list) or len(allowed_now) != 1:
             raise UiDriveError(
@@ -896,6 +898,65 @@ def _element_action(
     return {
         "performed": True,
         "performed_primitive": performed_primitive,
+        "element": {
+            "category": "mapped",
+            "element": row["element"],
+            "name": str(row.get("name") or ""),
+            "role": str(row.get("role") or ""),
+            "states": list(row.get("states") or []),
+            "ref": row["ref"],
+        },
+    }
+
+
+def _mapped_pointer_activate_operation(
+    row: dict[str, Any],
+    declared: dict[str, Any],
+    deps: SimpleNamespace,
+) -> dict[str, Any]:
+    primitives = declared.get("primitives")
+    if primitives != ["mapped_pointer_activate"]:
+        raise UiDriveError(
+            f"{row['element']} mapped_pointer_activate requires exact "
+            "['mapped_pointer_activate'] primitives"
+        )
+    allowed_now = declared.get("allowed_now")
+    if allowed_now == []:
+        raise UiDriveError(
+            f"{row['element']} mapped_pointer_activate is already expanded; refusing toggle"
+        )
+    if allowed_now != ["mapped_pointer_activate"]:
+        raise UiDriveError(
+            f"{row['element']} mapped_pointer_activate has unexpected live state "
+            f"(allowed_now={allowed_now!r})"
+        )
+
+    runtime = ConsultationRuntime(deps.platform)
+    evidence = runtime.mapped_pointer_activate(
+        ElementRef(
+            key=str(row["element"]),
+            name=str(row.get("name") or ""),
+            role=str(row.get("role") or ""),
+            x=None,
+            y=None,
+            states=list(row.get("states") or []),
+            text=row.get("text"),
+            description=row.get("description"),
+            atspi_obj=row.get("atspi_obj"),
+            raw={},
+        )
+    )
+    if evidence.get("ok") is not True:
+        raise UiDriveError(
+            f"{row['element']} mapped_pointer_activate failed: "
+            + json.dumps(evidence, ensure_ascii=False, sort_keys=True)
+        )
+    return {
+        "performed": True,
+        "performed_primitive": "mapped_pointer_activate",
+        "performed_operation": "mapped_pointer_activate",
+        "performed_primitives": list(primitives),
+        "operation_evidence": evidence,
         "element": {
             "category": "mapped",
             "element": row["element"],
