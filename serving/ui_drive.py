@@ -43,7 +43,11 @@ try:
         build_snapshot,
     )
     from consultation_v2.types import ElementRef, Snapshot
-    from consultation_v2.yaml_contract import CHAT_PLATFORMS, load_platform_yaml
+    from consultation_v2.yaml_contract import (
+        CHAT_PLATFORMS,
+        get_extraction,
+        load_platform_yaml,
+    )
 except ImportError as exc:  # fail LOUD and actionable, never a bare traceback
     sys.stderr.write(
         f"ui_drive: cannot import consultation_v2 from {TAEYS_HANDS!r}: {exc}\n"
@@ -909,6 +913,58 @@ def _element_action(
     }
 
 
+def _scroll_to_bottom_action(
+    args: argparse.Namespace, deps: SimpleNamespace
+) -> dict[str, Any]:
+    row = _resolve_target(args, deps)
+    workflow = get_extraction(deps.platform, "assistant_text")
+    if workflow is None or not workflow.steps:
+        raise UiDriveError(
+            f"{deps.platform}: extraction.assistant_text has no executable steps"
+        )
+    step = workflow.steps[0]
+    if step.action != "scroll_to_bottom" or step.element != row["element"]:
+        raise UiDriveError(
+            f"{deps.platform}: extraction.assistant_text first step is not exact "
+            f"scroll_to_bottom for {row['element']!r}"
+        )
+    runtime = ConsultationRuntime(deps.platform)
+    anchor = ElementRef(
+        key=str(row["element"]),
+        name=str(row.get("name") or ""),
+        role=str(row.get("role") or ""),
+        x=row.get("x"),
+        y=row.get("y"),
+        states=list(row.get("states") or []),
+        text=row.get("text"),
+        description=row.get("description"),
+        atspi_obj=row.get("atspi_obj"),
+        raw=row,
+    )
+    if not runtime.scroll_to_bottom(anchor):
+        raise UiDriveError(
+            f"{deps.platform}: scroll_to_bottom primitive returned false"
+        )
+    return {
+        "performed": True,
+        "performed_primitive": "scroll_to_bottom",
+        "yaml_extraction": {
+            "output_type": "assistant_text",
+            "step_index": 0,
+            "action": step.action,
+            "element": step.element,
+        },
+        "element": {
+            "category": "mapped",
+            "element": row["element"],
+            "name": str(row.get("name") or ""),
+            "role": str(row.get("role") or ""),
+            "states": list(row.get("states") or []),
+            "ref": row["ref"],
+        },
+    }
+
+
 def _mapped_pointer_activate_operation(
     row: dict[str, Any],
     declared: dict[str, Any],
@@ -1360,6 +1416,10 @@ def _parser() -> argparse.ArgumentParser:
         _add_display(target)
         _add_target(target)
 
+    scroll_to_bottom = commands.add_parser("scroll_to_bottom")
+    _add_display(scroll_to_bottom)
+    _add_target(scroll_to_bottom)
+
     type_parser = commands.add_parser("type")
     _add_display(type_parser)
     _add_key_or_type_surface(type_parser)
@@ -1411,7 +1471,7 @@ def _parser() -> argparse.ArgumentParser:
 # read-only: it reports lease state without creating, renewing, or transferring ownership.
 _LOCK_ACTION_OPS = {
     "click", "focus", "activate", "hover", "operate", "type", "paste", "key", "navigate",
-    "focus-dialog", "read-clipboard", "extract",
+    "focus-dialog", "read-clipboard", "extract", "scroll_to_bottom",
 }
 
 
@@ -1634,6 +1694,8 @@ def _dispatch(args: argparse.Namespace, deps: SimpleNamespace) -> Any:
         lease_receipt = _guard_action(deps.display, lease, LOCK_TTL_DEFAULT)
     if args.action == "extract":
         result = _extract_response(args, deps)
+    elif args.action == "scroll_to_bottom":
+        result = _scroll_to_bottom_action(args, deps)
     elif args.action in {"click", "focus", "activate", "hover", "operate"}:
         result = _element_action(args.action, args, deps)
     elif args.action == "type":
