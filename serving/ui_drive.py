@@ -79,6 +79,7 @@ if LOCK_TTL_DEFAULT < _MONITOR_TTL_DEFAULT:
 
 REF_PREFIX = "atspi3."
 OBSERVE_SCOPES = ("base", "menu_snapshot", "app_root_snapshot")
+PICK_STRATEGIES = frozenset({"last_by_y", "first_by_x"})
 OBSERVE_SURFACES = ("browser", "native_dialog")
 _LEASE_OWNER_RE = re.compile(r"taey-drive:[A-Za-z0-9._-]{1,64}:[0-9a-f]{32}")
 _PROCESS_GENERATION_RE = re.compile(r"[0-9a-f]{32}")
@@ -294,7 +295,7 @@ def _decode_ref(value: str) -> dict[str, Any]:
             raise UiDriveError("invalid ref URL")
         if not re.fullmatch(r"[0-9a-f]{64}", payload.get("target_sha256") or ""):
             raise UiDriveError("invalid ref target fingerprint")
-    if "pick" in payload and payload.get("pick") != "last_by_y":
+    if "pick" in payload and payload.get("pick") not in PICK_STRATEGIES:
         raise UiDriveError("invalid ref pick strategy")
     return payload
 
@@ -569,7 +570,7 @@ def _yaml_pick_strategy(cfg: dict, element_key: str) -> str | None:
     if not declared:
         return None
     strategy = next(iter(declared))
-    if strategy != "last_by_y":
+    if strategy not in PICK_STRATEGIES:
         raise UiDriveError(
             f"{cfg.get('platform')}: unsupported YAML pick strategy "
             f"{strategy!r} for {element_key!r}"
@@ -587,17 +588,28 @@ def _selected_mapped_item(
     strategy = _yaml_pick_strategy(cfg, element_key)
     if strategy is None:
         return (items[0], None) if len(items) == 1 else (None, None)
-    if any(item.y is None for item in items):
+    coordinate_name = "x" if strategy == "first_by_x" else "y"
+    coordinates = [getattr(item, coordinate_name) for item in items]
+    if any(value is None for value in coordinates):
         raise UiDriveError(
             f"{cfg.get('platform')}: YAML {strategy} for {element_key!r} "
-            "requires a y coordinate on every exact tree match"
+            f"requires an {coordinate_name} coordinate on every exact tree match"
         )
-    max_y = max(int(item.y) for item in items if item.y is not None)
-    selected = [item for item in items if item.y == max_y]
+    selected_coordinate = (
+        min(int(value) for value in coordinates if value is not None)
+        if strategy == "first_by_x"
+        else max(int(value) for value in coordinates if value is not None)
+    )
+    selected = [
+        item
+        for item in items
+        if getattr(item, coordinate_name) == selected_coordinate
+    ]
     if len(selected) != 1:
         raise UiDriveError(
             f"{cfg.get('platform')}: YAML {strategy} for {element_key!r} "
-            f"resolved {len(selected)} matches at y={max_y}; expected one"
+            f"resolved {len(selected)} matches at {coordinate_name}="
+            f"{selected_coordinate}; expected one"
         )
     return selected[0], strategy
 
