@@ -2043,6 +2043,7 @@ def _do_drive_chat(arguments: dict) -> str:
         )
 
     expected_revision = ""
+    expected_scope = ""
     native_dialog_revision = ""
     observed = None
     if action in _DRIVE_MUTATIONS:
@@ -2095,6 +2096,11 @@ def _do_drive_chat(arguments: dict) -> str:
                 if not re.fullmatch(r"[0-9a-f]{64}", expected_revision):
                     return _terminal_refusal(
                         "preceding observe did not provide a valid browser snapshot revision"
+                    )
+                expected_scope = str(observed.get("snapshot_scope") or "")
+                if expected_scope not in {"base", "menu_snapshot", "app_root_snapshot"}:
+                    return _terminal_refusal(
+                        "preceding observe did not provide a valid browser snapshot scope"
                     )
 
     lease_owner = f"taey-drive:{seat_id}:{process_generation}"
@@ -2195,6 +2201,13 @@ def _do_drive_chat(arguments: dict) -> str:
             )
         if action == "type" and native_dialog_revision:
             cmd += ["--native-dialog-revision", native_dialog_revision]
+        elif action == "type":
+            cmd += [
+                "--expected-revision",
+                expected_revision,
+                "--expected-scope",
+                expected_scope,
+            ]
         else:
             cmd += ["--expected-revision", expected_revision]
     elif action == "key":
@@ -2205,7 +2218,12 @@ def _do_drive_chat(arguments: dict) -> str:
         if native_dialog_revision:
             cmd += ["--native-dialog-revision", native_dialog_revision]
         else:
-            cmd += ["--expected-revision", expected_revision]
+            cmd += [
+                "--expected-revision",
+                expected_revision,
+                "--expected-scope",
+                expected_scope,
+            ]
     elif action == "navigate":
         url = arguments.get("url")
         if not isinstance(url, str) or not url:
@@ -2333,6 +2351,7 @@ def _do_drive_chat(arguments: dict) -> str:
                         "observe_required_before_next_mutation": True,
                     }
                     if expected_revision:
+                        payload["ui_sequence"]["consumed_snapshot_scope"] = expected_scope
                         payload["ui_sequence"]["consumed_snapshot_revision"] = expected_revision
                     if native_dialog_revision:
                         payload["ui_sequence"]["consumed_snapshot_scope"] = "native_dialog"
