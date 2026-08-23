@@ -439,8 +439,14 @@ def _snapshot_at_expected_revision(
         raise UiDriveError(
             "mutation requires --expected-revision from the preceding explicit observe"
         )
-    snapshot = _snapshot(deps)
-    actual = _snapshot_revision(snapshot)
+    scope = str(getattr(args, "expected_scope", "base") or "base")
+    if scope not in OBSERVE_SCOPES:
+        raise UiDriveError(
+            f"unsupported expected snapshot scope {scope!r}; expected one of "
+            f"{list(OBSERVE_SCOPES)}"
+        )
+    snapshot = _snapshot(deps, scope=scope)
+    actual = _snapshot_revision(snapshot, scope=scope)
     if actual != expected:
         raise UiDriveError(
             "browser tree changed after the preceding observe; observe again before acting"
@@ -1446,6 +1452,12 @@ def _add_key_or_type_surface(parser: argparse.ArgumentParser) -> None:
     surface.add_argument(
         "--native-dialog-revision",
         help="revision returned by the preceding canonical native-dialog observe",
+    )
+    parser.add_argument(
+        "--expected-scope",
+        choices=OBSERVE_SCOPES,
+        default="base",
+        help="scope used to produce the preceding browser snapshot revision",
     )
 
 
