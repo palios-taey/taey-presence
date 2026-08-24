@@ -79,6 +79,8 @@ if LOCK_TTL_DEFAULT < _MONITOR_TTL_DEFAULT:
 
 REF_PREFIX = "atspi3."
 OBSERVE_SCOPES = ("base", "menu_snapshot", "app_root_snapshot")
+_BROWSER_REACQUIRE_ATTEMPTS = 5
+_BROWSER_REACQUIRE_INTERVAL_SECONDS = 0.5
 PICK_STRATEGIES = frozenset({"last_by_y", "first_by_x"})
 OBSERVE_SURFACES = ("browser", "native_dialog")
 _LEASE_OWNER_RE = re.compile(r"taey-drive:[A-Za-z0-9._-]{1,64}:[0-9a-f]{32}")
@@ -372,14 +374,48 @@ def _scope_expected_elements(platform: str, scope: str) -> tuple[str, ...]:
     return tuple(sorted(expected))
 
 
-def _snapshot(deps: SimpleNamespace, *, scope: str = "base") -> Snapshot:
+def _build_scoped_browser_snapshot(
+    deps: SimpleNamespace,
+    *,
+    scope: str,
+) -> Snapshot:
     builders = {
         "base": build_snapshot,
         "menu_snapshot": build_menu_snapshot,
     }
     if scope == "app_root_snapshot":
+        return build_app_root_snapshot(deps.platform)
+    builder = builders.get(scope)
+    if builder is None:
+        raise UiDriveError(
+            f"unsupported observation scope {scope!r}; expected one of "
+            f"{list(OBSERVE_SCOPES)}"
+        )
+    _firefox, _document, snapshot = builder(deps.platform)
+    return snapshot
+
+
+def _snapshot(deps: SimpleNamespace, *, scope: str = "base") -> Snapshot:
+    transient_error = f"Firefox not found for {deps.platform}"
+    for attempt in range(1, _BROWSER_REACQUIRE_ATTEMPTS + 1):
+        try:
+            snapshot = _build_scoped_browser_snapshot(deps, scope=scope)
+            break
+        except RuntimeError as exc:
+            if (
+                str(exc) != transient_error
+                or attempt == _BROWSER_REACQUIRE_ATTEMPTS
+            ):
+                raise
+            sys.stderr.write(
+                "ui_drive: transient Firefox reacquisition miss "
+                f"platform={deps.platform} scope={scope} "
+                f"sample={attempt}/{_BROWSER_REACQUIRE_ATTEMPTS}; "
+                "retrying read-only observation\n"
+            )
+            time.sleep(_BROWSER_REACQUIRE_INTERVAL_SECONDS)
+    if scope == "app_root_snapshot":
         expected = _scope_expected_elements(deps.platform, scope)
-        snapshot = build_app_root_snapshot(deps.platform)
         snapshot.mapped = {
             key: list(snapshot.mapped.get(key) or [])
             for key in expected
@@ -388,14 +424,6 @@ def _snapshot(deps: SimpleNamespace, *, scope: str = "base") -> Snapshot:
         snapshot.unknown = []
         snapshot.sidebar = []
         snapshot.menu_items = []
-    else:
-        builder = builders.get(scope)
-        if builder is None:
-            raise UiDriveError(
-                f"unsupported observation scope {scope!r}; expected one of "
-                f"{list(OBSERVE_SCOPES)}"
-            )
-        _firefox, _document, snapshot = builder(deps.platform)
     if snapshot.platform != deps.platform:
         raise UiDriveError(
             f"snapshot platform {snapshot.platform!r} does not match bound {deps.platform!r}"
