@@ -532,6 +532,15 @@ def _yaml_pick_strategy(cfg: dict, element_key: str) -> str | None:
     workflow = cfg.get("workflow") or {}
     declared: set[str] = set()
 
+    element_spec = (
+        (((cfg.get("tree") or {}).get("element_map") or {}).get(element_key))
+        or {}
+    )
+    if isinstance(element_spec, dict):
+        pick = element_spec.get("pick")
+        if isinstance(pick, str) and pick:
+            declared.add(pick)
+
     full_consult = workflow.get("full_consult") or {}
     attachment_present = (
         full_consult.get("attachment_present")
