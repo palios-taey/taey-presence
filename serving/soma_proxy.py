@@ -84,6 +84,10 @@ MANUAL_CHAT_UI_SYSTEM_PROMPT_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
     "TAEY_CHAT_UI_SYSTEM.md",
 )
+CONSULT_CHAT_SYSTEM_PROMPT_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "TAEY_CONSULT_CHAT_SYSTEM.md",
+)
 # Optional second always-on prefix (e.g. a constitution/kernel). Empty = none.
 # Set PERMANENT_KERNEL_PATH to a file to prepend it ahead of the persona.
 PERMANENT_KERNEL_PATH = os.environ.get("PERMANENT_KERNEL_PATH", "")
@@ -111,6 +115,7 @@ _http: Optional[httpx.AsyncClient] = None
 _ecosystem_http: Optional[httpx.Client] = None
 _system_prompt: str = ""
 _manual_chat_ui_system_prompt: str = ""
+_consult_chat_system_prompt: str = ""
 _permanent_kernel: str = ""
 _static_system_prefix: str = ""
 
@@ -172,10 +177,14 @@ _active_turns: dict[str, TurnContext] = {}
 
 _FULL_TOOL_PROFILE = "full"
 _MANUAL_CHAT_UI_TOOL_PROFILE = "manual-chat-ui"
+_CONSULT_CHAT_TOOL_PROFILE = "consult-chat"
 _TOOL_PROFILE_ALLOWED: dict[str, frozenset[str] | None] = {
     _FULL_TOOL_PROFILE: None,
     _MANUAL_CHAT_UI_TOOL_PROFILE: frozenset({
         "drive_chat",
+    }),
+    _CONSULT_CHAT_TOOL_PROFILE: frozenset({
+        "consult_chat",
     }),
 }
 
@@ -202,7 +211,7 @@ SOMATIC_BLOCK_RE = re.compile(
 @app.on_event("startup")
 async def startup():
     global _redis, _mira_redis, _http, _ecosystem_http
-    global _manual_chat_ui_system_prompt, _permanent_kernel
+    global _consult_chat_system_prompt, _manual_chat_ui_system_prompt, _permanent_kernel
     global _static_system_prefix, _system_prompt
     global _liveness_reaper_task
     if not _serving_socket_reserved:
@@ -283,6 +292,16 @@ async def startup():
         raise RuntimeError(
             f"manual chat UI system prompt is empty: {manual_chat_prompt_path}"
         )
+    consult_chat_prompt_path = Path(CONSULT_CHAT_SYSTEM_PROMPT_PATH)
+    if not consult_chat_prompt_path.is_file():
+        raise RuntimeError(
+            f"consult chat system prompt is missing or not a regular file: {consult_chat_prompt_path}"
+        )
+    _consult_chat_system_prompt = consult_chat_prompt_path.read_text(encoding="utf-8")
+    if not _consult_chat_system_prompt.strip():
+        raise RuntimeError(
+            f"consult chat system prompt is empty: {consult_chat_prompt_path}"
+        )
     log.info(
         "Canonical system prompt loaded from %s (%d chars)",
         SYSTEM_PROMPT_PATH,
@@ -292,6 +311,11 @@ async def startup():
         "Manual chat UI system prompt loaded from %s (%d chars)",
         manual_chat_prompt_path,
         len(_manual_chat_ui_system_prompt),
+    )
+    log.info(
+        "Consult chat system prompt loaded from %s (%d chars)",
+        consult_chat_prompt_path,
+        len(_consult_chat_system_prompt),
     )
 
     _static_system_prefix = _permanent_kernel
@@ -1235,6 +1259,59 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "consult_chat",
+            "description": (
+                "Execute one frozen end-to-end Family-Chat consultation through the "
+                "selected platform's existing YAML, driver, monitor, and extractor. "
+                "The caller supplies exactly two immutable bundles and one immutable "
+                "prompt file. The driver performs one Send at most, halts on its first "
+                "failed postcondition, writes the full receipt off-context, and returns "
+                "only compact terminal evidence. Available only in the consult-chat "
+                "tool profile; never retry a failed transaction."
+            ),
+            "parameters": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": [
+                    "display",
+                    "prompt_file",
+                    "bundle_a",
+                    "bundle_b",
+                    "output_file",
+                    "receipt_file",
+                ],
+                "properties": {
+                    "display": {
+                        "type": "string",
+                        "enum": [":2", ":3", ":4", ":5", ":6"],
+                    },
+                    "prompt_file": {
+                        "type": "string",
+                        "description": "absolute path to the frozen UTF-8 prompt",
+                    },
+                    "bundle_a": {
+                        "type": "string",
+                        "description": "absolute path to frozen Bundle A",
+                    },
+                    "bundle_b": {
+                        "type": "string",
+                        "description": "absolute path to frozen Bundle B",
+                    },
+                    "output_file": {
+                        "type": "string",
+                        "description": "new absolute path for extracted response text",
+                    },
+                    "receipt_file": {
+                        "type": "string",
+                        "description": "new absolute path for the complete transaction receipt",
+                    },
+                },
+            },
+        },
+    },
 ]
 
 
@@ -1484,6 +1561,9 @@ def execute_tool_call(name: str, arguments: dict) -> str:
 
     elif name == "drive_chat":
         return _do_drive_chat(arguments)
+
+    elif name == "consult_chat":
+        return _do_consult_chat(arguments)
 
     return f"Unknown tool: {name}"
 
@@ -1839,6 +1919,121 @@ _DRIVE_ACTION_ARGUMENTS = {
     "read_clipboard": frozenset({"display", "action", "output_file"}),
     "focus_dialog": frozenset({"display", "action"}),
 }
+
+
+def _do_consult_chat(arguments: dict) -> str:
+    import subprocess
+    import json as _json
+
+    context = dict(_request_context.get())
+    if context.get("tool_profile") != _CONSULT_CHAT_TOOL_PROFILE:
+        return _json.dumps({
+            "ok": False,
+            "error": "consult_chat is available only in the consult-chat tool profile",
+        })
+    seat_id = str(context.get("seat_id") or "")
+    turn_id = str(context.get("turn_id") or "")
+    process_generation = str(context.get("process_generation") or "")
+    if (
+        not _SEAT_ID_RE.fullmatch(seat_id)
+        or not _TRACE_ID_RE.fullmatch(turn_id)
+        or not re.fullmatch(r"[0-9a-f]{32}", process_generation)
+    ):
+        return _json.dumps({
+            "ok": False,
+            "error": "consult_chat requires a validated active Taey turn context",
+        })
+
+    required = {
+        "display",
+        "prompt_file",
+        "bundle_a",
+        "bundle_b",
+        "output_file",
+        "receipt_file",
+    }
+    if set(arguments) != required:
+        return _json.dumps({
+            "ok": False,
+            "error": (
+                "consult_chat requires exactly "
+                f"{sorted(required)}; received {sorted(arguments)}"
+            ),
+        })
+    display = str(arguments.get("display") or "").strip()
+    if display not in {":2", ":3", ":4", ":5", ":6"}:
+        return _json.dumps({
+            "ok": False,
+            "error": "consult_chat display must be one of :2, :3, :4, :5, :6",
+        })
+    paths: dict[str, str] = {}
+    for key in ("prompt_file", "bundle_a", "bundle_b", "output_file", "receipt_file"):
+        value = arguments.get(key)
+        if not isinstance(value, str) or not value.startswith("/"):
+            return _json.dumps({
+                "ok": False,
+                "error": f"consult_chat {key} must be an absolute path",
+            })
+        paths[key] = value
+
+    cmd = [
+        UI_DRIVE_PYTHON,
+        UI_DRIVE_SCRIPT,
+        "consult",
+        "--display",
+        display,
+        "--prompt-file",
+        paths["prompt_file"],
+        "--bundle-a",
+        paths["bundle_a"],
+        "--bundle-b",
+        paths["bundle_b"],
+        "--output-file",
+        paths["output_file"],
+        "--receipt-file",
+        paths["receipt_file"],
+        "--requester",
+        seat_id,
+        "--timeout",
+        "5400",
+    ]
+    try:
+        completed = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=6000,
+            env=dict(os.environ),
+        )
+    except subprocess.TimeoutExpired:
+        _audit("consult_chat", {"display": display, "rc": "timeout"})
+        return _json.dumps({
+            "ok": False,
+            "display": display,
+            "error": "consult_chat exceeded its 6000-second transaction ceiling",
+        })
+    _audit("consult_chat", {"display": display, "rc": completed.returncode})
+    output = (completed.stdout or "").strip()
+    try:
+        payload = _json.loads(output) if output else None
+    except _json.JSONDecodeError:
+        payload = None
+    if (
+        completed.returncode != 0
+        or not isinstance(payload, dict)
+        or payload.get("ok") is not True
+    ):
+        error = (
+            str(payload.get("error") or "")
+            if isinstance(payload, dict)
+            else (completed.stderr or "").strip()
+        )
+        return _json.dumps({
+            "ok": False,
+            "display": display,
+            "error": error or f"consult_chat subprocess exited {completed.returncode}",
+        })
+    return output
 
 
 # ---------------------------------------------------------------------------
@@ -3575,6 +3770,16 @@ async def _chat_completions_for_turn(
         ]
         body["messages"] = [
             {"role": "system", "content": _manual_chat_ui_system_prompt},
+            *messages,
+        ]
+    elif turn.tool_profile == _CONSULT_CHAT_TOOL_PROFILE:
+        messages = [
+            message
+            for message in body.get("messages", [])
+            if message.get("role") != "system"
+        ]
+        body["messages"] = [
+            {"role": "system", "content": _consult_chat_system_prompt},
             *messages,
         ]
     else:
