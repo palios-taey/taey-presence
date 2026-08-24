@@ -1449,6 +1449,21 @@ def _extract_response(args: argparse.Namespace, deps: SimpleNamespace) -> dict[s
     return {**{key: value for key, value in result.items() if key != "response_text"}, **receipt}
 
 
+def _consult_transaction(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str, Any]:
+    from consultation_v2 import drive_chat_adapter
+
+    return drive_chat_adapter.consult(
+        deps.platform,
+        prompt_file=args.prompt_file,
+        bundle_a=args.bundle_a,
+        bundle_b=args.bundle_b,
+        output_file=args.output_file,
+        receipt_file=args.receipt_file,
+        requester=args.requester,
+        timeout=args.timeout,
+    )
+
+
 def _add_display(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--display", required=True, help="raw X display in :N form")
 
@@ -1549,6 +1564,16 @@ def _parser() -> argparse.ArgumentParser:
         help="exact sent artifact; reject extraction if the answer is a prompt echo",
     )
     extract.add_argument("--output-file", dest="output_file")
+
+    consult = commands.add_parser("consult")
+    _add_display(consult)
+    consult.add_argument("--prompt-file", required=True)
+    consult.add_argument("--bundle-a", required=True)
+    consult.add_argument("--bundle-b", required=True)
+    consult.add_argument("--output-file", required=True)
+    consult.add_argument("--receipt-file", required=True)
+    consult.add_argument("--requester", required=True)
+    consult.add_argument("--timeout", type=int, default=5400)
 
     return parser
 
@@ -1780,6 +1805,8 @@ def _dispatch(args: argparse.Namespace, deps: SimpleNamespace) -> Any:
         lease_receipt = _guard_action(deps.display, lease, LOCK_TTL_DEFAULT)
     if args.action == "extract":
         result = _extract_response(args, deps)
+    elif args.action == "consult":
+        result = _consult_transaction(args, deps)
     elif args.action == "scroll_to_bottom":
         result = _scroll_to_bottom_action(args, deps)
     elif args.action in {"click", "focus", "activate", "hover", "operate"}:
