@@ -364,16 +364,7 @@ def _snapshot(deps: SimpleNamespace, *, scope: str = "base") -> Snapshot:
         "menu_snapshot": build_menu_snapshot,
     }
     if scope == "app_root_snapshot":
-        expected = _scope_expected_elements(deps.platform, scope)
         snapshot = build_app_root_snapshot(deps.platform)
-        snapshot.mapped = {
-            key: list(snapshot.mapped.get(key) or [])
-            for key in expected
-            if snapshot.mapped.get(key)
-        }
-        snapshot.unknown = []
-        snapshot.sidebar = []
-        snapshot.menu_items = []
     else:
         builder = builders.get(scope)
         if builder is None:
@@ -382,6 +373,25 @@ def _snapshot(deps: SimpleNamespace, *, scope: str = "base") -> Snapshot:
                 f"{list(OBSERVE_SCOPES)}"
             )
         _firefox, _document, snapshot = builder(deps.platform)
+    return _constrain_snapshot(deps, snapshot=snapshot, scope=scope)
+
+
+def _constrain_snapshot(
+    deps: SimpleNamespace,
+    *,
+    snapshot: Snapshot,
+    scope: str,
+) -> Snapshot:
+    if scope == "app_root_snapshot":
+        expected = _scope_expected_elements(deps.platform, scope)
+        snapshot.mapped = {
+            key: list(snapshot.mapped.get(key) or [])
+            for key in expected
+            if snapshot.mapped.get(key)
+        }
+        snapshot.unknown = []
+        snapshot.sidebar = []
+        snapshot.menu_items = []
     if snapshot.platform != deps.platform:
         raise UiDriveError(
             f"snapshot platform {snapshot.platform!r} does not match bound {deps.platform!r}"
@@ -804,12 +814,18 @@ def _declared_operation(
 
 
 def _observe(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str, Any]:
+    runtime = ConsultationRuntime(deps.platform)
     if args.surface == "native_dialog":
         if args.scope != "base":
             raise UiDriveError(
                 "native-dialog observe does not accept a browser observation scope"
             )
-        snapshot = build_native_dialog_snapshot(deps.platform)
+        snapshot, barrier = runtime.wait_for_native_dialog_observation_barrier()
+        if snapshot is None or barrier.get("result") != "PASS":
+            raise UiDriveError(
+                "native-dialog observation barrier halted: "
+                + json.dumps(barrier, sort_keys=True, separators=(",", ":"))
+            )
         mapped = [
             {
                 "category": "mapped",
@@ -836,16 +852,26 @@ def _observe(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str, Any]:
             "raw_count": snapshot.raw_count,
             "counts": {"mapped": len(mapped)},
             "mapped": mapped,
+            "post_action_observation": barrier,
         }
 
     scope = args.scope
-    snapshot = _snapshot(deps, scope=scope)
-    revision = _snapshot_revision(snapshot, scope=scope)
     expected_scope_elements = (
         list(_scope_expected_elements(deps.platform, scope))
         if scope != "base"
         else []
     )
+    snapshot, barrier = runtime.wait_for_observation_barrier(
+        scope=scope,
+        expected_elements=expected_scope_elements,
+    )
+    if snapshot is None or barrier.get("result") != "PASS":
+        raise UiDriveError(
+            "browser observation barrier halted: "
+            + json.dumps(barrier, sort_keys=True, separators=(",", ":"))
+        )
+    snapshot = _constrain_snapshot(deps, snapshot=snapshot, scope=scope)
+    revision = _snapshot_revision(snapshot, scope=scope)
     cfg = _platform_config(deps.display)
     mapped: list[dict[str, Any]] = []
     for element_key in sorted(snapshot.mapped):
@@ -930,6 +956,7 @@ def _observe(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str, Any]:
         "unknown": unknown,
         "sidebar": sidebar,
         "menu_items": menu_items,
+        "post_action_observation": barrier,
     }
 
 
