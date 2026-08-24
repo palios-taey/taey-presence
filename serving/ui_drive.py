@@ -315,6 +315,7 @@ def _platform_for_display(display: str) -> str:
 
 def _scope_expected_elements(platform: str, scope: str) -> tuple[str, ...]:
     cfg = load_platform_yaml(platform)
+    element_map = ((cfg.get("tree") or {}).get("element_map") or {})
     workflow = cfg.get("workflow") or {}
     selection = workflow.get("selection") or {}
     menus = selection.get("menus") or {}
@@ -348,8 +349,21 @@ def _scope_expected_elements(platform: str, scope: str) -> tuple[str, ...]:
             expected.add(menu_target)
     if scope == "app_root_snapshot":
         for extraction_workflow in get_extraction(platform).values():
+            if not any(
+                step.action == "download" and step.element
+                for step in extraction_workflow.steps
+            ):
+                continue
             for step in extraction_workflow.steps:
-                if step.action == "download" and step.element:
+                if not step.element:
+                    continue
+                element_spec = element_map.get(step.element) or {}
+                declared_scope = (
+                    element_spec.get("scope")
+                    if isinstance(element_spec, dict)
+                    else None
+                )
+                if step.action == "download" or declared_scope == scope:
                     expected.add(step.element)
     if not expected:
         raise UiDriveError(
