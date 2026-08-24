@@ -346,6 +346,11 @@ def _scope_expected_elements(platform: str, scope: str) -> tuple[str, ...]:
         menu_target = attachment.get("menu_target")
         if isinstance(menu_target, str) and menu_target:
             expected.add(menu_target)
+    if scope == "menu_snapshot":
+        for extraction_workflow in get_extraction(platform).values():
+            for step in extraction_workflow.steps:
+                if step.action == "download" and step.element:
+                    expected.add(step.element)
     if not expected:
         raise UiDriveError(
             f"{platform} YAML does not declare observation scope {scope!r}"
