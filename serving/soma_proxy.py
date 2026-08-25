@@ -88,6 +88,10 @@ CONSULT_CHAT_SYSTEM_PROMPT_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
     "TAEY_CONSULT_CHAT_SYSTEM.md",
 )
+LINKEDIN_JOBS_SYSTEM_PROMPT_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "TAEY_LINKEDIN_JOBS_SYSTEM.md",
+)
 # Optional second always-on prefix (e.g. a constitution/kernel). Empty = none.
 # Set PERMANENT_KERNEL_PATH to a file to prepend it ahead of the persona.
 PERMANENT_KERNEL_PATH = os.environ.get("PERMANENT_KERNEL_PATH", "")
@@ -116,6 +120,7 @@ _ecosystem_http: Optional[httpx.Client] = None
 _system_prompt: str = ""
 _manual_chat_ui_system_prompt: str = ""
 _consult_chat_system_prompt: str = ""
+_linkedin_jobs_system_prompt: str = ""
 _permanent_kernel: str = ""
 _static_system_prefix: str = ""
 
@@ -178,6 +183,7 @@ _active_turns: dict[str, TurnContext] = {}
 _FULL_TOOL_PROFILE = "full"
 _MANUAL_CHAT_UI_TOOL_PROFILE = "manual-chat-ui"
 _CONSULT_CHAT_TOOL_PROFILE = "consult-chat"
+_LINKEDIN_JOBS_TOOL_PROFILE = "linkedin-jobs"
 _TOOL_PROFILE_ALLOWED: dict[str, frozenset[str] | None] = {
     _FULL_TOOL_PROFILE: None,
     _MANUAL_CHAT_UI_TOOL_PROFILE: frozenset({
@@ -185,6 +191,9 @@ _TOOL_PROFILE_ALLOWED: dict[str, frozenset[str] | None] = {
     }),
     _CONSULT_CHAT_TOOL_PROFILE: frozenset({
         "consult_chat",
+    }),
+    _LINKEDIN_JOBS_TOOL_PROFILE: frozenset({
+        "linkedin_jobs",
     }),
 }
 
@@ -211,7 +220,8 @@ SOMATIC_BLOCK_RE = re.compile(
 @app.on_event("startup")
 async def startup():
     global _redis, _mira_redis, _http, _ecosystem_http
-    global _consult_chat_system_prompt, _manual_chat_ui_system_prompt, _permanent_kernel
+    global _consult_chat_system_prompt, _linkedin_jobs_system_prompt
+    global _manual_chat_ui_system_prompt, _permanent_kernel
     global _static_system_prefix, _system_prompt
     global _liveness_reaper_task
     if not _serving_socket_reserved:
@@ -302,6 +312,19 @@ async def startup():
         raise RuntimeError(
             f"consult chat system prompt is empty: {consult_chat_prompt_path}"
         )
+    linkedin_jobs_prompt_path = Path(LINKEDIN_JOBS_SYSTEM_PROMPT_PATH)
+    if not linkedin_jobs_prompt_path.is_file():
+        raise RuntimeError(
+            "LinkedIn Jobs system prompt is missing or not a regular file: "
+            f"{linkedin_jobs_prompt_path}"
+        )
+    _linkedin_jobs_system_prompt = linkedin_jobs_prompt_path.read_text(
+        encoding="utf-8"
+    )
+    if not _linkedin_jobs_system_prompt.strip():
+        raise RuntimeError(
+            f"LinkedIn Jobs system prompt is empty: {linkedin_jobs_prompt_path}"
+        )
     log.info(
         "Canonical system prompt loaded from %s (%d chars)",
         SYSTEM_PROMPT_PATH,
@@ -316,6 +339,11 @@ async def startup():
         "Consult chat system prompt loaded from %s (%d chars)",
         consult_chat_prompt_path,
         len(_consult_chat_system_prompt),
+    )
+    log.info(
+        "LinkedIn Jobs system prompt loaded from %s (%d chars)",
+        linkedin_jobs_prompt_path,
+        len(_linkedin_jobs_system_prompt),
     )
 
     _static_system_prefix = _permanent_kernel
@@ -1314,6 +1342,33 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "linkedin_jobs",
+            "description": (
+                "Execute one frozen LinkedIn Jobs read-only transaction through "
+                "the public platform YAML, canonical AT-SPI tree, driver, private "
+                "sink, and receipt chain. Raw job content remains off-context. "
+                "Available only in the linkedin-jobs tool profile; never retry a "
+                "failed transaction."
+            ),
+            "parameters": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["display"],
+                "properties": {
+                    "display": {
+                        "type": "string",
+                        "pattern": "^:[0-9]{1,3}$",
+                        "description": (
+                            "runtime-authorized LinkedIn display supplied by the user"
+                        ),
+                    },
+                },
+            },
+        },
+    },
 ]
 
 
@@ -1566,6 +1621,9 @@ def execute_tool_call(name: str, arguments: dict) -> str:
 
     elif name == "consult_chat":
         return _do_consult_chat(arguments)
+
+    elif name == "linkedin_jobs":
+        return _do_linkedin_jobs(arguments)
 
     return f"Unknown tool: {name}"
 
@@ -1885,6 +1943,26 @@ UI_DRIVE_SCRIPT = os.environ.get(
     "TAEY_UI_DRIVE_SCRIPT",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui_drive.py"),
 )
+TAEYS_HANDS_ROOT = os.environ.get("TAEYS_HANDS_ROOT", "").strip()
+LINKEDIN_JOBS_PYTHON = os.environ.get("TAEY_LINKEDIN_JOBS_PYTHON", "").strip()
+LINKEDIN_JOBS_PRIVATE_ROOT = os.environ.get(
+    "TAEY_LINKEDIN_JOBS_PRIVATE_ROOT", ""
+).strip()
+try:
+    LINKEDIN_JOBS_TIMEOUT_SECS = int(
+        os.environ.get("TAEY_LINKEDIN_JOBS_TIMEOUT_SECS", "1800")
+    )
+except ValueError:
+    LINKEDIN_JOBS_TIMEOUT_SECS = 0
+LINKEDIN_JOBS_DEADLINE_SECS = LINKEDIN_JOBS_TIMEOUT_SECS - 100
+_env_linkedin_jobs_displays = os.environ.get(
+    "TAEY_LINKEDIN_JOBS_DISPLAYS", ""
+).strip()
+LINKEDIN_JOBS_DISPLAYS = tuple(
+    display.strip()
+    for display in _env_linkedin_jobs_displays.split(",")
+    if display.strip() and display.strip() != ":0"
+)
 _DEFAULT_CHAT_DISPLAYS = (":2", ":3", ":4", ":5", ":6", ":21", ":22", ":23", ":24")
 _env_chat_disp = os.environ.get("TAEY_CHAT_DISPLAYS", "").strip()
 # :0 is Jesse's physical monitor and can never be a target, even via env override.
@@ -2036,6 +2114,662 @@ def _do_consult_chat(arguments: dict) -> str:
             "error": error or f"consult_chat subprocess exited {completed.returncode}",
         })
     return output
+
+
+def _do_linkedin_jobs(arguments: dict) -> str:
+    import subprocess
+    import json as _json
+
+    context = dict(_request_context.get())
+    if context.get("tool_profile") != _LINKEDIN_JOBS_TOOL_PROFILE:
+        return _json.dumps({
+            "ok": False,
+            "error": "linkedin_jobs is available only in the linkedin-jobs tool profile",
+        })
+
+    profile_state = context.get("_tool_profile_state")
+    if isinstance(profile_state, dict):
+        profile_state["terminal"] = {
+            "tool": "linkedin_jobs",
+            "reason": "the one frozen LinkedIn Jobs invocation has been spent",
+        }
+    if not isinstance(arguments, dict):
+        return _json.dumps({
+            "ok": False,
+            "error": "linkedin_jobs arguments must be one JSON object",
+        })
+
+    seat_id = str(context.get("seat_id") or "")
+    turn_id = str(context.get("turn_id") or "")
+    event_id = str(context.get("event_id") or "")
+    process_generation = str(context.get("process_generation") or "")
+    if (
+        not _SEAT_ID_RE.fullmatch(seat_id)
+        or not _TRACE_ID_RE.fullmatch(turn_id)
+        or not _TRACE_ID_RE.fullmatch(event_id)
+        or not re.fullmatch(r"[0-9a-f]{32}", process_generation)
+    ):
+        return _json.dumps({
+            "ok": False,
+            "error": "linkedin_jobs requires a validated active Taey turn context",
+        })
+
+    required = {"display"}
+    if set(arguments) != required:
+        return _json.dumps({
+            "ok": False,
+            "error": (
+                f"linkedin_jobs requires exactly {sorted(required)}; "
+                f"received {sorted(arguments)}"
+            ),
+        })
+
+    display = str(arguments.get("display") or "").strip()
+    if not LINKEDIN_JOBS_DISPLAYS:
+        return _json.dumps({
+            "ok": False,
+            "display": display,
+            "error": "TAEY_LINKEDIN_JOBS_DISPLAYS is unset; refusing to guess a display",
+        })
+    if not 130 <= LINKEDIN_JOBS_TIMEOUT_SECS <= 1800:
+        return _json.dumps({
+            "ok": False,
+            "display": display,
+            "error": "TAEY_LINKEDIN_JOBS_TIMEOUT_SECS must be 130-1800",
+        })
+    if (
+        not re.fullmatch(r":[0-9]{1,3}", display)
+        or display == ":0"
+        or display not in LINKEDIN_JOBS_DISPLAYS
+    ):
+        return _json.dumps({
+            "ok": False,
+            "display": display,
+            "error": (
+                "linkedin_jobs display is not in the runtime-authorized "
+                "TAEY_LINKEDIN_JOBS_DISPLAYS set"
+            ),
+        })
+
+    if not LINKEDIN_JOBS_PRIVATE_ROOT:
+        return _json.dumps({
+            "ok": False,
+            "display": display,
+            "error": (
+                "TAEY_LINKEDIN_JOBS_PRIVATE_ROOT is unset; refusing private "
+                "artifacts without one runtime-owned boundary"
+            ),
+        })
+    private_root = Path(LINKEDIN_JOBS_PRIVATE_ROOT)
+    try:
+        resolved_private_root = private_root.resolve(strict=True)
+        private_metadata = os.lstat(private_root)
+    except OSError:
+        return _json.dumps({
+            "ok": False,
+            "display": display,
+            "error": "TAEY_LINKEDIN_JOBS_PRIVATE_ROOT is unavailable",
+        })
+    if (
+        not private_root.is_absolute()
+        or private_root != resolved_private_root
+        or not stat.S_ISDIR(private_metadata.st_mode)
+        or stat.S_IMODE(private_metadata.st_mode) != 0o700
+        or private_metadata.st_uid != os.geteuid()
+    ):
+        return _json.dumps({
+            "ok": False,
+            "display": display,
+            "error": (
+                "TAEY_LINKEDIN_JOBS_PRIVATE_ROOT must be an owner-controlled "
+                "nonsymlink 0700 directory"
+            ),
+        })
+    correlation_id = str(context.get("correlation_id") or "")
+    if not _TRACE_ID_RE.fullmatch(correlation_id):
+        return _json.dumps({
+            "ok": False,
+            "display": display,
+            "error": "linkedin_jobs requires a validated correlation identity",
+        })
+    lineage_payload = {
+        "correlation_id": correlation_id,
+        "process_generation": process_generation,
+        "requester": seat_id,
+        "turn_id": turn_id,
+    }
+    expected_turn_lineage = hashlib.sha256(
+        _json.dumps(
+            lineage_payload,
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+    transaction_path = (
+        resolved_private_root
+        / "transactions"
+        / seat_id
+        / f"{correlation_id}.json"
+    )
+    receipt_path = (
+        resolved_private_root
+        / "receipts"
+        / seat_id
+        / f"{correlation_id}.json"
+    )
+    claim_path = (
+        resolved_private_root
+        / "claims"
+        / seat_id
+        / f"{correlation_id}.json"
+    )
+    for key, candidate in {
+        "transaction_file": transaction_path,
+        "receipt_file": receipt_path,
+        "claim_file": claim_path,
+    }.items():
+        try:
+            resolved_target = candidate.parent.resolve(strict=True)
+            parent_metadata = os.lstat(candidate.parent)
+        except OSError:
+            return _json.dumps({
+                "ok": False,
+                "display": display,
+                "error": f"linkedin_jobs {key} parent is unavailable",
+            })
+        if (
+            resolved_target != resolved_private_root
+            and resolved_private_root not in resolved_target.parents
+        ):
+            return _json.dumps({
+                "ok": False,
+                "display": display,
+                "error": f"linkedin_jobs {key} must remain beneath the private root",
+            })
+        if (
+            not stat.S_ISDIR(parent_metadata.st_mode)
+            or stat.S_IMODE(parent_metadata.st_mode) != 0o700
+            or parent_metadata.st_uid != os.geteuid()
+        ):
+            return _json.dumps({
+                "ok": False,
+                "display": display,
+                "error": f"linkedin_jobs {key} parent must be owner-controlled mode 0700",
+            })
+
+    if not transaction_path.is_file():
+        return _json.dumps({
+            "ok": False,
+            "display": display,
+            "error": "linkedin_jobs transaction_file is missing or not a regular file",
+        })
+    if receipt_path.exists():
+        return _json.dumps({
+            "ok": False,
+            "display": display,
+            "error": "linkedin_jobs receipt_file already exists",
+        })
+
+    if not TAEYS_HANDS_ROOT:
+        return _json.dumps({
+            "ok": False,
+            "display": display,
+            "error": (
+                "TAEYS_HANDS_ROOT is unset; point it at a public clone of "
+                "https://github.com/palios-taey/taeys-hands"
+            ),
+        })
+    hands_root = Path(TAEYS_HANDS_ROOT)
+    if not hands_root.is_absolute() or not hands_root.is_dir():
+        return _json.dumps({
+            "ok": False,
+            "display": display,
+            "error": "TAEYS_HANDS_ROOT must be an existing absolute directory",
+        })
+    runner = hands_root / "scripts" / "run_linkedin_jobs.py"
+    if not runner.is_file():
+        return _json.dumps({
+            "ok": False,
+            "display": display,
+            "error": "public taeys-hands checkout does not contain scripts/run_linkedin_jobs.py",
+        })
+    if not LINKEDIN_JOBS_PYTHON:
+        return _json.dumps({
+            "ok": False,
+            "display": display,
+            "error": "TAEY_LINKEDIN_JOBS_PYTHON is unset; refusing an implicit interpreter",
+        })
+    linkedin_python = Path(LINKEDIN_JOBS_PYTHON)
+    if (
+        not linkedin_python.is_absolute()
+        or not linkedin_python.is_file()
+        or not os.access(linkedin_python, os.X_OK)
+    ):
+        return _json.dumps({
+            "ok": False,
+            "display": display,
+            "error": "TAEY_LINKEDIN_JOBS_PYTHON must be an executable absolute path",
+        })
+
+    transaction_digest = hashlib.sha256()
+    transaction_descriptor = None
+    transaction_valid = True
+    try:
+        transaction_descriptor = os.open(
+            transaction_path,
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+        )
+        transaction_metadata = os.fstat(transaction_descriptor)
+        if (
+            not stat.S_ISREG(transaction_metadata.st_mode)
+            or stat.S_IMODE(transaction_metadata.st_mode) != 0o400
+            or transaction_metadata.st_uid != os.geteuid()
+        ):
+            raise OSError("unsafe private transaction")
+        remaining = transaction_metadata.st_size
+        while remaining:
+            chunk = os.read(transaction_descriptor, min(remaining, 1024 * 1024))
+            if not chunk:
+                raise OSError("private transaction changed while read")
+            transaction_digest.update(chunk)
+            remaining -= len(chunk)
+        if os.read(transaction_descriptor, 1):
+            raise OSError("private transaction changed while read")
+    except OSError:
+        transaction_valid = False
+    finally:
+        if transaction_descriptor is not None:
+            try:
+                os.close(transaction_descriptor)
+            except OSError:
+                transaction_valid = False
+    if not transaction_valid:
+        return _json.dumps({
+            "ok": False,
+            "display": display,
+            "error": "linkedin_jobs transaction_file failed private-file validation",
+        })
+    expected_transaction_sha256 = transaction_digest.hexdigest()
+
+    claim = {
+        "correlation_id_sha256": hashlib.sha256(correlation_id.encode("utf-8")).hexdigest(),
+        "event_id_sha256": hashlib.sha256(event_id.encode("utf-8")).hexdigest(),
+        "schema": "linkedin_jobs_claim_v1",
+        "seat_id": seat_id,
+        "transaction_sha256": expected_transaction_sha256,
+        "turn_lineage_sha256": expected_turn_lineage,
+    }
+    claim_bytes = _json.dumps(
+        claim,
+        allow_nan=False,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    claim_descriptor = None
+    claim_status = "not_created"
+    try:
+        claim_descriptor = os.open(
+            claim_path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+            0o600,
+        )
+        claim_status = "created"
+        offset = 0
+        while offset < len(claim_bytes):
+            written = os.write(claim_descriptor, claim_bytes[offset:])
+            if written <= 0:
+                raise OSError("private claim write did not advance")
+            offset += written
+        os.fchmod(claim_descriptor, 0o400)
+        os.fsync(claim_descriptor)
+    except FileExistsError:
+        claim_status = "already_claimed"
+    except OSError:
+        if claim_status == "created":
+            claim_status = "indeterminate"
+    finally:
+        if claim_descriptor is not None:
+            try:
+                os.close(claim_descriptor)
+            except OSError:
+                claim_status = "indeterminate"
+    if claim_status == "created":
+        claim_parent_descriptor = None
+        try:
+            claim_parent_descriptor = os.open(
+                claim_path.parent,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+            )
+            os.fsync(claim_parent_descriptor)
+        except OSError:
+            claim_status = "indeterminate"
+        finally:
+            if claim_parent_descriptor is not None:
+                try:
+                    os.close(claim_parent_descriptor)
+                except OSError:
+                    claim_status = "indeterminate"
+    if claim_status == "already_claimed":
+        return _json.dumps({
+            "ok": False,
+            "display": display,
+            "error": "linkedin_jobs transaction identity was already claimed",
+        })
+    if claim_status == "not_created":
+        return _json.dumps({
+            "ok": False,
+            "display": display,
+            "error": "linkedin_jobs claim was not created; no Hands action was admitted",
+        })
+    if claim_status != "created":
+        return _json.dumps({
+            "ok": False,
+            "display": display,
+            "error": (
+                "linkedin_jobs claim could not be finalized; treat this transaction "
+                "identity as spent and do not retry"
+            ),
+        })
+
+    cmd = [
+        str(linkedin_python),
+        str(runner),
+        "--display",
+        display,
+        "--private-root",
+        str(resolved_private_root),
+        "--transaction-file",
+        str(transaction_path),
+        "--expected-transaction-sha256",
+        expected_transaction_sha256,
+        "--receipt-file",
+        str(receipt_path),
+        "--requester",
+        seat_id,
+        "--turn-id",
+        turn_id,
+        "--correlation-id",
+        correlation_id,
+        "--process-generation",
+        process_generation,
+        "--deadline-seconds",
+        str(LINKEDIN_JOBS_DEADLINE_SECS),
+    ]
+    try:
+        completed = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=LINKEDIN_JOBS_TIMEOUT_SECS,
+            env=dict(os.environ),
+        )
+    except subprocess.TimeoutExpired:
+        _audit("linkedin_jobs", {"display": display, "rc": "timeout"})
+        return _json.dumps({
+            "ok": False,
+            "display": display,
+            "error": (
+                "linkedin_jobs exceeded its configured transaction ceiling; "
+                "do not retry this transaction identity"
+            ),
+        })
+    except Exception as exc:
+        _audit(
+            "linkedin_jobs",
+            {"display": display, "rc": "launch_error", "type": type(exc).__name__},
+        )
+        return _json.dumps({
+            "ok": False,
+            "display": display,
+            "error": (
+                "linkedin_jobs runner could not be launched; no raw process output "
+                "was admitted to model context"
+            ),
+        })
+
+    _audit("linkedin_jobs", {"display": display, "rc": completed.returncode})
+    output = (completed.stdout or "").strip()
+    try:
+        payload = _json.loads(output) if output else None
+    except _json.JSONDecodeError:
+        payload = None
+    expected_result_keys = {
+        "ok",
+        "platform",
+        "display",
+        "state",
+        "failure_code",
+        "records_observed",
+        "records_written",
+        "content_digest",
+        "receipt_sha256",
+        "turn_lineage_sha256",
+    }
+    if not isinstance(payload, dict) or set(payload) != expected_result_keys:
+        return _json.dumps({
+            "ok": False,
+            "display": display,
+            "error": (
+                "linkedin_jobs runner returned a non-contract result; raw output "
+                "was withheld from the model context"
+            ),
+        })
+    if payload.get("display") != display or payload.get("platform") != "linkedin":
+        return _json.dumps({
+            "ok": False,
+            "display": display,
+            "error": "linkedin_jobs runner result identity does not match the request",
+        })
+    allowed_states = {
+        "captured",
+        "already_captured",
+        "no_selected_job",
+        "postcondition_failed",
+        "technical_failure",
+    }
+    state = payload.get("state")
+    if state not in allowed_states or not isinstance(payload.get("ok"), bool):
+        return _json.dumps({
+            "ok": False,
+            "display": display,
+            "error": "linkedin_jobs runner returned an invalid terminal state",
+        })
+    expected_ok = state in {"captured", "already_captured"}
+    if payload["ok"] is not expected_ok or (completed.returncode == 0) is not expected_ok:
+        return _json.dumps({
+            "ok": False,
+            "display": display,
+            "error": "linkedin_jobs runner result and process status disagree",
+        })
+    allowed_failure_codes_by_state = {
+        "captured": {None},
+        "already_captured": {None},
+        "no_selected_job": {"selected_job_not_exact"},
+        "postcondition_failed": {"postcondition_failed"},
+        "technical_failure": {
+            "deadline_expired",
+            "display_lock_unavailable",
+            "lock_release_indeterminate",
+            "post_observation_indeterminate",
+            "pre_observation_failed",
+            "private_input_invalid",
+            "sink_write_indeterminate",
+        },
+    }
+    failure_code = payload.get("failure_code")
+    if failure_code not in allowed_failure_codes_by_state[state]:
+        return _json.dumps({
+            "ok": False,
+            "display": display,
+            "error": "linkedin_jobs runner returned invalid failure_code",
+        })
+    lineage_payload = {
+        "correlation_id": correlation_id,
+        "process_generation": process_generation,
+        "requester": seat_id,
+        "turn_id": turn_id,
+    }
+    expected_turn_lineage = hashlib.sha256(
+        _json.dumps(
+            lineage_payload,
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+    if payload.get("turn_lineage_sha256") != expected_turn_lineage:
+        return _json.dumps({
+            "ok": False,
+            "display": display,
+            "error": "linkedin_jobs runner result lineage does not match the active turn",
+        })
+    records_observed = payload.get("records_observed")
+    if (
+        isinstance(records_observed, bool)
+        or not isinstance(records_observed, int)
+        or records_observed not in {0, 1}
+    ):
+        return _json.dumps({
+            "ok": False,
+            "display": display,
+            "error": "linkedin_jobs runner returned invalid records_observed",
+        })
+    records_written = payload.get("records_written")
+    if records_written is not None and (
+        isinstance(records_written, bool)
+        or not isinstance(records_written, int)
+        or records_written not in {0, 1}
+    ):
+        return _json.dumps({
+            "ok": False,
+            "display": display,
+            "error": "linkedin_jobs runner returned invalid records_written",
+        })
+    exact_counts = {
+        "captured": (1, 1),
+        "already_captured": (1, 0),
+        "no_selected_job": (0, 0),
+    }
+    if state in exact_counts and (
+        payload["records_observed"], payload["records_written"]
+    ) != exact_counts[state]:
+        return _json.dumps({
+            "ok": False,
+            "display": display,
+            "error": "linkedin_jobs runner returned counts inconsistent with its state",
+        })
+    if state == "postcondition_failed" and (
+        payload["records_observed"] != 1
+        or payload["records_written"] not in {0, 1}
+    ):
+        return _json.dumps({
+            "ok": False,
+            "display": display,
+            "error": "linkedin_jobs runner returned counts inconsistent with its state",
+        })
+    digest_pattern = r"[0-9a-f]{64}"
+    content_digest = payload.get("content_digest")
+    if state in {"captured", "already_captured", "postcondition_failed"}:
+        if not re.fullmatch(digest_pattern, str(content_digest or "")):
+            return _json.dumps({
+                "ok": False,
+                "display": display,
+                "error": "linkedin_jobs runner returned invalid content_digest",
+            })
+    elif state == "no_selected_job" and content_digest is not None:
+        return _json.dumps({
+            "ok": False,
+            "display": display,
+            "error": "linkedin_jobs runner returned unexpected content_digest",
+        })
+    elif state == "technical_failure" and content_digest is not None and not re.fullmatch(
+        digest_pattern, str(content_digest)
+    ):
+        return _json.dumps({
+            "ok": False,
+            "display": display,
+            "error": "linkedin_jobs runner returned invalid content_digest",
+        })
+    if state == "technical_failure" and not (
+        (
+            payload["records_observed"] == 0
+            and payload["records_written"] == 0
+            and content_digest is None
+            and failure_code != "sink_write_indeterminate"
+        )
+        or (
+            payload["records_observed"] == 1
+            and payload["records_written"] in {0, 1}
+            and content_digest is not None
+            and failure_code != "sink_write_indeterminate"
+        )
+        or (
+            payload["records_observed"] == 1
+            and payload["records_written"] is None
+            and content_digest is not None
+            and failure_code == "sink_write_indeterminate"
+        )
+    ):
+        return _json.dumps({
+            "ok": False,
+            "display": display,
+            "error": "linkedin_jobs runner returned facts inconsistent with its state",
+        })
+    if not re.fullmatch(digest_pattern, str(payload.get("receipt_sha256") or "")):
+        return _json.dumps({
+            "ok": False,
+            "display": display,
+            "error": (
+                "linkedin_jobs runner did not return a durable terminal receipt; "
+                "raw output was withheld from the model context"
+            ),
+        })
+    receipt_digest = hashlib.sha256()
+    receipt_descriptor = None
+    receipt_valid = True
+    try:
+        receipt_descriptor = os.open(
+            receipt_path,
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+        )
+        receipt_metadata = os.fstat(receipt_descriptor)
+        if (
+            not stat.S_ISREG(receipt_metadata.st_mode)
+            or stat.S_IMODE(receipt_metadata.st_mode) != 0o400
+            or receipt_metadata.st_uid != os.geteuid()
+        ):
+            raise OSError("unsafe private receipt")
+        remaining = receipt_metadata.st_size
+        while remaining:
+            chunk = os.read(receipt_descriptor, min(remaining, 1024 * 1024))
+            if not chunk:
+                raise OSError("private receipt changed while read")
+            receipt_digest.update(chunk)
+            remaining -= len(chunk)
+        if os.read(receipt_descriptor, 1):
+            raise OSError("private receipt changed while read")
+    except OSError:
+        receipt_valid = False
+    finally:
+        if receipt_descriptor is not None:
+            try:
+                os.close(receipt_descriptor)
+            except OSError:
+                receipt_valid = False
+    if not receipt_valid or receipt_digest.hexdigest() != payload["receipt_sha256"]:
+        return _json.dumps({
+            "ok": False,
+            "display": display,
+            "error": (
+                "linkedin_jobs runner did not persist the exact claimed terminal "
+                "receipt; raw output was withheld from model context"
+            ),
+        })
+    return _json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
 # ---------------------------------------------------------------------------
@@ -3784,6 +4518,16 @@ async def _chat_completions_for_turn(
             {"role": "system", "content": _consult_chat_system_prompt},
             *messages,
         ]
+    elif turn.tool_profile == _LINKEDIN_JOBS_TOOL_PROFILE:
+        messages = [
+            message
+            for message in body.get("messages", [])
+            if message.get("role") != "system"
+        ]
+        body["messages"] = [
+            {"role": "system", "content": _linkedin_jobs_system_prompt},
+            *messages,
+        ]
     else:
         body = inject_preamble(body)
     is_stream = body.get("stream", False)
@@ -3854,6 +4598,17 @@ async def _chat_completions_for_turn(
             choice = (payload.get("choices") or [{}])[0]
             message = choice.get("message", {}) or {}
             tool_calls = message.get("tool_calls") or []
+            if turn.tool_profile == _LINKEDIN_JOBS_TOOL_PROFILE and (
+                len(tool_calls) != 1
+                or (tool_calls[0].get("function") or {}).get("name") != "linkedin_jobs"
+            ):
+                raise HTTPException(
+                    status_code=502,
+                    detail={
+                        "error": "linkedin_jobs_one_shot_tool_call_required",
+                        "turn_id": turn.turn_id,
+                    },
+                )
             # GATE ON TOOL CALLS ONLY, NOT ON finish_reason. Measured 2026-07-28: this build
             # returns finish_reason='stop' even on turns that carry tool_calls, so requiring
             # =='tool_calls' discarded real calls -- and because the model had put its output IN
@@ -3916,6 +4671,33 @@ async def _chat_completions_for_turn(
             rounds += 1
             log.info("Stream tool calls (round %d): %s", rounds,
                      [tc.get("function", {}).get("name") for tc in tool_calls])
+            if turn.tool_profile == _LINKEDIN_JOBS_TOOL_PROFILE:
+                tc = tool_calls[0]
+                func = tc.get("function", {}) or {}
+                raw_args = func.get("arguments", {})
+                if isinstance(raw_args, dict):
+                    arguments = raw_args
+                else:
+                    try:
+                        arguments = json.loads(raw_args) if raw_args else {}
+                    except json.JSONDecodeError:
+                        arguments = {}
+                resolved_answer = await execute_tool_call_async(
+                    "linkedin_jobs",
+                    arguments,
+                    tool_call_id=tc.get("id", ""),
+                    round_num=rounds,
+                )
+                if not resolved_answer:
+                    raise HTTPException(
+                        status_code=502,
+                        detail={
+                            "error": "linkedin_jobs_terminal_result_missing",
+                            "turn_id": turn.turn_id,
+                        },
+                    )
+                resolved_thinking = ""
+                break
             body["messages"].append(message)
             for tc in tool_calls:
                 func = tc.get("function", {}) or {}
@@ -4063,7 +4845,22 @@ async def _chat_completions_for_turn(
                 finish_reason = choice.get("finish_reason", "")
                 tool_calls = message.get("tool_calls", [])
 
-                if not tool_calls or finish_reason != "tool_calls":
+                if turn.tool_profile == _LINKEDIN_JOBS_TOOL_PROFILE and (
+                    len(tool_calls) != 1
+                    or (tool_calls[0].get("function") or {}).get("name") != "linkedin_jobs"
+                ):
+                    raise HTTPException(
+                        status_code=502,
+                        detail={
+                            "error": "linkedin_jobs_one_shot_tool_call_required",
+                            "turn_id": turn.turn_id,
+                        },
+                    )
+
+                if not tool_calls or (
+                    turn.tool_profile != _LINKEDIN_JOBS_TOOL_PROFILE
+                    and finish_reason != "tool_calls"
+                ):
                     # No tool calls -- final response. If a schema was held aside for the tool
                     # rounds, the answer the caller contracted for has not been produced yet.
                     if held_response_format is not None:
@@ -4076,6 +4873,42 @@ async def _chat_completions_for_turn(
                 log.info("Tool calls (round %d): %s",
                          round_num,
                          [tc.get("function", {}).get("name") for tc in tool_calls])
+
+                if turn.tool_profile == _LINKEDIN_JOBS_TOOL_PROFILE:
+                    tc = tool_calls[0]
+                    func = tc.get("function", {}) or {}
+                    raw_args = func.get("arguments", {})
+                    if isinstance(raw_args, dict):
+                        arguments = raw_args
+                    else:
+                        try:
+                            arguments = json.loads(raw_args) if raw_args else {}
+                        except json.JSONDecodeError:
+                            arguments = {}
+                    tool_result = await execute_tool_call_async(
+                        "linkedin_jobs",
+                        arguments,
+                        tool_call_id=tc.get("id", ""),
+                        round_num=round_num,
+                    )
+                    if not tool_result:
+                        raise HTTPException(
+                            status_code=502,
+                            detail={
+                                "error": "linkedin_jobs_terminal_result_missing",
+                                "turn_id": turn.turn_id,
+                            },
+                        )
+                    result = dict(result)
+                    result["choices"] = [{
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": tool_result,
+                        },
+                        "finish_reason": "stop",
+                    }]
+                    break
 
                 # NOTE: keep each tool_call's arguments as the JSON STRING vLLM
                 # returns. With the correct qwen3_xml parser the chat-template
