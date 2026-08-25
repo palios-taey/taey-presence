@@ -439,8 +439,8 @@ registers the immutable transaction at
 owner-controlled `0700` parent for
 `receipts/SEAT/CORRELATION.json` and `claims/SEAT/CORRELATION.json`. Presence
 derives all three paths from the validated turn lineage. Immediately before the
-Hands subprocess, it creates the claim once with `O_EXCL`, mode `0600`, and never
-normalizes it to immutable mode `0400`, and never deletes it. A second turn with
+Hands subprocess, it creates the claim once with `O_EXCL` and mode `0600`,
+normalizes it to immutable mode `0400`, then never deletes it. A second turn with
 the same identity is therefore refused even when
 the first turn ended in a launch failure or outer timeout. Presence then invokes
 the public Hands runner once, passing the claimed transaction digest; Hands must
