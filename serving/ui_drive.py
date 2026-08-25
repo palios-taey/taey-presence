@@ -1079,6 +1079,24 @@ def _scroll_to_bottom_action(
             f"{deps.platform}: no unique YAML extraction scroll step matches "
             f"scroll_to_bottom for {row['element']!r}"
         )
+    required_mapped_key = None
+    if output_type == "research_report":
+        next_step_index = step_index + 1
+        next_step = (
+            workflow.steps[next_step_index]
+            if workflow is not None and next_step_index < len(workflow.steps)
+            else None
+        )
+        if (
+            next_step is None
+            or next_step.action != "copy_element"
+            or not next_step.element
+        ):
+            raise UiDriveError(
+                f"{deps.platform}: research_report scroll step has no exact next "
+                "copy_element postcondition"
+            )
+        required_mapped_key = next_step.element
     runtime = ConsultationRuntime(deps.platform)
     anchor = ElementRef(
         key=str(row["element"]),
@@ -1092,9 +1110,18 @@ def _scroll_to_bottom_action(
         atspi_obj=row.get("atspi_obj"),
         raw=row,
     )
-    if not runtime.scroll_to_bottom(anchor):
+    if not runtime.scroll_to_bottom(
+        anchor,
+        required_mapped_key=required_mapped_key,
+    ):
+        required_detail = (
+            f" before mapping {required_mapped_key!r}"
+            if required_mapped_key
+            else ""
+        )
         raise UiDriveError(
             f"{deps.platform}: scroll_to_bottom primitive returned false"
+            f"{required_detail}"
         )
     return {
         "performed": True,
@@ -1104,6 +1131,7 @@ def _scroll_to_bottom_action(
             "step_index": step_index,
             "action": step.action,
             "element": step.element,
+            "required_mapped_element": required_mapped_key,
         },
         "element": {
             "category": "mapped",
