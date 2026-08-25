@@ -1053,15 +1053,30 @@ def _scroll_to_bottom_action(
     args: argparse.Namespace, deps: SimpleNamespace
 ) -> dict[str, Any]:
     row = _resolve_target(args, deps)
-    workflow = get_extraction(deps.platform, "assistant_text")
-    if workflow is None or not workflow.steps:
+    output_type = "assistant_text"
+    workflow = get_extraction(deps.platform, output_type)
+    step = workflow.steps[0] if workflow is not None and workflow.steps else None
+    step_index = 0
+    if (
+        step is None
+        or step.action != "scroll_to_bottom"
+        or step.element != row["element"]
+    ):
+        output_type = "research_report"
+        workflow = get_extraction(deps.platform, output_type)
+        matching_steps = [
+            (index, candidate)
+            for index, candidate in enumerate(workflow.steps if workflow else ())
+            if candidate.action == "scroll_to_bottom"
+            and candidate.element == row["element"]
+        ]
+        if len(matching_steps) != 1:
+            step = None
+        else:
+            step_index, step = matching_steps[0]
+    if step is None:
         raise UiDriveError(
-            f"{deps.platform}: extraction.assistant_text has no executable steps"
-        )
-    step = workflow.steps[0]
-    if step.action != "scroll_to_bottom" or step.element != row["element"]:
-        raise UiDriveError(
-            f"{deps.platform}: extraction.assistant_text first step is not exact "
+            f"{deps.platform}: no unique YAML extraction scroll step matches "
             f"scroll_to_bottom for {row['element']!r}"
         )
     runtime = ConsultationRuntime(deps.platform)
@@ -1085,8 +1100,8 @@ def _scroll_to_bottom_action(
         "performed": True,
         "performed_primitive": "scroll_to_bottom",
         "yaml_extraction": {
-            "output_type": "assistant_text",
-            "step_index": 0,
+            "output_type": output_type,
+            "step_index": step_index,
             "action": step.action,
             "element": step.element,
         },
