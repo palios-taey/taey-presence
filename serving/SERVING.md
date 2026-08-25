@@ -414,6 +414,11 @@ For other model families, set the parsers your model expects.
 | `TAEY_TURN_LEASE_SECS` | `120` | active-turn lease; expiry is archived as an abandoned turn |
 | `TAEY_TURN_HEARTBEAT_SECS` | `30` | lease-renewal interval, capped at one-third of the lease |
 | `TAEY_DRIVE_CHAT_CAPTURE_ROOT` | *(empty → `drive_chat` refused)* | private write-once evidence root; required before any UI action |
+| `TAEYS_HANDS_ROOT` | *(empty → `linkedin_jobs` refused)* | absolute path to a committed public `palios-taey/taeys-hands` checkout |
+| `TAEY_LINKEDIN_JOBS_PYTHON` | *(empty → `linkedin_jobs` refused)* | explicit Python interpreter with the public Hands runtime and AT-SPI dependencies |
+| `TAEY_LINKEDIN_JOBS_PRIVATE_ROOT` | *(empty → `linkedin_jobs` refused)* | owner-controlled nonsymlink `0700` root for the manifest, permanent claim, receipt, and raw sink |
+| `TAEY_LINKEDIN_JOBS_DISPLAYS` | *(empty → `linkedin_jobs` refused)* | comma-separated runtime-authorized LinkedIn displays; `:0` is always refused |
+| `TAEY_LINKEDIN_JOBS_TIMEOUT_SECS` | `1800` | outer watchdog; the Hands-owned deadline is exactly 100 seconds earlier and must finish receipt/lock cleanup first |
 
 Create `TAEY_DRIVE_CHAT_CAPTURE_ROOT` as the proxy service user with mode `0700`
 and set the same absolute, non-symlink path in every proxy that exposes
@@ -426,6 +431,53 @@ paths, URLs, and account details. Never commit it or feed it to a public receipt
 builder. A missing or unsafe root refuses the action before mutation; a
 result-finalization failure terminalizes the turn so Taey cannot continue
 without its evidence.
+
+The `linkedin-jobs` tool profile exposes only `linkedin_jobs`, with one
+runtime-authorized display as its sole argument. Before the request, the caller
+registers the immutable transaction at
+`transactions/SEAT/CORRELATION.json` beneath the private root and creates the
+owner-controlled `0700` parent for
+`receipts/SEAT/CORRELATION.json` and `claims/SEAT/CORRELATION.json`. Presence
+derives all three paths from the validated turn lineage. Immediately before the
+Hands subprocess, it creates the claim once with `O_EXCL`, mode `0600`, and never
+normalizes it to immutable mode `0400`, and never deletes it. A second turn with
+the same identity is therefore refused even when
+the first turn ended in a launch failure or outer timeout. Presence then invokes
+the public Hands runner once, passing the claimed transaction digest; Hands must
+match that digest again before any lock, UI observation, or sink action. Presence
+returns its fixed compact result directly as the terminal answer without a second
+inference round. The transaction's raw sink
+must remain beneath the same private root. Search policy, sink policy, raw job
+text, account data, and private topology never enter public Git or model context.
+
+The canonical non-stream invocation is below. Before calling it, create the
+private transaction as exact canonical JSON bytes at
+`PRIVATE_ROOT/transactions/taey-revenue-1/linkedin-job-001.json`, mode `0400`,
+and create the `0700` parent
+`PRIVATE_ROOT/receipts/taey-revenue-1/` plus the `0700` parent
+`PRIVATE_ROOT/claims/taey-revenue-1/`. Its four fields are exactly:
+
+```json
+{"operation":"capture_selected_job","schema":"linkedin_jobs_private_input_v1","search_ref":"PRIVATE_OPAQUE_SEARCH_REFERENCE","sink_ref":"ABSOLUTE_0700_DIRECTORY_BENEATH_PRIVATE_ROOT"}
+```
+
+The correlation header is the transaction filename without `.json`. The model
+receives only the display; it never receives the private manifest or sink path.
+
+```bash
+curl --fail-with-body --silent --show-error \
+  -H 'Content-Type: application/json' \
+  -H 'X-Taey-Seat-Id: taey-revenue-1' \
+  -H 'X-Taey-Event-Id: linkedin-job-001' \
+  -H 'X-Taey-Correlation-Id: linkedin-job-001' \
+  -H 'X-Taey-Tool-Profile: linkedin-jobs' \
+  --data-binary '{"model":"SERVED_MODEL_ID","stream":false,"messages":[{"role":"user","content":"Execute the frozen LinkedIn Jobs transaction on display :18."}]}' \
+  http://127.0.0.1:8765/v1/chat/completions
+```
+
+Change only the served model ID, runtime-authorized display, seat, event, and
+correlation identities. Never reuse an identity whose receipt path already
+exists, and never retry a terminal identity.
 
 The durable seat has no fixed elapsed-time deadline for a complete proxy turn.
 `VLLM_REQUEST_TIMEOUT_SECS` applies to one upstream inference request, while the
