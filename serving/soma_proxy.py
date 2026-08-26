@@ -92,6 +92,10 @@ LINKEDIN_JOBS_SYSTEM_PROMPT_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
     "TAEY_LINKEDIN_JOBS_SYSTEM.md",
 )
+LINKEDIN_JOBS_RESTORE_SYSTEM_PROMPT_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "TAEY_LINKEDIN_JOBS_RESTORE_SYSTEM.md",
+)
 LINKEDIN_JOB_SEARCH_SYSTEM_PROMPT_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
     "TAEY_LINKEDIN_JOB_SEARCH_SYSTEM.md",
@@ -222,6 +226,7 @@ _FULL_TOOL_PROFILE = "full"
 _MANUAL_CHAT_UI_TOOL_PROFILE = "manual-chat-ui"
 _CONSULT_CHAT_TOOL_PROFILE = "consult-chat"
 _LINKEDIN_JOBS_TOOL_PROFILE = "linkedin-jobs"
+_LINKEDIN_JOBS_RESTORE_TOOL_PROFILE = "linkedin-jobs-restore"
 _LINKEDIN_JOB_SEARCH_TOOL_PROFILE = "linkedin-job-search"
 _LINKEDIN_ENGAGERS_TOOL_PROFILE = "linkedin-engagers"
 _LINKEDIN_APPLICATION_INTAKE_TOOL_PROFILE = "linkedin-application-intake"
@@ -235,6 +240,9 @@ _TOOL_PROFILE_ALLOWED: dict[str, frozenset[str] | None] = {
     }),
     _LINKEDIN_JOBS_TOOL_PROFILE: frozenset({
         "linkedin_jobs",
+    }),
+    _LINKEDIN_JOBS_RESTORE_TOOL_PROFILE: frozenset({
+        "restore_linkedin_jobs_surface",
     }),
     _LINKEDIN_JOB_SEARCH_TOOL_PROFILE: frozenset({
         "linkedin_job_search",
@@ -1453,6 +1461,33 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "restore_linkedin_jobs_surface",
+            "description": (
+                "Restore one dedicated LinkedIn browser display to the exact "
+                "parent-frozen Jobs search-results URL through the public Hands "
+                "runner and private receipt chain. The target URL remains "
+                "off-context. Available only in the linkedin-jobs-restore tool "
+                "profile; never retry a spent transaction identity."
+            ),
+            "parameters": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["display"],
+                "properties": {
+                    "display": {
+                        "type": "string",
+                        "pattern": "^:[0-9]{1,3}$",
+                        "description": (
+                            "runtime-authorized LinkedIn display supplied by the user"
+                        ),
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "linkedin_engagers",
             "description": (
                 "Execute one frozen LinkedIn My Posts new-engagement capture "
@@ -1751,6 +1786,9 @@ def execute_tool_call(name: str, arguments: dict) -> str:
 
     elif name == "linkedin_jobs":
         return _do_linkedin_jobs(arguments)
+
+    elif name == "restore_linkedin_jobs_surface":
+        return _do_linkedin_jobs_restore(arguments)
 
     elif name == "linkedin_job_search":
         return _do_linkedin_job_search(arguments)
@@ -2097,6 +2135,27 @@ _env_linkedin_jobs_displays = os.environ.get(
 LINKEDIN_JOBS_DISPLAYS = tuple(
     display.strip()
     for display in _env_linkedin_jobs_displays.split(",")
+    if display.strip() and display.strip() != ":0"
+)
+LINKEDIN_JOBS_RESTORE_PYTHON = os.environ.get(
+    "TAEY_LINKEDIN_JOBS_RESTORE_PYTHON", ""
+).strip()
+LINKEDIN_JOBS_RESTORE_PRIVATE_ROOT = os.environ.get(
+    "TAEY_LINKEDIN_JOBS_RESTORE_PRIVATE_ROOT", ""
+).strip()
+try:
+    LINKEDIN_JOBS_RESTORE_TIMEOUT_SECS = int(
+        os.environ.get("TAEY_LINKEDIN_JOBS_RESTORE_TIMEOUT_SECS", "1800")
+    )
+except ValueError:
+    LINKEDIN_JOBS_RESTORE_TIMEOUT_SECS = 0
+LINKEDIN_JOBS_RESTORE_DEADLINE_SECS = LINKEDIN_JOBS_RESTORE_TIMEOUT_SECS - 100
+_env_linkedin_jobs_restore_displays = os.environ.get(
+    "TAEY_LINKEDIN_JOBS_RESTORE_DISPLAYS", ""
+).strip()
+LINKEDIN_JOBS_RESTORE_DISPLAYS = tuple(
+    display.strip()
+    for display in _env_linkedin_jobs_restore_displays.split(",")
     if display.strip() and display.strip() != ":0"
 )
 LINKEDIN_JOB_SEARCH_PYTHON = os.environ.get(
@@ -2609,6 +2668,55 @@ def _linkedin_engagers_result_error(payload: dict, returncode: int) -> str | Non
     return None
 
 
+def _linkedin_jobs_restore_result_error(
+    payload: dict,
+    returncode: int,
+) -> str | None:
+    state = payload.get("state")
+    ok = payload.get("ok")
+    failure_code = payload.get("failure_code")
+    if not isinstance(ok, bool) or state not in {"restored", "technical_failure"}:
+        return "runner returned an invalid terminal state"
+    expected_ok = state == "restored"
+    expected_returncode = 0 if expected_ok else 2
+    if ok is not expected_ok or returncode != expected_returncode:
+        return "runner result and process status disagree"
+    if expected_ok:
+        if failure_code is not None:
+            return "runner returned invalid failure_code"
+    elif failure_code not in {
+        "deadline_expired",
+        "display_lock_unavailable",
+        "lock_release_indeterminate",
+        "private_input_invalid",
+        "restore_indeterminate",
+    }:
+        return "runner returned invalid failure_code"
+    for key in (
+        "target_url_sha256",
+        "firefox_pid_sha256",
+        "restore_proof_sha256",
+    ):
+        digest = payload.get(key)
+        if digest is not None and not re.fullmatch(r"[0-9a-f]{64}", str(digest)):
+            return f"runner returned invalid {key}"
+    stable_cycles = payload.get("stable_cycles_observed")
+    if (
+        isinstance(stable_cycles, bool)
+        or not isinstance(stable_cycles, int)
+        or not 0 <= stable_cycles <= 2
+    ):
+        return "runner returned invalid stable_cycles_observed"
+    if expected_ok and not (
+        payload.get("target_url_sha256") is not None
+        and payload.get("firefox_pid_sha256") is not None
+        and payload.get("restore_proof_sha256") is not None
+        and stable_cycles == 2
+    ):
+        return "runner returned facts inconsistent with its state"
+    return None
+
+
 def _linkedin_application_intake_result_error(
     payload: dict,
     returncode: int,
@@ -2668,6 +2776,19 @@ _LINKEDIN_JOB_SEARCH_RESULT_KEYS = frozenset({
     "receipt_sha256",
     "turn_lineage_sha256",
 })
+_LINKEDIN_JOBS_RESTORE_RESULT_KEYS = frozenset({
+    "ok",
+    "platform",
+    "display",
+    "state",
+    "failure_code",
+    "target_url_sha256",
+    "firefox_pid_sha256",
+    "restore_proof_sha256",
+    "stable_cycles_observed",
+    "receipt_sha256",
+    "turn_lineage_sha256",
+})
 _LINKEDIN_ENGAGERS_RESULT_KEYS = frozenset({
     *_LINKEDIN_JOBS_RESULT_KEYS,
     "restore_verified",
@@ -2724,6 +2845,28 @@ _PRIVATE_TRANSACTION_TOOL_SPECS = (
         terminal_reason="the one frozen LinkedIn Job Search invocation has been spent",
         expected_result_keys=_LINKEDIN_JOB_SEARCH_RESULT_KEYS,
         validate_result=_linkedin_job_search_result_error,
+    ),
+    PrivateTransactionToolSpec(
+        profile=_LINKEDIN_JOBS_RESTORE_TOOL_PROFILE,
+        tool="restore_linkedin_jobs_surface",
+        prompt_label="LinkedIn Jobs Surface Restore",
+        system_prompt_path=LINKEDIN_JOBS_RESTORE_SYSTEM_PROMPT_PATH,
+        runner_name="run_linkedin_jobs_restore.py",
+        python_path=LINKEDIN_JOBS_RESTORE_PYTHON,
+        python_env_name="TAEY_LINKEDIN_JOBS_RESTORE_PYTHON",
+        private_root=LINKEDIN_JOBS_RESTORE_PRIVATE_ROOT,
+        private_root_env_name="TAEY_LINKEDIN_JOBS_RESTORE_PRIVATE_ROOT",
+        displays=LINKEDIN_JOBS_RESTORE_DISPLAYS,
+        displays_env_name="TAEY_LINKEDIN_JOBS_RESTORE_DISPLAYS",
+        timeout_secs=LINKEDIN_JOBS_RESTORE_TIMEOUT_SECS,
+        timeout_env_name="TAEY_LINKEDIN_JOBS_RESTORE_TIMEOUT_SECS",
+        deadline_secs=LINKEDIN_JOBS_RESTORE_DEADLINE_SECS,
+        claim_schema="linkedin_jobs_restore_claim_v1",
+        terminal_reason=(
+            "the one frozen LinkedIn Jobs Surface Restore invocation has been spent"
+        ),
+        expected_result_keys=_LINKEDIN_JOBS_RESTORE_RESULT_KEYS,
+        validate_result=_linkedin_jobs_restore_result_error,
     ),
     PrivateTransactionToolSpec(
         profile=_LINKEDIN_ENGAGERS_TOOL_PROFILE,
@@ -3311,6 +3454,13 @@ def _do_linkedin_job_search(arguments: dict) -> str:
     return _do_private_transaction(
         arguments,
         _private_transaction_spec_for_tool("linkedin_job_search"),
+    )
+
+
+def _do_linkedin_jobs_restore(arguments: dict) -> str:
+    return _do_private_transaction(
+        arguments,
+        _private_transaction_spec_for_tool("restore_linkedin_jobs_surface"),
     )
 
 
