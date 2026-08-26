@@ -91,6 +91,7 @@ production status, which is exactly a new artifact commit.
   "entry_doc": "serving/DEPLOYMENT_TOPOLOGY.md",
   "artifact_paths": [
     "serving/DEPLOYMENT_TOPOLOGY.md",
+    "serving/TAEY_LINKEDIN_APPLICATION_CLASSIFICATION_SYSTEM.md",
     "serving/TAEY_LINKEDIN_ENGAGERS_SYSTEM.md",
     "serving/TAEY_LINKEDIN_JOBS_RESTORE_SYSTEM.md",
     "serving/TAEY_LINKEDIN_JOBS_SYSTEM.md",

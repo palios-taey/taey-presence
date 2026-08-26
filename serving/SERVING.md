@@ -436,6 +436,11 @@ For other model families, set the parsers your model expects.
 | `TAEY_APPLY_PRIVATE_ROOT` | *(empty → `linkedin_application_intake` refused)* | owner-controlled nonsymlink `0700` root for immutable transactions, permanent claims, source captures, and terminal receipts |
 | `TAEY_APPLY_DB` | *(empty → `linkedin_application_intake` refused)* | existing owner-controlled nonsymlink `0600` jobs database; Presence never creates or migrates it |
 | `TAEY_APPLY_TIMEOUT_SECS` | *(empty → `linkedin_application_intake` refused)* | explicit one-shot outer watchdog in the inclusive range 1-600 seconds |
+| `TAEY_APPLY_CLASSIFICATION_PYTHON` | *(empty → `linkedin_application_classification` refused)* | explicit Python interpreter used to invoke the public classification connector module |
+| `TAEY_APPLY_CLASSIFICATION_PUBLIC_ROOT` | *(empty → `linkedin_application_classification` refused)* | canonical absolute checkout of public `palios-taey/taey-apply`; its `src` is the connector's sole `PYTHONPATH` |
+| `TAEY_APPLY_CLASSIFICATION_PRIVATE_ROOT` | *(empty → `linkedin_application_classification` refused)* | dedicated owner-controlled nonsymlink `0700` root for immutable capsules, permanent Presence claims, connector attempt markers, and terminal receipts |
+| `TAEY_APPLY_CLASSIFICATION_DB` | *(empty → `linkedin_application_classification` refused)* | existing active owner-controlled nonsymlink `0600` jobs database; Presence never creates or migrates it |
+| `TAEY_APPLY_CLASSIFICATION_TIMEOUT_SECS` | *(empty → `linkedin_application_classification` refused)* | explicit one-shot outer watchdog in the inclusive range 1-600 seconds |
 
 Create `TAEY_DRIVE_CHAT_CAPTURE_ROOT` as the proxy service user with mode `0700`
 and set the same absolute, non-symlink path in every proxy that exposes
@@ -608,6 +613,53 @@ curl --fail-with-body --silent --show-error \
   -H 'X-Taey-Correlation-Id: linkedin-intake-001' \
   -H 'X-Taey-Tool-Profile: linkedin-application-intake' \
   --data-binary '{"model":"SERVED_MODEL_ID","stream":false,"messages":[{"role":"user","content":"Execute the frozen LinkedIn application-intake transaction."}]}' \
+  http://127.0.0.1:8765/v1/chat/completions
+```
+
+The `linkedin-application-classification` profile exposes only
+`linkedin_application_classification`, whose argument schema is the empty
+object. The model cannot supply an identifier, terminal value, private content,
+database location, or downstream operation. A private parent writes one
+canonical owner-controlled `0400` capsule at
+`transactions/SEAT/CORRELATION.json` beneath the dedicated classification root:
+
+```json
+{"classification_claim_ref":"decisions/classification.json","classification_claim_sha256":"SHA256","operation":"classify_frozen_linkedin_intake","schema":"taey_apply_linkedin_classification_private_input_v1"}
+```
+
+The referenced classification claim remains private and follows the public
+`taey-apply` classification schema. Presence derives the capsule, permanent
+`presence-claims/SEAT/CORRELATION.json`, and new
+`receipts/SEAT/CORRELATION.json` solely from the validated active turn. It
+validates the capsule as exact canonical UTF-8 JSON, creates the Presence claim
+once with `O_EXCL`, fsyncs it at mode `0400`, and never removes it. The public
+connector separately creates its digest-bound attempt marker, so neither a
+Presence turn nor an accepted connector claim is replayable.
+
+After the permanent Presence claim, Presence invokes exactly one
+`python -P -m taey_apply.classification_cli` process with `PYTHONPATH` set only
+to `TAEY_APPLY_CLASSIFICATION_PUBLIC_ROOT/src`. It supplies the dedicated
+private root, existing active `0600` database, opaque claim reference and
+digest, new receipt destination, and active turn lineage. Presence releases
+only the public connector's compact exact result after the result schema,
+terminal state, counts, claim digest, turn lineage, immutable receipt mode, and
+receipt SHA-256 all match. It takes no display lease, imports neither Hands nor
+private classification logic, and grants no feed, ATS, messaging, or
+application authority.
+
+Run
+`python3 serving/validate_linkedin_application_classification_profile.py`
+before review. The gate uses generated sanitized state and a fake connector; it
+does not evaluate private policy or write a production database.
+
+```bash
+curl --fail-with-body --silent --show-error \
+  -H 'Content-Type: application/json' \
+  -H 'X-Taey-Seat-Id: taey-revenue-1' \
+  -H 'X-Taey-Event-Id: linkedin-classification-001' \
+  -H 'X-Taey-Correlation-Id: linkedin-classification-001' \
+  -H 'X-Taey-Tool-Profile: linkedin-application-classification' \
+  --data-binary '{"model":"SERVED_MODEL_ID","stream":false,"messages":[{"role":"user","content":"Execute the frozen LinkedIn application-classification transaction."}]}' \
   http://127.0.0.1:8765/v1/chat/completions
 ```
 
