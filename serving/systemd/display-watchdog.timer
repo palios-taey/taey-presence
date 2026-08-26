@@ -1,0 +1,10 @@
+[Unit]
+Description=Run the consult-display watchdog every 90s (3 probes = the ~4.5min sustained-degradation window)
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=90s
+AccuracySec=10s
+
+[Install]
+WantedBy=timers.target

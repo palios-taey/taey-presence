@@ -1,0 +1,9 @@
+[Unit]
+Description=Consult-display AT-SPI watchdog (infra) — probe chatgpt|claude|gemini|grok|perplexity, restart on sustained degradation
+Documentation=https://github.com/palios-taey/taey-presence serving/display_watchdog.py
+After=graphical-session.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /home/mira/taey-presence-production/serving/display_watchdog.py
+TimeoutStartSec=240
