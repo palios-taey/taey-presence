@@ -419,6 +419,10 @@ For other model families, set the parsers your model expects.
 | `TAEY_LINKEDIN_JOBS_PRIVATE_ROOT` | *(empty → `linkedin_jobs` refused)* | owner-controlled nonsymlink `0700` root for the manifest, permanent claim, receipt, and raw sink |
 | `TAEY_LINKEDIN_JOBS_DISPLAYS` | *(empty → `linkedin_jobs` refused)* | comma-separated runtime-authorized LinkedIn displays; `:0` is always refused |
 | `TAEY_LINKEDIN_JOBS_TIMEOUT_SECS` | `1800` | outer watchdog; the Hands-owned deadline is exactly 100 seconds earlier and must finish receipt/lock cleanup first |
+| `TAEY_LINKEDIN_JOB_SEARCH_PYTHON` | *(empty → `linkedin_job_search` refused)* | explicit Python interpreter with the public Hands mounted-search runner and AT-SPI dependencies |
+| `TAEY_LINKEDIN_JOB_SEARCH_PRIVATE_ROOT` | *(empty → `linkedin_job_search` refused)* | separate owner-controlled nonsymlink `0700` root for the search transaction, permanent claim, receipt, and raw sink |
+| `TAEY_LINKEDIN_JOB_SEARCH_DISPLAYS` | *(empty → `linkedin_job_search` refused)* | comma-separated runtime-authorized LinkedIn search displays; `:0` is always refused |
+| `TAEY_LINKEDIN_JOB_SEARCH_TIMEOUT_SECS` | `1800` | outer watchdog; the Hands-owned deadline is exactly 100 seconds earlier and must finish receipt/lock cleanup first |
 | `TAEY_LINKEDIN_ENGAGERS_PYTHON` | *(empty → `linkedin_engagers` refused)* | explicit Python interpreter with the public Hands runtime and AT-SPI dependencies |
 | `TAEY_LINKEDIN_ENGAGERS_PRIVATE_ROOT` | *(empty → `linkedin_engagers` refused)* | separate owner-controlled nonsymlink `0700` root for its transaction, permanent claim, receipt, and raw sink |
 | `TAEY_LINKEDIN_ENGAGERS_DISPLAYS` | *(empty → `linkedin_engagers` refused)* | comma-separated runtime-authorized LinkedIn displays; `:0` is always refused |
@@ -482,6 +486,30 @@ curl --fail-with-body --silent --show-error \
 Change only the served model ID, runtime-authorized display, seat, event, and
 correlation identities. Never reuse an identity whose receipt path already
 exists, and never retry a terminal identity.
+
+The `linkedin-job-search` profile uses the same permanent-claim boundary but
+exposes only `linkedin_job_search`. Its immutable private manifest contains
+exactly `schema`, `operation`, `search_ref`, and `sink_ref`; the public values are
+`linkedin_job_search_private_input_v1` and `capture_mounted_job_search`.
+Presence invokes `scripts/run_linkedin_job_search.py` once. Hands performs no UI
+action: it requires the YAML-owned mounted card set to stabilize for two
+canonical observations, writes the batch once to the private sink, then requires
+a fresh unchanged postcondition. The compact terminal result exposes only batch
+and card counts, digests, state, receipt identity, and turn lineage. It does not
+expose the search policy, URL, card text, or private paths, and it does not claim
+that an infinite-scroll result set is exhausted. Verify the thin Presence
+registry with `python3 serving/validate_linkedin_job_search_profile.py`.
+
+```bash
+curl --fail-with-body --silent --show-error \
+  -H 'Content-Type: application/json' \
+  -H 'X-Taey-Seat-Id: taey-revenue-1' \
+  -H 'X-Taey-Event-Id: linkedin-search-001' \
+  -H 'X-Taey-Correlation-Id: linkedin-search-001' \
+  -H 'X-Taey-Tool-Profile: linkedin-job-search' \
+  --data-binary '{"model":"SERVED_MODEL_ID","stream":false,"messages":[{"role":"user","content":"Execute the frozen LinkedIn Job Search transaction on display :18."}]}' \
+  http://127.0.0.1:8765/v1/chat/completions
+```
 
 The `linkedin-engagers` profile follows the same one-shot private-transaction
 boundary through its own immutable registry entry and separate private root. It

@@ -92,6 +92,10 @@ LINKEDIN_JOBS_SYSTEM_PROMPT_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
     "TAEY_LINKEDIN_JOBS_SYSTEM.md",
 )
+LINKEDIN_JOB_SEARCH_SYSTEM_PROMPT_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "TAEY_LINKEDIN_JOB_SEARCH_SYSTEM.md",
+)
 LINKEDIN_ENGAGERS_SYSTEM_PROMPT_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
     "TAEY_LINKEDIN_ENGAGERS_SYSTEM.md",
@@ -210,6 +214,7 @@ _FULL_TOOL_PROFILE = "full"
 _MANUAL_CHAT_UI_TOOL_PROFILE = "manual-chat-ui"
 _CONSULT_CHAT_TOOL_PROFILE = "consult-chat"
 _LINKEDIN_JOBS_TOOL_PROFILE = "linkedin-jobs"
+_LINKEDIN_JOB_SEARCH_TOOL_PROFILE = "linkedin-job-search"
 _LINKEDIN_ENGAGERS_TOOL_PROFILE = "linkedin-engagers"
 _TOOL_PROFILE_ALLOWED: dict[str, frozenset[str] | None] = {
     _FULL_TOOL_PROFILE: None,
@@ -221,6 +226,9 @@ _TOOL_PROFILE_ALLOWED: dict[str, frozenset[str] | None] = {
     }),
     _LINKEDIN_JOBS_TOOL_PROFILE: frozenset({
         "linkedin_jobs",
+    }),
+    _LINKEDIN_JOB_SEARCH_TOOL_PROFILE: frozenset({
+        "linkedin_job_search",
     }),
     _LINKEDIN_ENGAGERS_TOOL_PROFILE: frozenset({
         "linkedin_engagers",
@@ -1405,6 +1413,34 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "linkedin_job_search",
+            "description": (
+                "Capture the exact mounted LinkedIn Jobs search-result cards "
+                "through the public platform YAML, canonical AT-SPI tree, "
+                "read-only observation barrier, private sink, and receipt "
+                "chain. Search policy and raw card content remain off-context. "
+                "Available only in the linkedin-job-search tool profile; never "
+                "retry a failed transaction."
+            ),
+            "parameters": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["display"],
+                "properties": {
+                    "display": {
+                        "type": "string",
+                        "pattern": "^:[0-9]{1,3}$",
+                        "description": (
+                            "runtime-authorized LinkedIn display supplied by the user"
+                        ),
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "linkedin_engagers",
             "description": (
                 "Execute one frozen LinkedIn My Posts new-engagement capture "
@@ -1684,6 +1720,9 @@ def execute_tool_call(name: str, arguments: dict) -> str:
 
     elif name == "linkedin_jobs":
         return _do_linkedin_jobs(arguments)
+
+    elif name == "linkedin_job_search":
+        return _do_linkedin_job_search(arguments)
 
     elif name == "linkedin_engagers":
         return _do_linkedin_engagers(arguments)
@@ -2026,6 +2065,27 @@ LINKEDIN_JOBS_DISPLAYS = tuple(
     for display in _env_linkedin_jobs_displays.split(",")
     if display.strip() and display.strip() != ":0"
 )
+LINKEDIN_JOB_SEARCH_PYTHON = os.environ.get(
+    "TAEY_LINKEDIN_JOB_SEARCH_PYTHON", ""
+).strip()
+LINKEDIN_JOB_SEARCH_PRIVATE_ROOT = os.environ.get(
+    "TAEY_LINKEDIN_JOB_SEARCH_PRIVATE_ROOT", ""
+).strip()
+try:
+    LINKEDIN_JOB_SEARCH_TIMEOUT_SECS = int(
+        os.environ.get("TAEY_LINKEDIN_JOB_SEARCH_TIMEOUT_SECS", "1800")
+    )
+except ValueError:
+    LINKEDIN_JOB_SEARCH_TIMEOUT_SECS = 0
+LINKEDIN_JOB_SEARCH_DEADLINE_SECS = LINKEDIN_JOB_SEARCH_TIMEOUT_SECS - 100
+_env_linkedin_job_search_displays = os.environ.get(
+    "TAEY_LINKEDIN_JOB_SEARCH_DISPLAYS", ""
+).strip()
+LINKEDIN_JOB_SEARCH_DISPLAYS = tuple(
+    display.strip()
+    for display in _env_linkedin_job_search_displays.split(",")
+    if display.strip() and display.strip() != ":0"
+)
 LINKEDIN_ENGAGERS_PYTHON = os.environ.get(
     "TAEY_LINKEDIN_ENGAGERS_PYTHON", ""
 ).strip()
@@ -2295,6 +2355,113 @@ def _linkedin_jobs_result_error(payload: dict, returncode: int) -> str | None:
     return None
 
 
+def _linkedin_job_search_result_error(payload: dict, returncode: int) -> str | None:
+    allowed_failure_codes_by_state = {
+        "captured": {None},
+        "already_captured": {None},
+        "no_cards": {None},
+        "postcondition_failed": {"postcondition_failed"},
+        "technical_failure": {
+            "deadline_expired",
+            "display_lock_unavailable",
+            "lock_release_indeterminate",
+            "post_observation_indeterminate",
+            "pre_observation_failed",
+            "private_input_invalid",
+            "sink_write_indeterminate",
+        },
+    }
+    state = payload.get("state")
+    if state not in allowed_failure_codes_by_state or not isinstance(payload.get("ok"), bool):
+        return "runner returned an invalid terminal state"
+    expected_ok = state in {"captured", "already_captured", "no_cards"}
+    if payload["ok"] is not expected_ok or (returncode == 0) is not expected_ok:
+        return "runner result and process status disagree"
+    if payload.get("failure_code") not in allowed_failure_codes_by_state[state]:
+        return "runner returned invalid failure_code"
+    batches_observed = payload.get("batches_observed")
+    batches_written = payload.get("batches_written")
+    cards_observed = payload.get("cards_observed")
+    if (
+        isinstance(batches_observed, bool)
+        or not isinstance(batches_observed, int)
+        or batches_observed not in {0, 1}
+    ):
+        return "runner returned invalid batches_observed"
+    if batches_written is not None and (
+        isinstance(batches_written, bool)
+        or not isinstance(batches_written, int)
+        or batches_written not in {0, 1}
+    ):
+        return "runner returned invalid batches_written"
+    if (
+        isinstance(cards_observed, bool)
+        or not isinstance(cards_observed, int)
+        or cards_observed < 0
+    ):
+        return "runner returned invalid cards_observed"
+    content_digest = payload.get("content_digest")
+    digest_present = content_digest is not None
+    if digest_present and not re.fullmatch(r"[0-9a-f]{64}", str(content_digest)):
+        return "runner returned invalid content_digest"
+    if state == "captured" and not (
+        (batches_observed, batches_written) == (1, 1)
+        and cards_observed > 0
+        and digest_present
+    ):
+        return "runner returned facts inconsistent with its state"
+    if state == "already_captured" and not (
+        (batches_observed, batches_written) == (1, 0)
+        and cards_observed > 0
+        and digest_present
+    ):
+        return "runner returned facts inconsistent with its state"
+    if state == "no_cards" and not (
+        batches_observed == 1
+        and batches_written in {0, 1}
+        and cards_observed == 0
+        and digest_present
+    ):
+        return "runner returned facts inconsistent with its state"
+    if state == "postcondition_failed" and not (
+        batches_observed == 1
+        and batches_written in {0, 1}
+        and digest_present
+    ):
+        return "runner returned facts inconsistent with its state"
+    if state == "technical_failure":
+        before_observation = (
+            batches_observed,
+            batches_written,
+            cards_observed,
+            content_digest,
+        ) == (0, 0, 0, None)
+        after_observation = (
+            batches_observed == 1
+            and batches_written in {0, 1}
+            and digest_present
+        )
+        sink_indeterminate = (
+            batches_observed == 1
+            and batches_written is None
+            and digest_present
+            and payload["failure_code"] == "sink_write_indeterminate"
+        )
+        failure_code = payload["failure_code"]
+        valid_failure_facts = {
+            "display_lock_unavailable": before_observation,
+            "pre_observation_failed": before_observation,
+            "private_input_invalid": before_observation,
+            "post_observation_indeterminate": after_observation,
+            "sink_write_indeterminate": sink_indeterminate,
+            "deadline_expired": before_observation or after_observation,
+            "lock_release_indeterminate": before_observation or after_observation,
+        }
+        if not valid_failure_facts[failure_code]:
+            return "runner returned facts inconsistent with its state"
+    return None
+
+
 def _linkedin_engagers_result_error(payload: dict, returncode: int) -> str | None:
     allowed_failure_codes_by_state = {
         "already_known": {None},
@@ -2402,6 +2569,19 @@ _LINKEDIN_JOBS_RESULT_KEYS = frozenset({
     "receipt_sha256",
     "turn_lineage_sha256",
 })
+_LINKEDIN_JOB_SEARCH_RESULT_KEYS = frozenset({
+    "ok",
+    "platform",
+    "display",
+    "state",
+    "failure_code",
+    "batches_observed",
+    "batches_written",
+    "cards_observed",
+    "content_digest",
+    "receipt_sha256",
+    "turn_lineage_sha256",
+})
 _LINKEDIN_ENGAGERS_RESULT_KEYS = frozenset({
     *_LINKEDIN_JOBS_RESULT_KEYS,
     "restore_verified",
@@ -2426,6 +2606,26 @@ _PRIVATE_TRANSACTION_TOOL_SPECS = (
         terminal_reason="the one frozen LinkedIn Jobs invocation has been spent",
         expected_result_keys=_LINKEDIN_JOBS_RESULT_KEYS,
         validate_result=_linkedin_jobs_result_error,
+    ),
+    PrivateTransactionToolSpec(
+        profile=_LINKEDIN_JOB_SEARCH_TOOL_PROFILE,
+        tool="linkedin_job_search",
+        prompt_label="LinkedIn Job Search",
+        system_prompt_path=LINKEDIN_JOB_SEARCH_SYSTEM_PROMPT_PATH,
+        runner_name="run_linkedin_job_search.py",
+        python_path=LINKEDIN_JOB_SEARCH_PYTHON,
+        python_env_name="TAEY_LINKEDIN_JOB_SEARCH_PYTHON",
+        private_root=LINKEDIN_JOB_SEARCH_PRIVATE_ROOT,
+        private_root_env_name="TAEY_LINKEDIN_JOB_SEARCH_PRIVATE_ROOT",
+        displays=LINKEDIN_JOB_SEARCH_DISPLAYS,
+        displays_env_name="TAEY_LINKEDIN_JOB_SEARCH_DISPLAYS",
+        timeout_secs=LINKEDIN_JOB_SEARCH_TIMEOUT_SECS,
+        timeout_env_name="TAEY_LINKEDIN_JOB_SEARCH_TIMEOUT_SECS",
+        deadline_secs=LINKEDIN_JOB_SEARCH_DEADLINE_SECS,
+        claim_schema="linkedin_job_search_claim_v1",
+        terminal_reason="the one frozen LinkedIn Job Search invocation has been spent",
+        expected_result_keys=_LINKEDIN_JOB_SEARCH_RESULT_KEYS,
+        validate_result=_linkedin_job_search_result_error,
     ),
     PrivateTransactionToolSpec(
         profile=_LINKEDIN_ENGAGERS_TOOL_PROFILE,
@@ -2980,6 +3180,13 @@ def _do_linkedin_jobs(arguments: dict) -> str:
     return _do_private_transaction(
         arguments,
         _private_transaction_spec_for_tool("linkedin_jobs"),
+    )
+
+
+def _do_linkedin_job_search(arguments: dict) -> str:
+    return _do_private_transaction(
+        arguments,
+        _private_transaction_spec_for_tool("linkedin_job_search"),
     )
 
 
