@@ -1420,12 +1420,13 @@ TOOLS = [
         "function": {
             "name": "ui_action",
             "description": (
-                "Observe a trusted revenue display or perform exactly one mapped page-bound "
-                "activate from the immediately preceding fresh observation. The server binds "
+                "Observe a trusted revenue display, perform exactly one YAML-declared viewport "
+                "scroll, or perform exactly one mapped page-bound activate from the immediately "
+                "preceding fresh observation. The server binds "
                 "the display to its platform; the model never supplies a platform, selector, "
-                "coordinate, URL, or sequence. After activate, the public platform hook must "
-                "verify its exact postcondition and a new observe is required before any later "
-                "mutation. Dropdown opening, option observation, option selection, and result "
+                "coordinate, URL, or sequence. After either mutation, the public platform hook "
+                "must verify its exact postcondition and a new observe is required before any "
+                "later mutation. Dropdown opening, option observation, option selection, and result "
                 "verification are separate calls when those capabilities are qualified."
             ),
             "parameters": {
@@ -1439,13 +1440,13 @@ TOOLS = [
                     },
                     "action": {
                         "type": "string",
-                        "enum": ["observe", "activate"],
+                        "enum": ["observe", "scroll_into_view", "activate"],
                     },
                     "element": {
                         "type": "string",
                         "description": (
-                            "activate only: exact mapped element key returned by the "
-                            "immediately preceding fresh observe"
+                            "scroll_into_view or activate only: exact mapped element key "
+                            "returned by the immediately preceding fresh observe"
                         ),
                     },
                 },
@@ -4752,9 +4753,10 @@ def _do_ui_action(arguments: dict) -> str:
         return terminal_refusal(
             f"display {display!r} is not bound by TAEY_UI_ACTION_BINDINGS"
         )
-    if action not in {"observe", "activate"}:
+    if action not in {"observe", "scroll_into_view", "activate"}:
         return terminal_refusal(
-            f"unknown action {action!r}; revenue-ui currently permits observe or activate"
+            f"unknown action {action!r}; revenue-ui currently permits observe, "
+            "scroll_into_view, or activate"
         )
     allowed_arguments = (
         {"display", "action"}
@@ -4770,16 +4772,16 @@ def _do_ui_action(arguments: dict) -> str:
     ref = ""
     consumed_revision = ""
     expected_primitive = ""
-    if action == "activate":
+    if action in {"scroll_into_view", "activate"}:
         observed = observations.pop(display, None)
         if not isinstance(observed, dict):
             return terminal_refusal(
-                "activate requires an explicit fresh observe on this display"
+                f"{action} requires an explicit fresh observe on this display"
             )
         observed_round = observed.get("tool_round")
         if not isinstance(observed_round, int) or observed_round >= tool_round:
             return terminal_refusal(
-                "activate requires an observe result seen in an earlier model round"
+                f"{action} requires an observe result seen in an earlier model round"
             )
         if observed.get("platform") != platform:
             return terminal_refusal(
@@ -4788,7 +4790,7 @@ def _do_ui_action(arguments: dict) -> str:
         element = arguments.get("element")
         if not isinstance(element, str) or not element:
             return terminal_refusal(
-                "activate requires one mapped element from the preceding observe"
+                f"{action} requires one mapped element from the preceding observe"
             )
         refs = observed.get("canonical_refs")
         ref = refs.get(element) if isinstance(refs, dict) else None
@@ -4800,9 +4802,21 @@ def _do_ui_action(arguments: dict) -> str:
         expected_primitive = (
             primitives.get(element) if isinstance(primitives, dict) else None
         )
-        if expected_primitive not in {"activate", "mapped_pointer_activate"}:
+        if expected_primitive not in {
+            "activate",
+            "mapped_pointer_activate",
+            "scroll_into_view",
+        }:
             return terminal_refusal(
-                "preceding observe did not bind one supported YAML page primitive"
+                "preceding observe did not bind one supported YAML UI primitive"
+            )
+        if action == "scroll_into_view" and expected_primitive != "scroll_into_view":
+            return terminal_refusal(
+                "scroll_into_view requires a YAML-declared scroll_into_view primitive"
+            )
+        if action == "activate" and expected_primitive == "scroll_into_view":
+            return terminal_refusal(
+                "activate cannot substitute for the YAML-declared scroll_into_view primitive"
             )
         consumed_revision = str(observed.get("snapshot_revision") or "")
         if not re.fullmatch(r"[0-9a-f]{64}", consumed_revision):
@@ -4820,7 +4834,11 @@ def _do_ui_action(arguments: dict) -> str:
         "TAEY_DRIVE_LEASE_GENERATION": process_generation,
         "TAEY_DRIVE_GENERATION_FENCE_KEY": _DRIVE_GENERATION_FENCE_KEY,
     })
-    subcommand = "ui-observe" if action == "observe" else "ui-activate"
+    subcommand = {
+        "observe": "ui-observe",
+        "scroll_into_view": "ui-scroll-into-view",
+        "activate": "ui-activate",
+    }[action]
     command = [
         UI_DRIVE_PYTHON,
         UI_DRIVE_SCRIPT,
@@ -4828,7 +4846,7 @@ def _do_ui_action(arguments: dict) -> str:
         "--display",
         display,
     ]
-    if action == "activate":
+    if action in {"scroll_into_view", "activate"}:
         command.extend(["--ref", ref])
 
     try:
@@ -4908,12 +4926,18 @@ def _do_ui_action(arguments: dict) -> str:
             declared_method = (
                 declared.get("method") if isinstance(declared, dict) else None
             )
+            declared_effect = (
+                declared.get("effect_class") if isinstance(declared, dict) else None
+            )
             if (
                 isinstance(element, str)
                 and isinstance(item_ref, str)
                 and isinstance(declared, dict)
-                and declared.get("effect_class") == "page"
-                and declared_method in {"activate", "mapped_pointer_activate"}
+                and (declared_method, declared_effect) in {
+                    ("activate", "page"),
+                    ("mapped_pointer_activate", "page"),
+                    ("scroll_into_view", "viewport"),
+                }
                 and declared.get("primitives") == [declared_method]
                 and declared.get("allowed_now") == [declared_method]
             ):
@@ -4953,6 +4977,32 @@ def _do_ui_action(arguments: dict) -> str:
         return _json.dumps(payload)
 
     postcondition = result.get("post_action_observation")
+    if action == "scroll_into_view":
+        if (
+            result.get("performed") is not True
+            or result.get("performed_primitive") != "scroll_into_view"
+            or result.get("effect_class") != "viewport"
+            or result.get("observe_required_before_next_mutation") is not True
+            or not isinstance(postcondition, dict)
+            or postcondition.get("route_exact") is not True
+            or postcondition.get("element_key_exact") is not True
+            or postcondition.get("activity_exact") is not True
+            or postcondition.get("body_sha256_exact") is not True
+            or postcondition.get("live_extent_in_viewport") is not True
+        ):
+            return terminal_refusal(
+                "ui_action scroll_into_view returned no exact same-element "
+                "in-viewport postcondition receipt"
+            )
+        payload["ui_sequence"] = {
+            "state": "viewport_transition_complete",
+            "consumed_snapshot_revision": consumed_revision,
+            "postcondition": postcondition,
+            "observe_required_before_next_mutation": True,
+            "mutation_token_issued": False,
+        }
+        return _json.dumps(payload)
+
     if (
         result.get("performed") is not True
         or result.get("performed_primitive") != expected_primitive
