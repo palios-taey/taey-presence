@@ -5475,6 +5475,72 @@ async def chat_completions(request: Request):
         _request_context.reset(context_token)
 
 
+def _tool_arguments_or_terminal(
+    raw_arguments: object,
+    *,
+    tool: str,
+    turn: TurnContext,
+    round_num: int,
+) -> dict:
+    def reject_duplicates(pairs: list[tuple[str, object]]) -> dict:
+        value: dict[str, object] = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError("duplicate tool argument key")
+            value[key] = item
+        return value
+
+    try:
+        if isinstance(raw_arguments, dict):
+            encoded = json.dumps(
+                raw_arguments,
+                allow_nan=False,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            arguments = json.loads(encoded)
+            if arguments != raw_arguments:
+                raise ValueError("tool arguments are not JSON-shaped")
+        elif isinstance(raw_arguments, str) and raw_arguments:
+            arguments = json.loads(
+                raw_arguments,
+                object_pairs_hook=reject_duplicates,
+                parse_constant=lambda token: (_ for _ in ()).throw(
+                    ValueError(f"non-JSON constant: {token}")
+                ),
+            )
+        else:
+            raise ValueError("tool arguments are absent or not JSON")
+        if not isinstance(arguments, dict):
+            raise ValueError("tool arguments must decode to an object")
+        return arguments
+    except (json.JSONDecodeError, TypeError, ValueError):
+        profile_state = _request_context.get().get("_tool_profile_state")
+        if isinstance(profile_state, dict):
+            profile_state["terminal"] = {
+                "tool": tool,
+                "reason": "malformed tool arguments refused before execution",
+            }
+        _audit(
+            "tool_arguments_invalid",
+            {
+                "round": round_num,
+                "seat_id": turn.seat_id,
+                "tool": tool,
+                "tool_profile": turn.tool_profile,
+                "turn_id": turn.turn_id,
+            },
+        )
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "error": f"{tool}_tool_arguments_invalid",
+                "turn_id": turn.turn_id,
+            },
+        )
+
+
 async def _chat_completions_for_turn(
     body: dict,
     turn: TurnContext,
@@ -5665,14 +5731,12 @@ async def _chat_completions_for_turn(
             if one_shot_spec is not None:
                 tc = tool_calls[0]
                 func = tc.get("function", {}) or {}
-                raw_args = func.get("arguments", {})
-                if isinstance(raw_args, dict):
-                    arguments = raw_args
-                else:
-                    try:
-                        arguments = json.loads(raw_args) if raw_args else {}
-                    except json.JSONDecodeError:
-                        arguments = {}
+                arguments = _tool_arguments_or_terminal(
+                    func.get("arguments"),
+                    tool=one_shot_spec.tool,
+                    turn=turn,
+                    round_num=rounds,
+                )
                 resolved_answer = await execute_tool_call_async(
                     one_shot_spec.tool,
                     arguments,
@@ -5692,14 +5756,12 @@ async def _chat_completions_for_turn(
             body["messages"].append(message)
             for tc in tool_calls:
                 func = tc.get("function", {}) or {}
-                raw_args = func.get("arguments", {})
-                if isinstance(raw_args, dict):
-                    arguments = raw_args
-                else:
-                    try:
-                        arguments = json.loads(raw_args) if raw_args else {}
-                    except json.JSONDecodeError:
-                        arguments = {}
+                arguments = _tool_arguments_or_terminal(
+                    func.get("arguments"),
+                    tool=func.get("name", ""),
+                    turn=turn,
+                    round_num=rounds,
+                )
                 result = await execute_tool_call_async(
                     func.get("name", ""),
                     arguments,
@@ -5869,14 +5931,12 @@ async def _chat_completions_for_turn(
                 if one_shot_spec is not None:
                     tc = tool_calls[0]
                     func = tc.get("function", {}) or {}
-                    raw_args = func.get("arguments", {})
-                    if isinstance(raw_args, dict):
-                        arguments = raw_args
-                    else:
-                        try:
-                            arguments = json.loads(raw_args) if raw_args else {}
-                        except json.JSONDecodeError:
-                            arguments = {}
+                    arguments = _tool_arguments_or_terminal(
+                        func.get("arguments"),
+                        tool=one_shot_spec.tool,
+                        turn=turn,
+                        round_num=round_num,
+                    )
                     tool_result = await execute_tool_call_async(
                         one_shot_spec.tool,
                         arguments,
@@ -5915,14 +5975,12 @@ async def _chat_completions_for_turn(
                 for tc in tool_calls:
                     func = tc.get("function", {})
                     name = func.get("name", "")
-                    raw_args = func.get("arguments", {})
-                    if isinstance(raw_args, dict):
-                        arguments = raw_args
-                    else:
-                        try:
-                            arguments = json.loads(raw_args) if raw_args else {}
-                        except json.JSONDecodeError:
-                            arguments = {}
+                    arguments = _tool_arguments_or_terminal(
+                        func.get("arguments"),
+                        tool=name,
+                        turn=turn,
+                        round_num=round_num,
+                    )
 
                     tool_result = await execute_tool_call_async(
                         name,

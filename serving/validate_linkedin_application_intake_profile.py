@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import asyncio
 import ast
 import hashlib
 import json
@@ -92,6 +93,28 @@ result = {
 }
 print(json.dumps(result, ensure_ascii=True, sort_keys=True, separators=(",", ":")))
 '''
+
+
+class FakeResponse:
+    status_code = 200
+
+    def __init__(self, payload: dict):
+        self._payload = payload
+
+    def json(self) -> dict:
+        return self._payload
+
+
+class FakeHttp:
+    def __init__(self, payload: dict):
+        self.payload = payload
+        self.calls = 0
+
+    async def post(self, *_args, **_kwargs) -> FakeResponse:
+        self.calls += 1
+        if self.calls > 1:
+            raise AssertionError("one-shot profile requested a second inference round")
+        return FakeResponse(self.payload)
 
 
 def canonical_bytes(value: object) -> bytes:
@@ -245,6 +268,125 @@ def validate_result_contract(namespace: dict) -> None:
         assert validate(payload, returncode) is not None
 
 
+async def parser_case(
+    namespace: dict,
+    *,
+    stream: bool,
+    raw_arguments: object,
+) -> tuple[tuple, list[tuple[str, dict]], dict]:
+    profile = namespace["_LINKEDIN_APPLICATION_INTAKE_TOOL_PROFILE"]
+    tool = "linkedin_application_intake"
+    payload = {
+        "choices": [{
+            "finish_reason": "tool_calls",
+            "message": {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{
+                    "id": "call-intake",
+                    "type": "function",
+                    "function": {"name": tool, "arguments": raw_arguments},
+                }],
+            },
+        }],
+        "usage": {"completion_tokens": 1, "prompt_tokens": 1},
+    }
+    namespace["_http"] = FakeHttp(payload)
+    namespace["publish_metrics"] = lambda *_args, **_kwargs: None
+    calls: list[tuple[str, dict]] = []
+
+    async def fake_execute(name: str, arguments: dict, **_kwargs) -> str:
+        calls.append((name, arguments))
+        return json.dumps({"ok": True, "state": "validator_terminal"})
+
+    namespace["execute_tool_call_async"] = fake_execute
+    namespace["_one_shot_system_prompts"] = {
+        profile: PROMPT_PATH.read_text(encoding="utf-8")
+    }
+    turn = namespace["TurnContext"](
+        turn_id="intake-parser-turn",
+        seat_id="intake-parser-seat",
+        event_id="intake-parser-event",
+        correlation_id="intake-parser-correlation",
+        tool_profile=profile,
+        proxy_namespace="intake-parser-proxy",
+        process_generation="1" * 32,
+        started_at=0.0,
+    )
+    request_context = context(profile, "intake-parser-seat", "intake-parser-correlation")
+    request_context["turn_id"] = turn.turn_id
+    request_context["event_id"] = turn.event_id
+    token = namespace["_request_context"].set(request_context)
+    try:
+        try:
+            response = await namespace["_chat_completions_for_turn"](
+                {
+                    "stream": stream,
+                    "messages": [{"role": "user", "content": "Run once."}],
+                },
+                turn,
+                False,
+            )
+        except namespace["HTTPException"] as exc:
+            outcome = ("error", exc.status_code, exc.detail)
+        else:
+            if stream:
+                chunks = []
+                async for chunk in response.body_iterator:
+                    chunks.append(chunk.decode() if isinstance(chunk, bytes) else chunk)
+                outcome = ("stream", "".join(chunks))
+            else:
+                outcome = (
+                    "nonstream",
+                    response.status_code,
+                    response.body.decode("utf-8"),
+                )
+    finally:
+        namespace["_request_context"].reset(token)
+    return outcome, calls, request_context["_tool_profile_state"]
+
+
+def validate_parser_boundary(namespace: dict, private_root: Path) -> None:
+    claim_root = private_root / "claims" / "intake-validator-seat"
+    claims_before = set(claim_root.iterdir())
+    for stream in (True, False):
+        valid_outcome, valid_calls, valid_state = asyncio.run(parser_case(
+            namespace,
+            stream=stream,
+            raw_arguments="{}",
+        ))
+        assert valid_outcome[0] == ("stream" if stream else "nonstream")
+        assert valid_calls == [("linkedin_application_intake", {})]
+        assert valid_state["terminal"] is None
+        for raw_arguments in (
+            "{",
+            "",
+            "[]",
+            '{"duplicate":1,"duplicate":2}',
+            '{"not_finite":NaN}',
+            None,
+        ):
+            outcome, calls, state = asyncio.run(parser_case(
+                namespace,
+                stream=stream,
+                raw_arguments=raw_arguments,
+            ))
+            assert outcome == (
+                "error",
+                502,
+                {
+                    "error": "linkedin_application_intake_tool_arguments_invalid",
+                    "turn_id": "intake-parser-turn",
+                },
+            )
+            assert calls == []
+            assert state["terminal"] == {
+                "tool": "linkedin_application_intake",
+                "reason": "malformed tool arguments refused before execution",
+            }
+    assert set(claim_root.iterdir()) == claims_before
+
+
 def validate_one_shot(namespace: dict, private_root: Path, database: Path) -> None:
     profile = namespace["_LINKEDIN_APPLICATION_INTAKE_TOOL_PROFILE"]
     seat = "intake-validator-seat"
@@ -373,6 +515,7 @@ def main() -> int:
         namespace = load_proxy(environment)
         validate_static_boundary(namespace)
         validate_result_contract(namespace)
+        validate_parser_boundary(namespace, private_root)
         prior_marker = os.environ.get("TAEY_APPLY_VALIDATOR_MARKER")
         os.environ["TAEY_APPLY_VALIDATOR_MARKER"] = str(marker)
         try:
@@ -389,6 +532,7 @@ def main() -> int:
         "profile": "linkedin-application-intake",
         "receipt_mode": "0400",
         "result_keys": sorted(RESULT_KEYS),
+        "strict_argument_cases": 12,
         "status": "PASS",
         "tool_arguments": {},
     }, sort_keys=True, separators=(",", ":")))
