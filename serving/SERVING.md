@@ -419,6 +419,10 @@ For other model families, set the parsers your model expects.
 | `TAEY_LINKEDIN_JOBS_PRIVATE_ROOT` | *(empty → `linkedin_jobs` refused)* | owner-controlled nonsymlink `0700` root for the manifest, permanent claim, receipt, and raw sink |
 | `TAEY_LINKEDIN_JOBS_DISPLAYS` | *(empty → `linkedin_jobs` refused)* | comma-separated runtime-authorized LinkedIn displays; `:0` is always refused |
 | `TAEY_LINKEDIN_JOBS_TIMEOUT_SECS` | `1800` | outer watchdog; the Hands-owned deadline is exactly 100 seconds earlier and must finish receipt/lock cleanup first |
+| `TAEY_LINKEDIN_JOBS_RESTORE_PYTHON` | *(empty → `restore_linkedin_jobs_surface` refused)* | explicit Python interpreter with the public Hands restore runner and AT-SPI dependencies |
+| `TAEY_LINKEDIN_JOBS_RESTORE_PRIVATE_ROOT` | *(empty → `restore_linkedin_jobs_surface` refused)* | separate owner-controlled nonsymlink `0700` root for the frozen target, permanent claim, and receipt |
+| `TAEY_LINKEDIN_JOBS_RESTORE_DISPLAYS` | *(empty → `restore_linkedin_jobs_surface` refused)* | comma-separated runtime-authorized LinkedIn displays; `:0` is always refused |
+| `TAEY_LINKEDIN_JOBS_RESTORE_TIMEOUT_SECS` | `1800` | outer watchdog; the Hands-owned deadline is exactly 100 seconds earlier and must finish receipt/lock cleanup first |
 | `TAEY_LINKEDIN_JOB_SEARCH_PYTHON` | *(empty → `linkedin_job_search` refused)* | explicit Python interpreter with the public Hands mounted-search runner and AT-SPI dependencies |
 | `TAEY_LINKEDIN_JOB_SEARCH_PRIVATE_ROOT` | *(empty → `linkedin_job_search` refused)* | separate owner-controlled nonsymlink `0700` root for the search transaction, permanent claim, receipt, and raw sink |
 | `TAEY_LINKEDIN_JOB_SEARCH_DISPLAYS` | *(empty → `linkedin_job_search` refused)* | comma-separated runtime-authorized LinkedIn search displays; `:0` is always refused |
@@ -491,6 +495,40 @@ curl --fail-with-body --silent --show-error \
 Change only the served model ID, runtime-authorized display, seat, event, and
 correlation identities. Never reuse an identity whose receipt path already
 exists, and never retry a terminal identity.
+
+The `linkedin-jobs-restore` profile exposes only
+`restore_linkedin_jobs_surface`, with the runtime-authorized display as its sole
+argument. The immutable private transaction contains exactly `schema`,
+`operation`, and `return_url`; its public values are
+`linkedin_jobs_restore_private_input_v1` and
+`restore_linkedin_jobs_surface`. The exact HTTPS LinkedIn Jobs search-results
+URL remains outside model context. Presence invokes
+`scripts/run_linkedin_jobs_restore.py` once through the unchanged generic
+private-transaction executor. Hands owns the CAREERS lock, exact routed Firefox
+focus, one address-entry navigation, two stable exact-route observations,
+receipt creation, and lock cleanup. A failure spends the identity and never
+authorizes another tool call.
+
+Create the canonical private transaction at
+`PRIVATE_ROOT/transactions/taey-revenue-1/linkedin-restore-001.json`, mode
+`0400`, plus owner-controlled `0700` receipt and claim parents for the same
+seat. Then invoke the profile once:
+
+```bash
+curl --fail-with-body --silent --show-error \
+  -H 'Content-Type: application/json' \
+  -H 'X-Taey-Seat-Id: taey-revenue-1' \
+  -H 'X-Taey-Event-Id: linkedin-restore-001' \
+  -H 'X-Taey-Correlation-Id: linkedin-restore-001' \
+  -H 'X-Taey-Tool-Profile: linkedin-jobs-restore' \
+  --data-binary '{"model":"SERVED_MODEL_ID","stream":false,"messages":[{"role":"user","content":"Restore the frozen LinkedIn Jobs surface on display :18."}]}' \
+  http://127.0.0.1:8765/v1/chat/completions
+```
+
+Run `python3 serving/validate_linkedin_jobs_restore_profile.py` before review.
+That validator uses generated private state and a fake runner; it performs no
+UI work. A real restored receipt remains required before any production
+qualification claim.
 
 The `linkedin-job-search` profile uses the same permanent-claim boundary but
 exposes only `linkedin_job_search`. Its immutable private manifest contains
