@@ -33,7 +33,8 @@ model roots, and SHAs must not be repeated as current facts without a fresh prod
 - `serving/TAEY_CHAT_UI_SYSTEM.md`, `serving/TAEY_CONSULT_CHAT_SYSTEM.md`,
   `serving/TAEY_LINKEDIN_JOBS_SYSTEM.md`,
   `serving/TAEY_LINKEDIN_JOB_SEARCH_SYSTEM.md`, and
-  `serving/TAEY_LINKEDIN_ENGAGERS_SYSTEM.md` are constrained tool-profile runtime prompts.
+  `serving/TAEY_LINKEDIN_ENGAGERS_SYSTEM.md`, and
+  `serving/TAEY_LINKEDIN_APPLICATION_INTAKE_SYSTEM.md` are constrained tool-profile runtime prompts.
 - `serving/council_prompts/` contains supporting-seat role prompts. They are runtime inputs, not status reports.
 - `serving/persona.example.md` is an example and never proves the deployed persona.
 

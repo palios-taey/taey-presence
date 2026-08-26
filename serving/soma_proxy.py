@@ -100,6 +100,10 @@ LINKEDIN_ENGAGERS_SYSTEM_PROMPT_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
     "TAEY_LINKEDIN_ENGAGERS_SYSTEM.md",
 )
+LINKEDIN_APPLICATION_INTAKE_SYSTEM_PROMPT_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "TAEY_LINKEDIN_APPLICATION_INTAKE_SYSTEM.md",
+)
 # Optional second always-on prefix (e.g. a constitution/kernel). Empty = none.
 # Set PERMANENT_KERNEL_PATH to a file to prepend it ahead of the persona.
 PERMANENT_KERNEL_PATH = os.environ.get("PERMANENT_KERNEL_PATH", "")
@@ -196,6 +200,10 @@ class PrivateTransactionToolSpec:
     terminal_reason: str
     expected_result_keys: frozenset[str]
     validate_result: Callable[[dict, int], str | None]
+    public_root: str = ""
+    public_root_env_name: str = ""
+    database_path: str = ""
+    database_env_name: str = ""
 
 
 PROCESS_GENERATION = uuid.uuid4().hex
@@ -216,6 +224,7 @@ _CONSULT_CHAT_TOOL_PROFILE = "consult-chat"
 _LINKEDIN_JOBS_TOOL_PROFILE = "linkedin-jobs"
 _LINKEDIN_JOB_SEARCH_TOOL_PROFILE = "linkedin-job-search"
 _LINKEDIN_ENGAGERS_TOOL_PROFILE = "linkedin-engagers"
+_LINKEDIN_APPLICATION_INTAKE_TOOL_PROFILE = "linkedin-application-intake"
 _TOOL_PROFILE_ALLOWED: dict[str, frozenset[str] | None] = {
     _FULL_TOOL_PROFILE: None,
     _MANUAL_CHAT_UI_TOOL_PROFILE: frozenset({
@@ -232,6 +241,9 @@ _TOOL_PROFILE_ALLOWED: dict[str, frozenset[str] | None] = {
     }),
     _LINKEDIN_ENGAGERS_TOOL_PROFILE: frozenset({
         "linkedin_engagers",
+    }),
+    _LINKEDIN_APPLICATION_INTAKE_TOOL_PROFILE: frozenset({
+        "linkedin_application_intake",
     }),
 }
 
@@ -1465,6 +1477,25 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "linkedin_application_intake",
+            "description": (
+                "Ingest one parent-frozen, receipt-bound LinkedIn capture pair "
+                "into the private unclassified application intake through the "
+                "public taey-apply connector. Private paths, job data, display, "
+                "and policy remain outside model context. Available only in the "
+                "linkedin-application-intake tool profile; never retry a spent "
+                "transaction identity."
+            ),
+            "parameters": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {},
+            },
+        },
+    },
 ]
 
 
@@ -1726,6 +1757,9 @@ def execute_tool_call(name: str, arguments: dict) -> str:
 
     elif name == "linkedin_engagers":
         return _do_linkedin_engagers(arguments)
+
+    elif name == "linkedin_application_intake":
+        return _do_linkedin_application_intake(arguments)
 
     return f"Unknown tool: {name}"
 
@@ -2107,6 +2141,24 @@ LINKEDIN_ENGAGERS_DISPLAYS = tuple(
     for display in _env_linkedin_engagers_displays.split(",")
     if display.strip() and display.strip() != ":0"
 )
+LINKEDIN_APPLICATION_INTAKE_PYTHON = os.environ.get(
+    "TAEY_APPLY_PYTHON", ""
+).strip()
+LINKEDIN_APPLICATION_INTAKE_PUBLIC_ROOT = os.environ.get(
+    "TAEY_APPLY_PUBLIC_ROOT", ""
+).strip()
+LINKEDIN_APPLICATION_INTAKE_PRIVATE_ROOT = os.environ.get(
+    "TAEY_APPLY_PRIVATE_ROOT", ""
+).strip()
+LINKEDIN_APPLICATION_INTAKE_DATABASE = os.environ.get(
+    "TAEY_APPLY_DB", ""
+).strip()
+try:
+    LINKEDIN_APPLICATION_INTAKE_TIMEOUT_SECS = int(
+        os.environ.get("TAEY_APPLY_TIMEOUT_SECS", "")
+    )
+except ValueError:
+    LINKEDIN_APPLICATION_INTAKE_TIMEOUT_SECS = 0
 _DEFAULT_CHAT_DISPLAYS = (":2", ":3", ":4", ":5", ":6", ":21", ":22", ":23", ":24")
 _env_chat_disp = os.environ.get("TAEY_CHAT_DISPLAYS", "").strip()
 # :0 is Jesse's physical monitor and can never be a target, even via env override.
@@ -2557,6 +2609,40 @@ def _linkedin_engagers_result_error(payload: dict, returncode: int) -> str | Non
     return None
 
 
+def _linkedin_application_intake_result_error(
+    payload: dict,
+    returncode: int,
+) -> str | None:
+    if returncode != 0:
+        return "connector result and process status disagree"
+    if (
+        payload.get("schema") != "taey_apply_linkedin_intake_result_v1"
+        or payload.get("ok") is not True
+        or payload.get("failure_code") is not None
+        or payload.get("state") not in {"captured_unclassified", "already_present"}
+    ):
+        return "connector returned an invalid terminal state"
+    if payload.get("records_observed") != 1 or isinstance(
+        payload.get("records_observed"), bool
+    ):
+        return "connector returned invalid records_observed"
+    expected_written = 1 if payload["state"] == "captured_unclassified" else 0
+    if (
+        payload.get("records_written") != expected_written
+        or isinstance(payload.get("records_written"), bool)
+    ):
+        return "connector returned counts inconsistent with its state"
+    for key in (
+        "job_identity_sha256",
+        "row_digest",
+        "receipt_sha256",
+        "turn_lineage_sha256",
+    ):
+        if not re.fullmatch(r"[0-9a-f]{64}", str(payload.get(key) or "")):
+            return f"connector returned invalid {key}"
+    return None
+
+
 _LINKEDIN_JOBS_RESULT_KEYS = frozenset({
     "ok",
     "platform",
@@ -2585,6 +2671,18 @@ _LINKEDIN_JOB_SEARCH_RESULT_KEYS = frozenset({
 _LINKEDIN_ENGAGERS_RESULT_KEYS = frozenset({
     *_LINKEDIN_JOBS_RESULT_KEYS,
     "restore_verified",
+})
+_LINKEDIN_APPLICATION_INTAKE_RESULT_KEYS = frozenset({
+    "schema",
+    "ok",
+    "state",
+    "failure_code",
+    "records_observed",
+    "records_written",
+    "job_identity_sha256",
+    "row_digest",
+    "receipt_sha256",
+    "turn_lineage_sha256",
 })
 _PRIVATE_TRANSACTION_TOOL_SPECS = (
     PrivateTransactionToolSpec(
@@ -2646,6 +2744,32 @@ _PRIVATE_TRANSACTION_TOOL_SPECS = (
         terminal_reason="the one frozen LinkedIn Engagers invocation has been spent",
         expected_result_keys=_LINKEDIN_ENGAGERS_RESULT_KEYS,
         validate_result=_linkedin_engagers_result_error,
+    ),
+    PrivateTransactionToolSpec(
+        profile=_LINKEDIN_APPLICATION_INTAKE_TOOL_PROFILE,
+        tool="linkedin_application_intake",
+        prompt_label="LinkedIn Application Intake",
+        system_prompt_path=LINKEDIN_APPLICATION_INTAKE_SYSTEM_PROMPT_PATH,
+        runner_name="taey_apply.cli",
+        python_path=LINKEDIN_APPLICATION_INTAKE_PYTHON,
+        python_env_name="TAEY_APPLY_PYTHON",
+        private_root=LINKEDIN_APPLICATION_INTAKE_PRIVATE_ROOT,
+        private_root_env_name="TAEY_APPLY_PRIVATE_ROOT",
+        displays=(),
+        displays_env_name="",
+        timeout_secs=LINKEDIN_APPLICATION_INTAKE_TIMEOUT_SECS,
+        timeout_env_name="TAEY_APPLY_TIMEOUT_SECS",
+        deadline_secs=0,
+        claim_schema="taey_apply_linkedin_intake_claim_v1",
+        terminal_reason=(
+            "the one frozen LinkedIn Application Intake invocation has been spent"
+        ),
+        expected_result_keys=_LINKEDIN_APPLICATION_INTAKE_RESULT_KEYS,
+        validate_result=_linkedin_application_intake_result_error,
+        public_root=LINKEDIN_APPLICATION_INTAKE_PUBLIC_ROOT,
+        public_root_env_name="TAEY_APPLY_PUBLIC_ROOT",
+        database_path=LINKEDIN_APPLICATION_INTAKE_DATABASE,
+        database_env_name="TAEY_APPLY_DB",
     ),
 )
 
@@ -3194,6 +3318,443 @@ def _do_linkedin_engagers(arguments: dict) -> str:
     return _do_private_transaction(
         arguments,
         _private_transaction_spec_for_tool("linkedin_engagers"),
+    )
+
+
+def _do_linkedin_application_intake(arguments: dict) -> str:
+    import subprocess
+    import json as _json
+
+    spec = _private_transaction_spec_for_tool("linkedin_application_intake")
+
+    def refuse(reason: str) -> str:
+        return _json.dumps(
+            {"ok": False, "error": f"{spec.tool} {reason}"},
+            separators=(",", ":"),
+        )
+
+    context = dict(_request_context.get())
+    if context.get("tool_profile") != spec.profile:
+        return refuse(f"is available only in the {spec.profile} tool profile")
+    profile_state = context.get("_tool_profile_state")
+    if isinstance(profile_state, dict):
+        profile_state["terminal"] = {
+            "tool": spec.tool,
+            "reason": spec.terminal_reason,
+        }
+    if not isinstance(arguments, dict) or arguments:
+        return refuse("requires exactly one empty JSON object")
+
+    seat_id = str(context.get("seat_id") or "")
+    turn_id = str(context.get("turn_id") or "")
+    event_id = str(context.get("event_id") or "")
+    correlation_id = str(context.get("correlation_id") or "")
+    process_generation = str(context.get("process_generation") or "")
+    connector_id_pattern = r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}"
+    if (
+        not re.fullmatch(connector_id_pattern, seat_id)
+        or not re.fullmatch(connector_id_pattern, turn_id)
+        or not _TRACE_ID_RE.fullmatch(event_id)
+        or not re.fullmatch(connector_id_pattern, correlation_id)
+        or not re.fullmatch(r"[0-9a-f]{32}", process_generation)
+    ):
+        return refuse("requires a connector-compatible active Taey turn context")
+    if not 1 <= spec.timeout_secs <= 600:
+        return refuse(f"requires {spec.timeout_env_name}=1-600")
+    if not spec.python_path:
+        return refuse(f"requires explicit {spec.python_env_name}")
+    connector_python = Path(spec.python_path)
+    if (
+        not connector_python.is_absolute()
+        or not connector_python.is_file()
+        or not os.access(connector_python, os.X_OK)
+    ):
+        return refuse(f"requires {spec.python_env_name} to be an executable absolute path")
+
+    if not spec.public_root:
+        return refuse(f"requires explicit {spec.public_root_env_name}")
+    public_root = Path(spec.public_root)
+    try:
+        resolved_public_root = public_root.resolve(strict=True)
+        public_metadata = os.lstat(public_root)
+        source_root = (resolved_public_root / "src").resolve(strict=True)
+        module_path = (source_root / "taey_apply" / "cli.py").resolve(strict=True)
+        module_metadata = os.lstat(source_root / "taey_apply" / "cli.py")
+    except OSError:
+        return refuse(f"requires an available public {spec.public_root_env_name}")
+    if (
+        not public_root.is_absolute()
+        or public_root != resolved_public_root
+        or not stat.S_ISDIR(public_metadata.st_mode)
+        or resolved_public_root not in source_root.parents
+        or source_root not in module_path.parents
+        or not stat.S_ISREG(module_metadata.st_mode)
+    ):
+        return refuse(f"requires a canonical public {spec.public_root_env_name} checkout")
+
+    if not spec.private_root:
+        return refuse(f"requires explicit {spec.private_root_env_name}")
+    private_root = Path(spec.private_root)
+    try:
+        resolved_private_root = private_root.resolve(strict=True)
+        private_metadata = os.lstat(private_root)
+    except OSError:
+        return refuse(f"requires an available {spec.private_root_env_name}")
+    if (
+        not private_root.is_absolute()
+        or private_root != resolved_private_root
+        or not stat.S_ISDIR(private_metadata.st_mode)
+        or stat.S_IMODE(private_metadata.st_mode) != 0o700
+        or private_metadata.st_uid != os.geteuid()
+    ):
+        return refuse(
+            f"requires {spec.private_root_env_name} to be an owner-controlled "
+            "nonsymlink 0700 directory"
+        )
+
+    if not spec.database_path:
+        return refuse(f"requires explicit {spec.database_env_name}")
+    database_path = Path(spec.database_path)
+    try:
+        resolved_database_path = database_path.resolve(strict=True)
+        database_metadata = os.lstat(database_path)
+    except OSError:
+        return refuse(f"requires an available {spec.database_env_name}")
+    if (
+        not database_path.is_absolute()
+        or database_path != resolved_database_path
+        or not stat.S_ISREG(database_metadata.st_mode)
+        or stat.S_IMODE(database_metadata.st_mode) != 0o600
+        or database_metadata.st_uid != os.geteuid()
+    ):
+        return refuse(
+            f"requires {spec.database_env_name} to be an owner-controlled "
+            "nonsymlink 0600 regular file"
+        )
+
+    lineage_payload = {
+        "correlation_id": correlation_id,
+        "process_generation": process_generation,
+        "requester": seat_id,
+        "turn_id": turn_id,
+    }
+    expected_turn_lineage = hashlib.sha256(
+        _json.dumps(
+            lineage_payload,
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+    transaction_path = (
+        resolved_private_root / "transactions" / seat_id / f"{correlation_id}.json"
+    )
+    claim_path = (
+        resolved_private_root / "claims" / seat_id / f"{correlation_id}.json"
+    )
+    receipt_path = (
+        resolved_private_root / "receipts" / seat_id / f"{correlation_id}.json"
+    )
+    for label, candidate in {
+        "transaction": transaction_path,
+        "claim": claim_path,
+        "receipt": receipt_path,
+    }.items():
+        try:
+            resolved_parent = candidate.parent.resolve(strict=True)
+            parent_metadata = os.lstat(candidate.parent)
+        except OSError:
+            return refuse(f"{label} parent is unavailable")
+        if (
+            resolved_private_root not in resolved_parent.parents
+            or not stat.S_ISDIR(parent_metadata.st_mode)
+            or stat.S_IMODE(parent_metadata.st_mode) != 0o700
+            or parent_metadata.st_uid != os.geteuid()
+        ):
+            return refuse(f"{label} parent is not an owner-controlled 0700 directory")
+    if receipt_path.exists():
+        return refuse("terminal receipt already exists; transaction identity is spent")
+
+    transaction_descriptor = None
+    transaction_raw = b""
+    transaction_valid = True
+    try:
+        transaction_descriptor = os.open(
+            transaction_path,
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+        )
+        transaction_metadata = os.fstat(transaction_descriptor)
+        if (
+            not stat.S_ISREG(transaction_metadata.st_mode)
+            or stat.S_IMODE(transaction_metadata.st_mode) != 0o400
+            or transaction_metadata.st_uid != os.geteuid()
+            or transaction_metadata.st_size > 16 * 1024 * 1024
+        ):
+            raise OSError("unsafe private transaction")
+        remaining = transaction_metadata.st_size
+        chunks: list[bytes] = []
+        while remaining:
+            chunk = os.read(transaction_descriptor, min(remaining, 1024 * 1024))
+            if not chunk:
+                raise OSError("private transaction changed while read")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        if os.read(transaction_descriptor, 1):
+            raise OSError("private transaction changed while read")
+        transaction_raw = b"".join(chunks)
+    except OSError:
+        transaction_valid = False
+    finally:
+        if transaction_descriptor is not None:
+            try:
+                os.close(transaction_descriptor)
+            except OSError:
+                transaction_valid = False
+    if not transaction_valid:
+        return refuse("transaction failed immutable private-file validation")
+
+    def reject_duplicates(pairs: list[tuple[str, object]]) -> dict:
+        value: dict[str, object] = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError("duplicate transaction key")
+            value[key] = item
+        return value
+
+    try:
+        transaction = _json.loads(
+            transaction_raw.decode("utf-8"),
+            object_pairs_hook=reject_duplicates,
+            parse_constant=lambda token: (_ for _ in ()).throw(
+                ValueError(f"non-JSON constant: {token}")
+            ),
+        )
+        canonical_transaction = _json.dumps(
+            transaction,
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    except (UnicodeDecodeError, ValueError, TypeError):
+        return refuse("transaction is not strict canonical UTF-8 JSON")
+    expected_transaction_keys = {
+        "schema",
+        "operation",
+        "search_receipt_ref",
+        "search_artifact_ref",
+        "selected_receipt_ref",
+        "selected_artifact_ref",
+        "card_digest",
+    }
+    if (
+        not isinstance(transaction, dict)
+        or set(transaction) != expected_transaction_keys
+        or transaction.get("schema") != "taey_apply_linkedin_intake_private_input_v1"
+        or transaction.get("operation") != "ingest_linkedin_captured_job"
+        or not re.fullmatch(r"[0-9a-f]{64}", str(transaction.get("card_digest") or ""))
+        or any(
+            not isinstance(transaction.get(key), str) or not transaction[key]
+            for key in (
+                "search_receipt_ref",
+                "search_artifact_ref",
+                "selected_receipt_ref",
+                "selected_artifact_ref",
+            )
+        )
+        or canonical_transaction != transaction_raw
+    ):
+        return refuse("transaction does not match the canonical intake contract")
+    expected_transaction_sha256 = hashlib.sha256(transaction_raw).hexdigest()
+
+    claim = {
+        "correlation_id_sha256": hashlib.sha256(
+            correlation_id.encode("utf-8")
+        ).hexdigest(),
+        "event_id_sha256": hashlib.sha256(event_id.encode("utf-8")).hexdigest(),
+        "schema": spec.claim_schema,
+        "seat_id": seat_id,
+        "transaction_sha256": expected_transaction_sha256,
+        "turn_lineage_sha256": expected_turn_lineage,
+    }
+    claim_bytes = _json.dumps(
+        claim,
+        allow_nan=False,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    claim_descriptor = None
+    claim_status = "not_created"
+    try:
+        claim_descriptor = os.open(
+            claim_path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+            0o600,
+        )
+        claim_status = "created"
+        offset = 0
+        while offset < len(claim_bytes):
+            written = os.write(claim_descriptor, claim_bytes[offset:])
+            if written <= 0:
+                raise OSError("claim write did not advance")
+            offset += written
+        os.fchmod(claim_descriptor, 0o400)
+        os.fsync(claim_descriptor)
+    except FileExistsError:
+        claim_status = "already_claimed"
+    except OSError:
+        if claim_status == "created":
+            claim_status = "indeterminate"
+    finally:
+        if claim_descriptor is not None:
+            try:
+                os.close(claim_descriptor)
+            except OSError:
+                claim_status = "indeterminate"
+    if claim_status == "created":
+        parent_descriptor = None
+        try:
+            parent_descriptor = os.open(
+                claim_path.parent,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+            )
+            os.fsync(parent_descriptor)
+        except OSError:
+            claim_status = "indeterminate"
+        finally:
+            if parent_descriptor is not None:
+                try:
+                    os.close(parent_descriptor)
+                except OSError:
+                    claim_status = "indeterminate"
+    if claim_status == "already_claimed":
+        return refuse("transaction identity was already claimed")
+    if claim_status != "created":
+        return refuse("claim finalization is indeterminate; identity is spent")
+
+    command = [
+        str(connector_python),
+        "-m",
+        spec.runner_name,
+        "--private-root",
+        str(resolved_private_root),
+        "--database",
+        str(resolved_database_path),
+        "--transaction-file",
+        str(transaction_path),
+        "--expected-transaction-sha256",
+        expected_transaction_sha256,
+        "--receipt-file",
+        str(receipt_path),
+        "--requester",
+        seat_id,
+        "--turn-id",
+        turn_id,
+        "--correlation-id",
+        correlation_id,
+        "--process-generation",
+        process_generation,
+    ]
+    connector_environment = dict(os.environ)
+    connector_environment["PYTHONPATH"] = str(source_root)
+    try:
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=spec.timeout_secs,
+            env=connector_environment,
+            cwd=str(resolved_public_root),
+        )
+    except subprocess.TimeoutExpired:
+        _audit(spec.tool, {"rc": "timeout"})
+        return refuse("exceeded its outer timeout; identity is spent and must not retry")
+    except Exception as exc:
+        _audit(spec.tool, {"rc": "launch_error", "type": type(exc).__name__})
+        return refuse("connector could not be launched; raw process output was withheld")
+
+    _audit(spec.tool, {"rc": completed.returncode})
+    output = (completed.stdout or "").strip()
+    try:
+        payload = (
+            _json.loads(
+                output,
+                object_pairs_hook=reject_duplicates,
+                parse_constant=lambda token: (_ for _ in ()).throw(
+                    ValueError(f"non-JSON constant: {token}")
+                ),
+            )
+            if output
+            else None
+        )
+        canonical_output = (
+            _json.dumps(
+                payload,
+                allow_nan=False,
+                ensure_ascii=True,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            if isinstance(payload, dict)
+            else None
+        )
+    except (_json.JSONDecodeError, ValueError, TypeError):
+        payload = None
+        canonical_output = None
+    if (
+        not isinstance(payload, dict)
+        or frozenset(payload) != spec.expected_result_keys
+        or canonical_output != output
+    ):
+        return refuse("connector returned a non-contract result; raw output was withheld")
+    result_error = spec.validate_result(payload, completed.returncode)
+    if result_error is not None:
+        return refuse(result_error)
+    if payload.get("turn_lineage_sha256") != expected_turn_lineage:
+        return refuse("connector result lineage does not match the active turn")
+
+    receipt_descriptor = None
+    receipt_digest = hashlib.sha256()
+    receipt_valid = True
+    try:
+        receipt_descriptor = os.open(
+            receipt_path,
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+        )
+        receipt_metadata = os.fstat(receipt_descriptor)
+        if (
+            not stat.S_ISREG(receipt_metadata.st_mode)
+            or stat.S_IMODE(receipt_metadata.st_mode) != 0o400
+            or receipt_metadata.st_uid != os.geteuid()
+        ):
+            raise OSError("unsafe connector receipt")
+        remaining = receipt_metadata.st_size
+        while remaining:
+            chunk = os.read(receipt_descriptor, min(remaining, 1024 * 1024))
+            if not chunk:
+                raise OSError("connector receipt changed while read")
+            receipt_digest.update(chunk)
+            remaining -= len(chunk)
+        if os.read(receipt_descriptor, 1):
+            raise OSError("connector receipt changed while read")
+    except OSError:
+        receipt_valid = False
+    finally:
+        if receipt_descriptor is not None:
+            try:
+                os.close(receipt_descriptor)
+            except OSError:
+                receipt_valid = False
+    if not receipt_valid or receipt_digest.hexdigest() != payload["receipt_sha256"]:
+        return refuse("connector terminal receipt is absent, unsafe, or digest-mismatched")
+    return _json.dumps(
+        payload,
+        allow_nan=False,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
     )
 
 
