@@ -5136,6 +5136,7 @@ def _do_drive_chat(arguments: dict) -> str:
 
     expected_revision = ""
     expected_scope = ""
+    expected_key_precondition = ""
     native_dialog_revision = ""
     observed = None
     if action in _DRIVE_MUTATIONS:
@@ -5316,6 +5317,26 @@ def _do_drive_chat(arguments: dict) -> str:
                 "--expected-scope",
                 expected_scope,
             ]
+            key_preconditions = (
+                observed.get("key_preconditions")
+                if isinstance(observed, dict)
+                else None
+            )
+            if isinstance(key_preconditions, dict):
+                token = key_preconditions.get(str(key))
+                if token is not None:
+                    if not isinstance(token, str) or not re.fullmatch(
+                        r"[0-9a-f]{64}", token
+                    ):
+                        return _terminal_refusal(
+                            "preceding observe carried an invalid semantic "
+                            "key-precondition token"
+                        )
+                    expected_key_precondition = token
+                    cmd += [
+                        "--expected-key-precondition",
+                        expected_key_precondition,
+                    ]
     elif action == "navigate":
         url = arguments.get("url")
         if not isinstance(url, str) or not url:
@@ -5387,10 +5408,23 @@ def _do_drive_chat(arguments: dict) -> str:
                             result["completion_monitor"] = monitor_receipt
                         canonical_refs = {}
                         mapped = result.get("mapped")
+                        key_preconditions = result.get("key_preconditions") or {}
                         if observed_surface == "browser":
                             if not isinstance(mapped, list):
                                 return _terminal_refusal(
                                     "browser observe returned no canonical mapped element list"
+                                )
+                            if not isinstance(key_preconditions, dict) or any(
+                                not isinstance(key, str)
+                                or not key
+                                or key != key.strip()
+                                or not isinstance(token, str)
+                                or not re.fullmatch(r"[0-9a-f]{64}", token)
+                                for key, token in key_preconditions.items()
+                            ):
+                                return _terminal_refusal(
+                                    "browser observe returned an invalid semantic "
+                                    "key-precondition mapping"
                                 )
                             refs_by_element = {}
                             for item in mapped:
@@ -5412,6 +5446,7 @@ def _do_drive_chat(arguments: dict) -> str:
                             "snapshot_scope": str(result.get("scope") or ""),
                             "tool_round": tool_round,
                             "canonical_refs": canonical_refs,
+                            "key_preconditions": dict(key_preconditions),
                         }
                         payload["ui_sequence"] = {
                             "state": "observed",
@@ -5445,6 +5480,10 @@ def _do_drive_chat(arguments: dict) -> str:
                     if expected_revision:
                         payload["ui_sequence"]["consumed_snapshot_scope"] = expected_scope
                         payload["ui_sequence"]["consumed_snapshot_revision"] = expected_revision
+                    if expected_key_precondition:
+                        payload["ui_sequence"][
+                            "consumed_key_precondition_sha256"
+                        ] = expected_key_precondition
                     if native_dialog_revision:
                         payload["ui_sequence"]["consumed_snapshot_scope"] = "native_dialog"
                         payload["ui_sequence"]["consumed_snapshot_revision"] = native_dialog_revision

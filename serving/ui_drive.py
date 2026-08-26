@@ -518,14 +518,61 @@ def _snapshot_for_key_or_type(
     native_dialog_revision = str(
         getattr(args, "native_dialog_revision", "") or ""
     )
+    expected_key_precondition = str(
+        getattr(args, "expected_key_precondition", "") or ""
+    )
     if native_dialog_revision:
         if getattr(args, "expected_revision", None):
             raise UiDriveError(
                 "native-dialog mutation must not also provide a browser snapshot revision"
             )
+        if expected_key_precondition:
+            raise UiDriveError(
+                "native-dialog mutation must not carry a browser key precondition"
+            )
         snapshot = build_native_dialog_snapshot(deps.platform)
         snapshot.assert_revision(native_dialog_revision)
         return None
+    if expected_key_precondition:
+        expected_revision = str(getattr(args, "expected_revision", "") or "")
+        if not re.fullmatch(r"[0-9a-f]{64}", expected_revision):
+            raise UiDriveError(
+                "semantic key mutation requires --expected-revision from the "
+                "preceding explicit observe"
+            )
+        if not re.fullmatch(r"[0-9a-f]{64}", expected_key_precondition):
+            raise UiDriveError(
+                "semantic key mutation requires one valid key-precondition SHA-256"
+            )
+        scope = str(getattr(args, "expected_scope", "base") or "base")
+        if scope not in OBSERVE_SCOPES:
+            raise UiDriveError(
+                f"unsupported expected snapshot scope {scope!r}; expected one of "
+                f"{list(OBSERVE_SCOPES)}"
+            )
+        snapshot = _snapshot(deps, scope=scope)
+        manual = _manual_ui_module(deps.platform)
+        validate = (
+            getattr(manual, "validate_key_precondition", None)
+            if manual is not None
+            else None
+        )
+        if not callable(validate):
+            raise UiDriveError(
+                f"{deps.platform} has no public semantic key-precondition hook"
+            )
+        try:
+            validate(
+                str(getattr(args, "key", "") or ""),
+                snapshot,
+                scope=scope,
+                expected_sha256=expected_key_precondition,
+            )
+        except Exception as exc:
+            raise UiDriveError(
+                f"{deps.platform} semantic key precondition refused the mutation: {exc}"
+            ) from exc
+        return snapshot
     return _snapshot_at_expected_revision(args, deps)
 
 
@@ -788,6 +835,38 @@ def _manual_ui_module(platform: str) -> Any | None:
     return importlib.import_module(module_name)
 
 
+def _semantic_key_preconditions(
+    platform: str,
+    snapshot: Snapshot,
+    *,
+    scope: str,
+) -> dict[str, str]:
+    manual = _manual_ui_module(platform)
+    build = getattr(manual, "key_preconditions", None) if manual is not None else None
+    if not callable(build):
+        return {}
+    try:
+        preconditions = build(snapshot, scope=scope)
+    except Exception as exc:
+        raise UiDriveError(
+            f"{platform} semantic key-precondition projection failed: {exc}"
+        ) from exc
+    if not isinstance(preconditions, dict):
+        raise UiDriveError(
+            f"{platform} key_preconditions must return a mapping"
+        )
+    for key, token in preconditions.items():
+        if not isinstance(key, str) or not key or key != key.strip():
+            raise UiDriveError(
+                f"{platform} key_preconditions returned an invalid exact key"
+            )
+        if not isinstance(token, str) or not re.fullmatch(r"[0-9a-f]{64}", token):
+            raise UiDriveError(
+                f"{platform} key_preconditions returned an invalid SHA-256 token"
+            )
+    return dict(preconditions)
+
+
 def _declared_operation(
     platform: str,
     element_key: str,
@@ -892,6 +971,11 @@ def _observe(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str, Any]:
     scope = args.scope
     snapshot = _snapshot(deps, scope=scope)
     revision = _snapshot_revision(snapshot, scope=scope)
+    key_preconditions = _semantic_key_preconditions(
+        deps.platform,
+        snapshot,
+        scope=scope,
+    )
     expected_scope_elements = (
         list(_scope_expected_elements(deps.platform, scope))
         if scope != "base"
@@ -961,7 +1045,7 @@ def _observe(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str, Any]:
     fresh_url = ((cfg.get("urls") or {}).get("fresh"))
     if not isinstance(fresh_url, str) or not fresh_url:
         raise UiDriveError(f"{deps.platform}: urls.fresh must be a non-empty string")
-    return {
+    result = {
         "platform": deps.platform,
         "surface": "browser",
         "scope": scope,
@@ -982,6 +1066,9 @@ def _observe(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str, Any]:
         "sidebar": sidebar,
         "menu_items": menu_items,
     }
+    if key_preconditions:
+        result["key_preconditions"] = key_preconditions
+    return result
 
 
 def _revenue_platform_config(platform: str) -> dict[str, Any]:
@@ -2057,6 +2144,13 @@ def _parser() -> argparse.ArgumentParser:
     _add_display(key)
     _add_key_or_type_surface(key)
     key.add_argument("--key", required=True)
+    key.add_argument(
+        "--expected-key-precondition",
+        help=(
+            "opaque semantic SHA-256 returned by the preceding explicit observe; "
+            "accepted only by the platform-manual hook for the exact key"
+        ),
+    )
 
     navigate = commands.add_parser("navigate")
     _add_display(navigate)
