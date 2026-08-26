@@ -45,6 +45,7 @@ try:
     from consultation_v2.types import ElementRef, Snapshot
     from consultation_v2.yaml_contract import (
         CHAT_PLATFORMS,
+        KNOWN_PLATFORMS,
         get_extraction,
         load_platform_yaml,
     )
@@ -154,7 +155,15 @@ def _configure_display(display: str) -> SimpleNamespace:
 
     ui_input.set_display(display)
     clipboard.set_display(display)
-    platform = _platform_for_display(env["DISPLAY"])
+    trusted_platform = os.environ.get("TAEY_UI_DRIVE_PLATFORM", "").strip()
+    if trusted_platform:
+        if trusted_platform not in KNOWN_PLATFORMS:
+            raise UiDriveError(
+                f"TAEY_UI_DRIVE_PLATFORM must be one of {sorted(KNOWN_PLATFORMS)}"
+            )
+        platform = trusted_platform
+    else:
+        platform = _platform_for_display(env["DISPLAY"])
     return SimpleNamespace(
         display=env["DISPLAY"],
         platform=platform,
@@ -279,7 +288,7 @@ def _decode_ref(value: str) -> dict[str, Any]:
         raise UiDriveError("invalid ref schema")
     if not re.fullmatch(r":\d+", payload.get("display") or ""):
         raise UiDriveError("invalid ref display")
-    if payload.get("platform") not in CHAT_PLATFORMS:
+    if payload.get("platform") not in KNOWN_PLATFORMS:
         raise UiDriveError("invalid ref platform")
     if payload.get("surface") != "browser":
         raise UiDriveError("invalid ref surface")
@@ -975,6 +984,281 @@ def _observe(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str, Any]:
     }
 
 
+def _revenue_platform_config(platform: str) -> dict[str, Any]:
+    try:
+        cfg = load_platform_yaml(platform)
+    except Exception as exc:
+        raise UiDriveError(
+            f"cannot load strict platform YAML for {platform}: {exc}"
+        ) from exc
+    if cfg.get("platform") != platform:
+        raise UiDriveError(
+            f"strict platform YAML identifies {cfg.get('platform')!r}, not {platform!r}"
+        )
+    return cfg
+
+
+def _revenue_snapshot(deps: SimpleNamespace) -> Snapshot:
+    snapshot = _snapshot(deps, scope="base")
+    manual = _manual_ui_module(deps.platform)
+    augment = getattr(manual, "augment_snapshot", None) if manual is not None else None
+    if not callable(augment):
+        raise UiDriveError(
+            f"{deps.platform} has no public manual one-action snapshot hook"
+        )
+    try:
+        augmented = augment(snapshot)
+    except Exception as exc:
+        raise UiDriveError(
+            f"{deps.platform} manual snapshot augmentation failed: {exc}"
+        ) from exc
+    if not isinstance(augmented, Snapshot):
+        raise UiDriveError(
+            f"{deps.platform} manual augment_snapshot must return Snapshot"
+        )
+    if augmented.platform != deps.platform:
+        raise UiDriveError(
+            f"manual snapshot platform {augmented.platform!r} does not match "
+            f"bound {deps.platform!r}"
+        )
+    return augmented
+
+
+def _revenue_declared_operation(
+    platform: str,
+    element_key: str,
+    item: ElementRef | dict[str, Any],
+) -> dict[str, Any] | None:
+    manual = _manual_ui_module(platform)
+    operation = getattr(manual, "element_operation", None) if manual is not None else None
+    if not callable(operation):
+        raise UiDriveError(
+            f"{platform} has no public manual one-action operation hook"
+        )
+    if isinstance(item, ElementRef):
+        states = list(item.states)
+        context = dict(item.raw or {})
+        if item.text is not None:
+            context["text"] = item.text
+    else:
+        states = list(item.get("states") or [])
+        context = dict(item)
+    try:
+        declared = operation(element_key, states, context)
+    except Exception as exc:
+        raise UiDriveError(
+            f"{platform} manual one-action operation failed: {exc}"
+        ) from exc
+    if declared is not None and not isinstance(declared, dict):
+        raise UiDriveError(
+            f"{platform} manual element_operation must return a mapping or null"
+        )
+    return declared
+
+
+def _observe_revenue(
+    _args: argparse.Namespace,
+    deps: SimpleNamespace,
+) -> dict[str, Any]:
+    snapshot = _revenue_snapshot(deps)
+    revision = _snapshot_revision(snapshot, scope="base")
+    cfg = _revenue_platform_config(deps.platform)
+    mapped: list[dict[str, Any]] = []
+    for element_key in sorted(snapshot.mapped):
+        items = list(snapshot.mapped.get(element_key) or [])
+        selected, pick = _selected_mapped_item(cfg, element_key, items)
+        if selected is None:
+            continue
+        declared = _revenue_declared_operation(
+            deps.platform,
+            element_key,
+            selected,
+        )
+        if not isinstance(declared, dict):
+            continue
+        if (
+            declared.get("effect_class") != "page"
+            or declared.get("primitives") != ["activate"]
+            or declared.get("allowed_now") != ["activate"]
+        ):
+            continue
+        ref = _encode_ref(
+            display=deps.display,
+            platform=deps.platform,
+            scope="base",
+            revision=revision,
+            element=element_key,
+            current_url=snapshot.url,
+            target_sha256=_target_fingerprint(
+                selected,
+                match_count=len(items),
+            ),
+            pick=pick,
+        )
+        public_item = _public_element(
+            selected,
+            category="mapped",
+            element=element_key,
+            match_count=len(items),
+            ref=ref,
+        )
+        public_item["declared_operation"] = declared
+        mapped.append(public_item)
+    return {
+        "platform": deps.platform,
+        "surface": "browser",
+        "scope": "base",
+        "snapshot_revision": revision,
+        "current_url": snapshot.url,
+        "raw_count": snapshot.raw_count,
+        "counts": {"mapped": len(mapped)},
+        "mapped": mapped,
+    }
+
+
+def _resolve_revenue_target(
+    args: argparse.Namespace,
+    deps: SimpleNamespace,
+) -> tuple[dict[str, Any], Snapshot]:
+    if not args.ref:
+        raise UiDriveError(
+            "revenue target requires --ref from the immediately preceding observe"
+        )
+    descriptor = _decode_ref(args.ref)
+    if descriptor.get("v") != 6 or descriptor.get("scope") != "base":
+        raise UiDriveError("revenue mutation requires a current base-scope atspi3 v6 ref")
+    if descriptor["display"] != deps.display:
+        raise UiDriveError(
+            f"ref is scoped to display {descriptor['display']}, not {deps.display}"
+        )
+    if descriptor["platform"] != deps.platform:
+        raise UiDriveError(
+            f"ref is scoped to platform {descriptor['platform']}, not {deps.platform}"
+        )
+    snapshot = _revenue_snapshot(deps)
+    element_key = descriptor["element"]
+    matches = list(snapshot.mapped.get(element_key) or [])
+    cfg = _revenue_platform_config(deps.platform)
+    item, pick = _selected_mapped_item(cfg, element_key, matches)
+    if item is None:
+        raise UiDriveError(
+            f"mapped element {element_key!r} matched {len(matches)} elements on "
+            f"{deps.platform} {deps.display} without one YAML-selected target"
+        )
+    if descriptor.get("pick") != pick:
+        raise UiDriveError(
+            f"ref pick strategy {descriptor.get('pick')!r} does not match current "
+            f"YAML strategy {pick!r} for {element_key!r}"
+        )
+    if descriptor.get("url") != snapshot.url:
+        raise UiDriveError(
+            "browser URL changed after the preceding observe; observe again before acting"
+        )
+    fingerprint = _target_fingerprint(item, match_count=len(matches))
+    if descriptor.get("target_sha256") != fingerprint:
+        raise UiDriveError(
+            "mapped browser target changed after the preceding observe; observe again before acting"
+        )
+    row = {
+        **dict(item.raw),
+        "element": element_key,
+        "ref": _encode_ref(
+            display=deps.display,
+            platform=deps.platform,
+            scope="base",
+            revision=_snapshot_revision(snapshot, scope="base"),
+            element=element_key,
+            current_url=snapshot.url,
+            target_sha256=fingerprint,
+            pick=pick,
+        ),
+    }
+    return row, snapshot
+
+
+def _revenue_activate(
+    args: argparse.Namespace,
+    deps: SimpleNamespace,
+) -> dict[str, Any]:
+    row, observed_snapshot = _resolve_revenue_target(args, deps)
+    declared = _revenue_declared_operation(
+        deps.platform,
+        row["element"],
+        row,
+    )
+    if not isinstance(declared, dict) or (
+        declared.get("method") != "activate"
+        or declared.get("effect_class") != "page"
+        or declared.get("primitives") != ["activate"]
+        or declared.get("allowed_now") != ["activate"]
+    ):
+        raise UiDriveError(
+            f"{row['element']} is not currently authorized for one page-bound activate"
+        )
+    if not deps.interact.atspi_activate(row):
+        raise UiDriveError("activate primitive returned false")
+    manual = _manual_ui_module(deps.platform)
+    stable_observation = (
+        getattr(manual, "stable_post_action_observation", None)
+        if manual is not None
+        else None
+    )
+    if not callable(stable_observation):
+        raise UiDriveError(
+            f"{deps.platform} has no public stable post-action observation hook"
+        )
+    try:
+        post_snapshot, barrier_receipt = stable_observation(
+            row["element"],
+            "activate",
+            time.monotonic() + LOCK_TTL_DEFAULT,
+        )
+    except Exception as exc:
+        raise UiDriveError(
+            f"{deps.platform} one-action observation barrier failed: {exc}"
+        ) from exc
+    postcondition = (
+        barrier_receipt.get("postcondition_receipt")
+        if isinstance(barrier_receipt, dict)
+        else None
+    )
+    if (
+        not isinstance(post_snapshot, Snapshot)
+        or not isinstance(barrier_receipt, dict)
+        or barrier_receipt.get("result") != "PASS"
+        or barrier_receipt.get("next_mutation_authorized") is not True
+        or not isinstance(postcondition, dict)
+        or postcondition.get("route_exact") is not True
+    ):
+        raise UiDriveError(
+            f"{deps.platform} post-action observation did not prove the exact route: "
+            f"{barrier_receipt!r}"
+        )
+    return {
+        "performed": True,
+        "performed_primitive": "activate",
+        "effect_class": "page",
+        "element": {
+            "category": "mapped",
+            "element": row["element"],
+            "name": str(row.get("name") or ""),
+            "role": str(row.get("role") or ""),
+            "states": list(row.get("states") or []),
+            "ref": row["ref"],
+        },
+        "consumed_snapshot_revision": _snapshot_revision(
+            observed_snapshot,
+            scope="base",
+        ),
+        "post_action_observation": {
+            "snapshot_revision": _snapshot_revision(post_snapshot, scope="base"),
+            "barrier": barrier_receipt,
+            **postcondition,
+        },
+        "observe_required_before_next_mutation": True,
+    }
+
+
 def _element_action(
     action: str, args: argparse.Namespace, deps: SimpleNamespace
 ) -> dict[str, Any]:
@@ -1611,6 +1895,13 @@ def _parser() -> argparse.ArgumentParser:
     observe.add_argument("--surface", choices=OBSERVE_SURFACES, default="browser")
     observe.add_argument("--scope", choices=OBSERVE_SCOPES, default="base")
 
+    revenue_observe = commands.add_parser("ui-observe")
+    _add_display(revenue_observe)
+
+    revenue_activate = commands.add_parser("ui-activate")
+    _add_display(revenue_activate)
+    _add_target(revenue_activate)
+
     for action in ("click", "focus", "activate", "hover", "operate"):
         target = commands.add_parser(action)
         _add_display(target)
@@ -1681,7 +1972,7 @@ def _parser() -> argparse.ArgumentParser:
 # read-only: it reports lease state without creating, renewing, or transferring ownership.
 _LOCK_ACTION_OPS = {
     "click", "focus", "activate", "hover", "operate", "type", "paste", "key", "navigate",
-    "focus-dialog", "read-clipboard", "extract", "scroll_to_bottom",
+    "focus-dialog", "read-clipboard", "extract", "scroll_to_bottom", "ui-activate",
 }
 
 
@@ -1897,6 +2188,14 @@ def _dispatch(args: argparse.Namespace, deps: SimpleNamespace) -> Any:
             LOCK_TTL_DEFAULT,
         )
         return result
+    if args.action == "ui-observe":
+        result = _observe_revenue(args, deps)
+        result["lease"] = _observe_lease(
+            deps.display,
+            _lease_context(required=False),
+            LOCK_TTL_DEFAULT,
+        )
+        return result
     lease_receipt = None
     if args.action in _LOCK_ACTION_OPS:
         lease = _lease_context()
@@ -1908,6 +2207,8 @@ def _dispatch(args: argparse.Namespace, deps: SimpleNamespace) -> Any:
         result = _consult_transaction(args, deps)
     elif args.action == "scroll_to_bottom":
         result = _scroll_to_bottom_action(args, deps)
+    elif args.action == "ui-activate":
+        result = _revenue_activate(args, deps)
     elif args.action in {"click", "focus", "activate", "hover", "operate"}:
         result = _element_action(args.action, args, deps)
     elif args.action == "type":

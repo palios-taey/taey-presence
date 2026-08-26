@@ -415,6 +415,9 @@ For other model families, set the parsers your model expects.
 | `TAEY_TURN_HEARTBEAT_SECS` | `30` | lease-renewal interval, capped at one-third of the lease |
 | `TAEY_DRIVE_CHAT_CAPTURE_ROOT` | *(empty → `drive_chat` refused)* | private write-once evidence root; required before any UI action |
 | `TAEYS_HANDS_ROOT` | *(empty → LinkedIn tools refused)* | absolute path to a committed public `palios-taey/taeys-hands` checkout |
+| `TAEY_UI_ACTION_BINDINGS` | *(empty → `ui_action` refused)* | trusted comma-separated platform/display bindings; first qualified form is `linkedin=:N` |
+| `TAEY_UI_DRIVE_PYTHON` | `/home/mira/taeys-env-sys/bin/python` | interpreter for the public one-action Hands adapter; production should set an explicit deployed path |
+| `TAEY_UI_DRIVE_SCRIPT` | deployed `serving/ui_drive.py` | absolute public Presence adapter invoked by `ui_action` |
 | `TAEY_LINKEDIN_JOBS_PYTHON` | *(empty → `linkedin_jobs` refused)* | explicit Python interpreter with the public Hands runtime and AT-SPI dependencies |
 | `TAEY_LINKEDIN_JOBS_PRIVATE_ROOT` | *(empty → `linkedin_jobs` refused)* | owner-controlled nonsymlink `0700` root for the manifest, permanent claim, receipt, and raw sink |
 | `TAEY_LINKEDIN_JOBS_DISPLAYS` | *(empty → `linkedin_jobs` refused)* | comma-separated runtime-authorized LinkedIn displays; `:0` is always refused |
@@ -453,6 +456,34 @@ paths, URLs, and account details. Never commit it or feed it to a public receipt
 builder. A missing or unsafe root refuses the action before mutation; a
 result-finalization failure terminalizes the turn so Taey cannot continue
 without its evidence.
+
+The `revenue-ui` profile exposes only `ui_action`. It is the manual production
+boundary for revenue sites: fresh observe, exactly one mapped primitive, exact
+postcondition, then another fresh observe. The server—not the model—binds each
+display to its platform through `TAEY_UI_ACTION_BINDINGS`. The first qualified
+slice accepts only `linkedin=:N`, `observe`, and the exact page-bound `activate`
+declared by LinkedIn's public `manual.py`. It cannot type, paste, navigate,
+select an unobserved option, execute a screen, or use `drive_chat`.
+
+Use one visible transition per request. This canonical request opens LinkedIn
+Notifications and verifies the exact Notifications route, then stops:
+
+```bash
+curl --fail-with-body --silent --show-error \
+  -H 'Content-Type: application/json' \
+  -H 'X-Taey-Seat-Id: taey-revenue-1' \
+  -H 'X-Taey-Event-Id: linkedin-notifications-001' \
+  -H 'X-Taey-Correlation-Id: linkedin-notifications-001' \
+  -H 'X-Taey-Tool-Profile: revenue-ui' \
+  --data-binary '{"model":"SERVED_MODEL_ID","stream":false,"messages":[{"role":"user","content":"On display :18, open LinkedIn Notifications and verify the Notifications-All page. Perform no other action."}]}' \
+  http://127.0.0.1:8765/v1/chat/completions
+```
+
+For a form or dropdown, preserve the same boundary across separate requests or
+tool rounds: open once, observe the actual options, select one exact mapped
+option once, then observe the result. A missing mapping, duplicate, failed
+primitive, or failed postcondition terminalizes that attempt. Do not add a
+screen runner or retry path.
 
 The `linkedin-jobs` tool profile exposes only `linkedin_jobs`, with one
 runtime-authorized display as its sole argument. Before the request, the caller

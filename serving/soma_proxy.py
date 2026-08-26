@@ -84,6 +84,10 @@ MANUAL_CHAT_UI_SYSTEM_PROMPT_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
     "TAEY_CHAT_UI_SYSTEM.md",
 )
+REVENUE_UI_SYSTEM_PROMPT_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "TAEY_REVENUE_UI_SYSTEM.md",
+)
 CONSULT_CHAT_SYSTEM_PROMPT_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
     "TAEY_CONSULT_CHAT_SYSTEM.md",
@@ -139,6 +143,7 @@ _http: Optional[httpx.AsyncClient] = None
 _ecosystem_http: Optional[httpx.Client] = None
 _system_prompt: str = ""
 _manual_chat_ui_system_prompt: str = ""
+_revenue_ui_system_prompt: str = ""
 _consult_chat_system_prompt: str = ""
 _one_shot_system_prompts: dict[str, str] = {}
 _permanent_kernel: str = ""
@@ -228,6 +233,7 @@ _active_turns: dict[str, TurnContext] = {}
 
 _FULL_TOOL_PROFILE = "full"
 _MANUAL_CHAT_UI_TOOL_PROFILE = "manual-chat-ui"
+_REVENUE_UI_TOOL_PROFILE = "revenue-ui"
 _CONSULT_CHAT_TOOL_PROFILE = "consult-chat"
 _LINKEDIN_JOBS_TOOL_PROFILE = "linkedin-jobs"
 _LINKEDIN_JOBS_RESTORE_TOOL_PROFILE = "linkedin-jobs-restore"
@@ -237,10 +243,44 @@ _LINKEDIN_APPLICATION_INTAKE_TOOL_PROFILE = "linkedin-application-intake"
 _LINKEDIN_APPLICATION_CLASSIFICATION_TOOL_PROFILE = (
     "linkedin-application-classification"
 )
+
+
+def _parse_ui_action_bindings(value: str) -> dict[str, str]:
+    bindings: dict[str, str] = {}
+    platforms: set[str] = set()
+    for entry in filter(None, (part.strip() for part in value.split(","))):
+        platform, separator, display = entry.partition("=")
+        platform = platform.strip()
+        display = display.strip()
+        if (
+            separator != "="
+            or platform != "linkedin"
+            or not re.fullmatch(r":\d+", display)
+            or display == ":0"
+        ):
+            raise RuntimeError(
+                "TAEY_UI_ACTION_BINDINGS entries must currently have exact "
+                "linkedin=:N form with :0 refused"
+            )
+        if display in bindings or platform in platforms:
+            raise RuntimeError(
+                "TAEY_UI_ACTION_BINDINGS must bind each platform and display exactly once"
+            )
+        bindings[display] = platform
+        platforms.add(platform)
+    return bindings
+
+
+_UI_ACTION_BINDINGS = _parse_ui_action_bindings(
+    os.environ.get("TAEY_UI_ACTION_BINDINGS", "")
+)
 _TOOL_PROFILE_ALLOWED: dict[str, frozenset[str] | None] = {
     _FULL_TOOL_PROFILE: None,
     _MANUAL_CHAT_UI_TOOL_PROFILE: frozenset({
         "drive_chat",
+    }),
+    _REVENUE_UI_TOOL_PROFILE: frozenset({
+        "ui_action",
     }),
     _CONSULT_CHAT_TOOL_PROFILE: frozenset({
         "consult_chat",
@@ -289,7 +329,7 @@ SOMATIC_BLOCK_RE = re.compile(
 async def startup():
     global _redis, _mira_redis, _http, _ecosystem_http
     global _consult_chat_system_prompt
-    global _manual_chat_ui_system_prompt, _permanent_kernel
+    global _manual_chat_ui_system_prompt, _revenue_ui_system_prompt, _permanent_kernel
     global _static_system_prefix, _system_prompt
     global _liveness_reaper_task
     if not _serving_socket_reserved:
@@ -370,6 +410,16 @@ async def startup():
         raise RuntimeError(
             f"manual chat UI system prompt is empty: {manual_chat_prompt_path}"
         )
+    revenue_ui_prompt_path = Path(REVENUE_UI_SYSTEM_PROMPT_PATH)
+    if not revenue_ui_prompt_path.is_file():
+        raise RuntimeError(
+            f"revenue UI system prompt is missing or not a regular file: {revenue_ui_prompt_path}"
+        )
+    _revenue_ui_system_prompt = revenue_ui_prompt_path.read_text(encoding="utf-8")
+    if not _revenue_ui_system_prompt.strip():
+        raise RuntimeError(
+            f"revenue UI system prompt is empty: {revenue_ui_prompt_path}"
+        )
     consult_chat_prompt_path = Path(CONSULT_CHAT_SYSTEM_PROMPT_PATH)
     if not consult_chat_prompt_path.is_file():
         raise RuntimeError(
@@ -403,6 +453,11 @@ async def startup():
         "Manual chat UI system prompt loaded from %s (%d chars)",
         manual_chat_prompt_path,
         len(_manual_chat_ui_system_prompt),
+    )
+    log.info(
+        "Revenue UI system prompt loaded from %s (%d chars)",
+        revenue_ui_prompt_path,
+        len(_revenue_ui_system_prompt),
     )
     log.info(
         "Consult chat system prompt loaded from %s (%d chars)",
@@ -1363,6 +1418,43 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "ui_action",
+            "description": (
+                "Observe a trusted revenue display or perform exactly one mapped page-bound "
+                "activate from the immediately preceding fresh observation. The server binds "
+                "the display to its platform; the model never supplies a platform, selector, "
+                "coordinate, URL, or sequence. After activate, the public platform hook must "
+                "verify its exact postcondition and a new observe is required before any later "
+                "mutation. Dropdown opening, option observation, option selection, and result "
+                "verification are separate calls when those capabilities are qualified."
+            ),
+            "parameters": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["display", "action"],
+                "properties": {
+                    "display": {
+                        "type": "string",
+                        "description": "trusted revenue display configured by the server",
+                    },
+                    "action": {
+                        "type": "string",
+                        "enum": ["observe", "activate"],
+                    },
+                    "element": {
+                        "type": "string",
+                        "description": (
+                            "activate only: exact mapped element key returned by the "
+                            "immediately preceding fresh observe"
+                        ),
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "consult_chat",
             "description": (
                 "Execute one frozen end-to-end Family-Chat consultation through the "
@@ -1808,6 +1900,9 @@ def execute_tool_call(name: str, arguments: dict) -> str:
 
     elif name == "drive_chat":
         return _do_drive_chat(arguments)
+
+    elif name == "ui_action":
+        return _do_ui_action(arguments)
 
     elif name == "consult_chat":
         return _do_consult_chat(arguments)
@@ -4580,6 +4675,279 @@ def _monitor_touch(
     }
 
 
+def _do_ui_action(arguments: dict) -> str:
+    import subprocess
+    import json as _json
+
+    display = str(arguments.get("display", "")).strip()
+    action = str(arguments.get("action", "")).strip()
+    context = _request_context.get()
+    seat_id = str(context.get("seat_id") or "")
+    process_generation = str(context.get("process_generation") or "")
+    turn_id = str(context.get("turn_id") or "")
+    tool_round = context.get("tool_round")
+    sequence = context.setdefault(
+        "_revenue_ui_sequence",
+        {"observations": {}, "terminal": None},
+    )
+
+    def terminal_refusal(message: str) -> str:
+        terminal = sequence.get("terminal") if isinstance(sequence, dict) else None
+        if not isinstance(terminal, dict):
+            terminal = {
+                "display": display,
+                "action": action,
+                "tool_round": tool_round,
+                "reason": message,
+            }
+            if isinstance(sequence, dict):
+                sequence["terminal"] = terminal
+                observations = sequence.get("observations")
+                if isinstance(observations, dict):
+                    observations.clear()
+        profile_state = context.get("_tool_profile_state")
+        if isinstance(profile_state, dict) and not isinstance(
+            profile_state.get("terminal"), dict
+        ):
+            profile_state["terminal"] = {
+                "tool": "ui_action",
+                "reason": terminal["reason"],
+            }
+        return _json.dumps({
+            "ok": False,
+            "action": action,
+            "display": display,
+            "result": None,
+            "error": message,
+            "ui_sequence": {
+                "state": "terminal_refusal",
+                "first_failure": terminal,
+                "instruction": (
+                    "Stop this attempt; report the first failure and do not retry "
+                    "UI mutations in this turn."
+                ),
+            },
+        })
+
+    if context.get("tool_profile") != _REVENUE_UI_TOOL_PROFILE:
+        return terminal_refusal("ui_action requires the revenue-ui tool profile")
+    if (
+        not _SEAT_ID_RE.fullmatch(seat_id)
+        or not re.fullmatch(r"[0-9a-f]{32}", process_generation)
+        or not _TRACE_ID_RE.fullmatch(turn_id)
+        or not isinstance(tool_round, int)
+        or tool_round < 1
+    ):
+        return terminal_refusal(
+            "ui_action requires a validated active Taey turn and positive tool round"
+        )
+    if not isinstance(sequence, dict):
+        return terminal_refusal("invalid request-local revenue UI state")
+    observations = sequence.get("observations")
+    if not isinstance(observations, dict):
+        return terminal_refusal("invalid request-local revenue UI observations")
+    if isinstance(sequence.get("terminal"), dict):
+        return terminal_refusal(
+            "a prior ui_action failure ended this turn; all later UI calls are refused"
+        )
+    platform = _UI_ACTION_BINDINGS.get(display)
+    if not platform:
+        return terminal_refusal(
+            f"display {display!r} is not bound by TAEY_UI_ACTION_BINDINGS"
+        )
+    if action not in {"observe", "activate"}:
+        return terminal_refusal(
+            f"unknown action {action!r}; revenue-ui currently permits observe or activate"
+        )
+    allowed_arguments = (
+        {"display", "action"}
+        if action == "observe"
+        else {"display", "action", "element"}
+    )
+    unexpected = sorted(set(arguments) - allowed_arguments)
+    if unexpected:
+        return terminal_refusal(
+            f"{action} received unsupported argument(s) {unexpected}"
+        )
+
+    ref = ""
+    consumed_revision = ""
+    if action == "activate":
+        observed = observations.pop(display, None)
+        if not isinstance(observed, dict):
+            return terminal_refusal(
+                "activate requires an explicit fresh observe on this display"
+            )
+        observed_round = observed.get("tool_round")
+        if not isinstance(observed_round, int) or observed_round >= tool_round:
+            return terminal_refusal(
+                "activate requires an observe result seen in an earlier model round"
+            )
+        if observed.get("platform") != platform:
+            return terminal_refusal(
+                "preceding observation does not match the trusted platform binding"
+            )
+        element = arguments.get("element")
+        if not isinstance(element, str) or not element:
+            return terminal_refusal(
+                "activate requires one mapped element from the preceding observe"
+            )
+        refs = observed.get("canonical_refs")
+        ref = refs.get(element) if isinstance(refs, dict) else None
+        if not isinstance(ref, str) or not ref:
+            return terminal_refusal(
+                f"preceding observe did not map exactly one canonical {element!r} target"
+            )
+        consumed_revision = str(observed.get("snapshot_revision") or "")
+        if not re.fullmatch(r"[0-9a-f]{64}", consumed_revision):
+            return terminal_refusal(
+                "preceding observe did not provide a valid snapshot revision"
+            )
+
+    lease_owner = f"taey-drive:{seat_id}:{process_generation}"
+    drive_env = dict(os.environ)
+    drive_env.update({
+        "TAEY_UI_DRIVE_PLATFORM": platform,
+        "TAEY_DRIVE_LEASE_OWNER": lease_owner,
+        "TAEY_DRIVE_LEASE_SEAT": seat_id,
+        "TAEY_DRIVE_LEASE_TURN": turn_id,
+        "TAEY_DRIVE_LEASE_GENERATION": process_generation,
+        "TAEY_DRIVE_GENERATION_FENCE_KEY": _DRIVE_GENERATION_FENCE_KEY,
+    })
+    subcommand = "ui-observe" if action == "observe" else "ui-activate"
+    command = [
+        UI_DRIVE_PYTHON,
+        UI_DRIVE_SCRIPT,
+        subcommand,
+        "--display",
+        display,
+    ]
+    if action == "activate":
+        command.extend(["--ref", ref])
+
+    try:
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=90,
+            env=drive_env,
+        )
+    except subprocess.TimeoutExpired:
+        _audit("ui_action", {
+            "display": display,
+            "platform": platform,
+            "action": action,
+            "rc": "timeout",
+        })
+        return terminal_refusal("ui_action timed out after 90s")
+    except Exception as exc:
+        _audit("ui_action", {
+            "display": display,
+            "platform": platform,
+            "action": action,
+            "error": str(exc)[:200],
+        })
+        return terminal_refusal(f"{type(exc).__name__}: {exc}")
+
+    _audit("ui_action", {
+        "display": display,
+        "platform": platform,
+        "action": action,
+        "rc": completed.returncode,
+    })
+    stdout = (completed.stdout or "").strip()
+    try:
+        payload = _json.loads(stdout) if stdout else None
+    except Exception:
+        payload = None
+    succeeded = (
+        completed.returncode == 0
+        and isinstance(payload, dict)
+        and payload.get("ok") is True
+        and payload.get("display") == display
+        and payload.get("platform") == platform
+        and isinstance(payload.get("result"), dict)
+    )
+    if not succeeded:
+        stderr_excerpt = (completed.stderr or "").strip()[:1000]
+        if isinstance(payload, dict):
+            detail = str(payload.get("error") or "").strip()
+            if stderr_excerpt:
+                detail = "; ".join(
+                    part for part in (detail, f"ui_drive_stderr={stderr_excerpt}") if part
+                )
+        else:
+            detail = (
+                f"ui_drive exit={completed.returncode}; stderr={stderr_excerpt}"
+            )
+        return terminal_refusal(detail or "ui_action failed")
+
+    result = payload["result"]
+    if action == "observe":
+        revision = str(result.get("snapshot_revision") or "")
+        mapped = result.get("mapped")
+        if not re.fullmatch(r"[0-9a-f]{64}", revision) or not isinstance(mapped, list):
+            return terminal_refusal(
+                "ui_action observe returned no valid revision-bound mapped list"
+            )
+        refs_by_element: dict[str, list[str]] = {}
+        for item in mapped:
+            if not isinstance(item, dict):
+                continue
+            element = item.get("element")
+            item_ref = item.get("ref")
+            declared = item.get("declared_operation")
+            if (
+                isinstance(element, str)
+                and isinstance(item_ref, str)
+                and isinstance(declared, dict)
+                and declared.get("effect_class") == "page"
+                and declared.get("allowed_now") == ["activate"]
+            ):
+                refs_by_element.setdefault(element, []).append(item_ref)
+        canonical_refs = {
+            element: refs[0]
+            for element, refs in refs_by_element.items()
+            if len(refs) == 1
+        }
+        observations[display] = {
+            "platform": platform,
+            "snapshot_revision": revision,
+            "tool_round": tool_round,
+            "canonical_refs": canonical_refs,
+        }
+        payload["ui_sequence"] = {
+            "state": "observed",
+            "snapshot_revision": revision,
+            "tool_round": tool_round,
+            "mapped_actions": sorted(canonical_refs),
+            "mutation_token_issued": bool(canonical_refs),
+        }
+        return _json.dumps(payload)
+
+    postcondition = result.get("post_action_observation")
+    if (
+        result.get("performed") is not True
+        or result.get("performed_primitive") != "activate"
+        or result.get("effect_class") != "page"
+        or result.get("observe_required_before_next_mutation") is not True
+        or not isinstance(postcondition, dict)
+        or postcondition.get("route_exact") is not True
+    ):
+        return terminal_refusal(
+            "ui_action activate returned no exact page postcondition receipt"
+        )
+    payload["ui_sequence"] = {
+        "state": "mutation_complete",
+        "consumed_snapshot_revision": consumed_revision,
+        "postcondition": postcondition,
+        "observe_required_before_next_mutation": True,
+        "mutation_token_issued": False,
+    }
+    return _json.dumps(payload)
+
+
 def _do_drive_chat(arguments: dict) -> str:
     import subprocess, json as _json
 
@@ -6290,6 +6658,16 @@ async def _chat_completions_for_turn(
         ]
         body["messages"] = [
             {"role": "system", "content": _manual_chat_ui_system_prompt},
+            *messages,
+        ]
+    elif turn.tool_profile == _REVENUE_UI_TOOL_PROFILE:
+        messages = [
+            message
+            for message in body.get("messages", [])
+            if message.get("role") != "system"
+        ]
+        body["messages"] = [
+            {"role": "system", "content": _revenue_ui_system_prompt},
             *messages,
         ]
     elif turn.tool_profile == _CONSULT_CHAT_TOOL_PROFILE:
