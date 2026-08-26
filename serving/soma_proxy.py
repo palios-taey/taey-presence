@@ -4686,10 +4686,7 @@ def _do_ui_action(arguments: dict) -> str:
     process_generation = str(context.get("process_generation") or "")
     turn_id = str(context.get("turn_id") or "")
     tool_round = context.get("tool_round")
-    sequence = context.setdefault(
-        "_revenue_ui_sequence",
-        {"observations": {}, "terminal": None},
-    )
+    sequence = context.get("_revenue_ui_sequence")
 
     def terminal_refusal(message: str) -> str:
         terminal = sequence.get("terminal") if isinstance(sequence, dict) else None
@@ -6549,6 +6546,10 @@ async def chat_completions(request: Request):
     turn = _turn_context(request, body)
     turn_payload = _turn_payload(turn)
     turn_payload["_ui_sequence"] = {"observations": {}, "terminal": None}
+    turn_payload["_revenue_ui_sequence"] = {
+        "observations": {},
+        "terminal": None,
+    }
     turn_payload["_tool_profile_state"] = {"terminal": None}
     context_token = _request_context.set(turn_payload)
     started = False
