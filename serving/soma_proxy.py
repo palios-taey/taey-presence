@@ -25,7 +25,7 @@ import uuid
 from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import asyncio
 import redis
@@ -92,6 +92,10 @@ LINKEDIN_JOBS_SYSTEM_PROMPT_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
     "TAEY_LINKEDIN_JOBS_SYSTEM.md",
 )
+LINKEDIN_ENGAGERS_SYSTEM_PROMPT_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "TAEY_LINKEDIN_ENGAGERS_SYSTEM.md",
+)
 # Optional second always-on prefix (e.g. a constitution/kernel). Empty = none.
 # Set PERMANENT_KERNEL_PATH to a file to prepend it ahead of the persona.
 PERMANENT_KERNEL_PATH = os.environ.get("PERMANENT_KERNEL_PATH", "")
@@ -120,7 +124,7 @@ _ecosystem_http: Optional[httpx.Client] = None
 _system_prompt: str = ""
 _manual_chat_ui_system_prompt: str = ""
 _consult_chat_system_prompt: str = ""
-_linkedin_jobs_system_prompt: str = ""
+_one_shot_system_prompts: dict[str, str] = {}
 _permanent_kernel: str = ""
 _static_system_prefix: str = ""
 
@@ -168,6 +172,28 @@ class TurnContext:
     started_at: float
 
 
+@dataclass(frozen=True)
+class PrivateTransactionToolSpec:
+    profile: str
+    tool: str
+    prompt_label: str
+    system_prompt_path: str
+    runner_name: str
+    python_path: str
+    python_env_name: str
+    private_root: str
+    private_root_env_name: str
+    displays: tuple[str, ...]
+    displays_env_name: str
+    timeout_secs: int
+    timeout_env_name: str
+    deadline_secs: int
+    claim_schema: str
+    terminal_reason: str
+    expected_result_keys: frozenset[str]
+    validate_result: Callable[[dict, int], str | None]
+
+
 PROCESS_GENERATION = uuid.uuid4().hex
 _PROXY_NAMESPACE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
 if not _PROXY_NAMESPACE_RE.fullmatch(TAEY_DEFAULT_SEAT):
@@ -184,6 +210,7 @@ _FULL_TOOL_PROFILE = "full"
 _MANUAL_CHAT_UI_TOOL_PROFILE = "manual-chat-ui"
 _CONSULT_CHAT_TOOL_PROFILE = "consult-chat"
 _LINKEDIN_JOBS_TOOL_PROFILE = "linkedin-jobs"
+_LINKEDIN_ENGAGERS_TOOL_PROFILE = "linkedin-engagers"
 _TOOL_PROFILE_ALLOWED: dict[str, frozenset[str] | None] = {
     _FULL_TOOL_PROFILE: None,
     _MANUAL_CHAT_UI_TOOL_PROFILE: frozenset({
@@ -194,6 +221,9 @@ _TOOL_PROFILE_ALLOWED: dict[str, frozenset[str] | None] = {
     }),
     _LINKEDIN_JOBS_TOOL_PROFILE: frozenset({
         "linkedin_jobs",
+    }),
+    _LINKEDIN_ENGAGERS_TOOL_PROFILE: frozenset({
+        "linkedin_engagers",
     }),
 }
 
@@ -220,7 +250,7 @@ SOMATIC_BLOCK_RE = re.compile(
 @app.on_event("startup")
 async def startup():
     global _redis, _mira_redis, _http, _ecosystem_http
-    global _consult_chat_system_prompt, _linkedin_jobs_system_prompt
+    global _consult_chat_system_prompt
     global _manual_chat_ui_system_prompt, _permanent_kernel
     global _static_system_prefix, _system_prompt
     global _liveness_reaper_task
@@ -312,19 +342,20 @@ async def startup():
         raise RuntimeError(
             f"consult chat system prompt is empty: {consult_chat_prompt_path}"
         )
-    linkedin_jobs_prompt_path = Path(LINKEDIN_JOBS_SYSTEM_PROMPT_PATH)
-    if not linkedin_jobs_prompt_path.is_file():
-        raise RuntimeError(
-            "LinkedIn Jobs system prompt is missing or not a regular file: "
-            f"{linkedin_jobs_prompt_path}"
-        )
-    _linkedin_jobs_system_prompt = linkedin_jobs_prompt_path.read_text(
-        encoding="utf-8"
-    )
-    if not _linkedin_jobs_system_prompt.strip():
-        raise RuntimeError(
-            f"LinkedIn Jobs system prompt is empty: {linkedin_jobs_prompt_path}"
-        )
+    _one_shot_system_prompts.clear()
+    for spec in _PRIVATE_TRANSACTION_TOOL_SPECS:
+        prompt_path = Path(spec.system_prompt_path)
+        if not prompt_path.is_file():
+            raise RuntimeError(
+                f"{spec.prompt_label} system prompt is missing or not a regular file: "
+                f"{prompt_path}"
+            )
+        prompt = prompt_path.read_text(encoding="utf-8")
+        if not prompt.strip():
+            raise RuntimeError(
+                f"{spec.prompt_label} system prompt is empty: {prompt_path}"
+            )
+        _one_shot_system_prompts[spec.profile] = prompt
     log.info(
         "Canonical system prompt loaded from %s (%d chars)",
         SYSTEM_PROMPT_PATH,
@@ -340,11 +371,13 @@ async def startup():
         consult_chat_prompt_path,
         len(_consult_chat_system_prompt),
     )
-    log.info(
-        "LinkedIn Jobs system prompt loaded from %s (%d chars)",
-        linkedin_jobs_prompt_path,
-        len(_linkedin_jobs_system_prompt),
-    )
+    for spec in _PRIVATE_TRANSACTION_TOOL_SPECS:
+        log.info(
+            "%s system prompt loaded from %s (%d chars)",
+            spec.prompt_label,
+            spec.system_prompt_path,
+            len(_one_shot_system_prompts[spec.profile]),
+        )
 
     _static_system_prefix = _permanent_kernel
     if _static_system_prefix:
@@ -1369,6 +1402,33 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "linkedin_engagers",
+            "description": (
+                "Execute one frozen LinkedIn My Posts new-engagement capture "
+                "through the public Hands runner and private receipt chain. "
+                "Account, post, notification, and engager content remains "
+                "off-context. Available only in the linkedin-engagers tool "
+                "profile; never retry a failed transaction."
+            ),
+            "parameters": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["display"],
+                "properties": {
+                    "display": {
+                        "type": "string",
+                        "pattern": "^:[0-9]{1,3}$",
+                        "description": (
+                            "runtime-authorized LinkedIn display supplied by the user"
+                        ),
+                    },
+                },
+            },
+        },
+    },
 ]
 
 
@@ -1624,6 +1684,9 @@ def execute_tool_call(name: str, arguments: dict) -> str:
 
     elif name == "linkedin_jobs":
         return _do_linkedin_jobs(arguments)
+
+    elif name == "linkedin_engagers":
+        return _do_linkedin_engagers(arguments)
 
     return f"Unknown tool: {name}"
 
@@ -1963,6 +2026,27 @@ LINKEDIN_JOBS_DISPLAYS = tuple(
     for display in _env_linkedin_jobs_displays.split(",")
     if display.strip() and display.strip() != ":0"
 )
+LINKEDIN_ENGAGERS_PYTHON = os.environ.get(
+    "TAEY_LINKEDIN_ENGAGERS_PYTHON", ""
+).strip()
+LINKEDIN_ENGAGERS_PRIVATE_ROOT = os.environ.get(
+    "TAEY_LINKEDIN_ENGAGERS_PRIVATE_ROOT", ""
+).strip()
+try:
+    LINKEDIN_ENGAGERS_TIMEOUT_SECS = int(
+        os.environ.get("TAEY_LINKEDIN_ENGAGERS_TIMEOUT_SECS", "1800")
+    )
+except ValueError:
+    LINKEDIN_ENGAGERS_TIMEOUT_SECS = 0
+LINKEDIN_ENGAGERS_DEADLINE_SECS = LINKEDIN_ENGAGERS_TIMEOUT_SECS - 100
+_env_linkedin_engagers_displays = os.environ.get(
+    "TAEY_LINKEDIN_ENGAGERS_DISPLAYS", ""
+).strip()
+LINKEDIN_ENGAGERS_DISPLAYS = tuple(
+    display.strip()
+    for display in _env_linkedin_engagers_displays.split(",")
+    if display.strip() and display.strip() != ":0"
+)
 _DEFAULT_CHAT_DISPLAYS = (":2", ":3", ":4", ":5", ":6", ":21", ":22", ":23", ":24")
 _env_chat_disp = os.environ.get("TAEY_CHAT_DISPLAYS", "").strip()
 # :0 is Jesse's physical monitor and can never be a target, even via env override.
@@ -2116,27 +2200,299 @@ def _do_consult_chat(arguments: dict) -> str:
     return output
 
 
-def _do_linkedin_jobs(arguments: dict) -> str:
+def _linkedin_jobs_result_error(payload: dict, returncode: int) -> str | None:
+    allowed_states = {
+        "captured",
+        "already_captured",
+        "no_selected_job",
+        "postcondition_failed",
+        "technical_failure",
+    }
+    state = payload.get("state")
+    if state not in allowed_states or not isinstance(payload.get("ok"), bool):
+        return "runner returned an invalid terminal state"
+    expected_ok = state in {"captured", "already_captured"}
+    if payload["ok"] is not expected_ok or (returncode == 0) is not expected_ok:
+        return "runner result and process status disagree"
+    allowed_failure_codes_by_state = {
+        "captured": {None},
+        "already_captured": {None},
+        "no_selected_job": {"selected_job_not_exact"},
+        "postcondition_failed": {"postcondition_failed"},
+        "technical_failure": {
+            "deadline_expired",
+            "display_lock_unavailable",
+            "lock_release_indeterminate",
+            "post_observation_indeterminate",
+            "pre_observation_failed",
+            "private_input_invalid",
+            "sink_write_indeterminate",
+        },
+    }
+    failure_code = payload.get("failure_code")
+    if failure_code not in allowed_failure_codes_by_state[state]:
+        return "runner returned invalid failure_code"
+    records_observed = payload.get("records_observed")
+    if (
+        isinstance(records_observed, bool)
+        or not isinstance(records_observed, int)
+        or records_observed not in {0, 1}
+    ):
+        return "runner returned invalid records_observed"
+    records_written = payload.get("records_written")
+    if records_written is not None and (
+        isinstance(records_written, bool)
+        or not isinstance(records_written, int)
+        or records_written not in {0, 1}
+    ):
+        return "runner returned invalid records_written"
+    exact_counts = {
+        "captured": (1, 1),
+        "already_captured": (1, 0),
+        "no_selected_job": (0, 0),
+    }
+    if state in exact_counts and (
+        payload["records_observed"], payload["records_written"]
+    ) != exact_counts[state]:
+        return "runner returned counts inconsistent with its state"
+    if state == "postcondition_failed" and (
+        payload["records_observed"] != 1
+        or payload["records_written"] not in {0, 1}
+    ):
+        return "runner returned counts inconsistent with its state"
+    digest_pattern = r"[0-9a-f]{64}"
+    content_digest = payload.get("content_digest")
+    if state in {"captured", "already_captured", "postcondition_failed"}:
+        if not re.fullmatch(digest_pattern, str(content_digest or "")):
+            return "runner returned invalid content_digest"
+    elif state == "no_selected_job" and content_digest is not None:
+        return "runner returned unexpected content_digest"
+    elif state == "technical_failure" and content_digest is not None and not re.fullmatch(
+        digest_pattern, str(content_digest)
+    ):
+        return "runner returned invalid content_digest"
+    if state == "technical_failure" and not (
+        (
+            payload["records_observed"] == 0
+            and payload["records_written"] == 0
+            and content_digest is None
+            and failure_code != "sink_write_indeterminate"
+        )
+        or (
+            payload["records_observed"] == 1
+            and payload["records_written"] in {0, 1}
+            and content_digest is not None
+            and failure_code != "sink_write_indeterminate"
+        )
+        or (
+            payload["records_observed"] == 1
+            and payload["records_written"] is None
+            and content_digest is not None
+            and failure_code == "sink_write_indeterminate"
+        )
+    ):
+        return "runner returned facts inconsistent with its state"
+    return None
+
+
+def _linkedin_engagers_result_error(payload: dict, returncode: int) -> str | None:
+    allowed_failure_codes_by_state = {
+        "already_known": {None},
+        "captured": {None},
+        "no_new_signal": {None},
+        "ambiguous_signal": {"ambiguous_signal"},
+        "postcondition_failed": {"postcondition_failed"},
+        "sink_write_indeterminate": {"sink_write_indeterminate"},
+        "technical_failure": {
+            "deadline_expired",
+            "display_lock_unavailable",
+            "lock_release_indeterminate",
+            "pre_observation_failed",
+            "post_observation_indeterminate",
+            "private_input_invalid",
+            "navigation_not_exact",
+            "action_failed",
+            "restore_indeterminate",
+        },
+    }
+    state = payload.get("state")
+    if state not in allowed_failure_codes_by_state or not isinstance(payload.get("ok"), bool):
+        return "runner returned an invalid terminal state"
+    expected_ok = state in {"already_known", "captured", "no_new_signal"}
+    if payload["ok"] is not expected_ok or (returncode == 0) is not expected_ok:
+        return "runner result and process status disagree"
+    if payload.get("failure_code") not in allowed_failure_codes_by_state[state]:
+        return "runner returned invalid failure_code"
+    records_observed = payload.get("records_observed")
+    records_written = payload.get("records_written")
+    if (
+        isinstance(records_observed, bool)
+        or not isinstance(records_observed, int)
+        or records_observed < 0
+    ):
+        return "runner returned invalid records_observed"
+    if records_written is not None and (
+        isinstance(records_written, bool)
+        or not isinstance(records_written, int)
+        or records_written not in {0, 1}
+    ):
+        return "runner returned invalid records_written"
+    exact_facts = {
+        "already_known": (1, 0, True),
+        "ambiguous_signal": (0, 0, False),
+        "captured": (1, 1, True),
+        "no_new_signal": (0, 0, False),
+        "sink_write_indeterminate": (1, None, True),
+    }
+    content_digest = payload.get("content_digest")
+    digest_present = content_digest is not None
+    if digest_present and not re.fullmatch(
+        r"[0-9a-f]{64}", str(content_digest)
+    ):
+        return "runner returned invalid content_digest"
+    if state in exact_facts:
+        if (records_observed, records_written, digest_present) != exact_facts[state]:
+            return "runner returned facts inconsistent with its state"
+    elif state == "postcondition_failed":
+        if not (
+            (records_observed, records_written, content_digest) == (0, 0, None)
+            or (
+                records_observed == 1
+                and records_written in {0, 1}
+                and digest_present
+            )
+        ):
+            return "runner returned facts inconsistent with its state"
+    else:
+        before_signal = (
+            records_observed,
+            records_written,
+            content_digest,
+        ) == (0, 0, None)
+        after_signal = (
+            records_observed == 1
+            and records_written in {0, 1}
+            and digest_present
+        )
+        if not (before_signal or after_signal):
+            return "runner returned facts inconsistent with its state"
+    restore_verified = payload.get("restore_verified")
+    if not isinstance(restore_verified, bool):
+        return "runner returned invalid restore_verified"
+    if expected_ok and restore_verified is not True:
+        return "runner reported success without exact shared-tab restoration"
+    if state in {
+        "ambiguous_signal",
+        "postcondition_failed",
+        "sink_write_indeterminate",
+    } and restore_verified is not False:
+        return "runner returned invalid restore verdict for its state"
+    return None
+
+
+_LINKEDIN_JOBS_RESULT_KEYS = frozenset({
+    "ok",
+    "platform",
+    "display",
+    "state",
+    "failure_code",
+    "records_observed",
+    "records_written",
+    "content_digest",
+    "receipt_sha256",
+    "turn_lineage_sha256",
+})
+_LINKEDIN_ENGAGERS_RESULT_KEYS = frozenset({
+    *_LINKEDIN_JOBS_RESULT_KEYS,
+    "restore_verified",
+})
+_PRIVATE_TRANSACTION_TOOL_SPECS = (
+    PrivateTransactionToolSpec(
+        profile=_LINKEDIN_JOBS_TOOL_PROFILE,
+        tool="linkedin_jobs",
+        prompt_label="LinkedIn Jobs",
+        system_prompt_path=LINKEDIN_JOBS_SYSTEM_PROMPT_PATH,
+        runner_name="run_linkedin_jobs.py",
+        python_path=LINKEDIN_JOBS_PYTHON,
+        python_env_name="TAEY_LINKEDIN_JOBS_PYTHON",
+        private_root=LINKEDIN_JOBS_PRIVATE_ROOT,
+        private_root_env_name="TAEY_LINKEDIN_JOBS_PRIVATE_ROOT",
+        displays=LINKEDIN_JOBS_DISPLAYS,
+        displays_env_name="TAEY_LINKEDIN_JOBS_DISPLAYS",
+        timeout_secs=LINKEDIN_JOBS_TIMEOUT_SECS,
+        timeout_env_name="TAEY_LINKEDIN_JOBS_TIMEOUT_SECS",
+        deadline_secs=LINKEDIN_JOBS_DEADLINE_SECS,
+        claim_schema="linkedin_jobs_claim_v1",
+        terminal_reason="the one frozen LinkedIn Jobs invocation has been spent",
+        expected_result_keys=_LINKEDIN_JOBS_RESULT_KEYS,
+        validate_result=_linkedin_jobs_result_error,
+    ),
+    PrivateTransactionToolSpec(
+        profile=_LINKEDIN_ENGAGERS_TOOL_PROFILE,
+        tool="linkedin_engagers",
+        prompt_label="LinkedIn Engagers",
+        system_prompt_path=LINKEDIN_ENGAGERS_SYSTEM_PROMPT_PATH,
+        runner_name="run_linkedin_jobs.py",
+        python_path=LINKEDIN_ENGAGERS_PYTHON,
+        python_env_name="TAEY_LINKEDIN_ENGAGERS_PYTHON",
+        private_root=LINKEDIN_ENGAGERS_PRIVATE_ROOT,
+        private_root_env_name="TAEY_LINKEDIN_ENGAGERS_PRIVATE_ROOT",
+        displays=LINKEDIN_ENGAGERS_DISPLAYS,
+        displays_env_name="TAEY_LINKEDIN_ENGAGERS_DISPLAYS",
+        timeout_secs=LINKEDIN_ENGAGERS_TIMEOUT_SECS,
+        timeout_env_name="TAEY_LINKEDIN_ENGAGERS_TIMEOUT_SECS",
+        deadline_secs=LINKEDIN_ENGAGERS_DEADLINE_SECS,
+        claim_schema="linkedin_engagers_claim_v1",
+        terminal_reason="the one frozen LinkedIn Engagers invocation has been spent",
+        expected_result_keys=_LINKEDIN_ENGAGERS_RESULT_KEYS,
+        validate_result=_linkedin_engagers_result_error,
+    ),
+)
+
+
+def _private_transaction_spec_for_profile(
+    profile: str,
+) -> PrivateTransactionToolSpec | None:
+    return next(
+        (spec for spec in _PRIVATE_TRANSACTION_TOOL_SPECS if spec.profile == profile),
+        None,
+    )
+
+
+def _private_transaction_spec_for_tool(tool: str) -> PrivateTransactionToolSpec:
+    spec = next(
+        (item for item in _PRIVATE_TRANSACTION_TOOL_SPECS if item.tool == tool),
+        None,
+    )
+    if spec is None:
+        raise RuntimeError(f"private transaction tool is not registered: {tool}")
+    return spec
+
+
+def _do_private_transaction(
+    arguments: dict,
+    spec: PrivateTransactionToolSpec,
+) -> str:
     import subprocess
     import json as _json
 
     context = dict(_request_context.get())
-    if context.get("tool_profile") != _LINKEDIN_JOBS_TOOL_PROFILE:
+    if context.get("tool_profile") != spec.profile:
         return _json.dumps({
             "ok": False,
-            "error": "linkedin_jobs is available only in the linkedin-jobs tool profile",
+            "error": f"{spec.tool} is available only in the {spec.profile} tool profile",
         })
 
     profile_state = context.get("_tool_profile_state")
     if isinstance(profile_state, dict):
         profile_state["terminal"] = {
-            "tool": "linkedin_jobs",
-            "reason": "the one frozen LinkedIn Jobs invocation has been spent",
+            "tool": spec.tool,
+            "reason": spec.terminal_reason,
         }
     if not isinstance(arguments, dict):
         return _json.dumps({
             "ok": False,
-            "error": "linkedin_jobs arguments must be one JSON object",
+            "error": f"{spec.tool} arguments must be one JSON object",
         })
 
     seat_id = str(context.get("seat_id") or "")
@@ -2151,7 +2507,7 @@ def _do_linkedin_jobs(arguments: dict) -> str:
     ):
         return _json.dumps({
             "ok": False,
-            "error": "linkedin_jobs requires a validated active Taey turn context",
+            "error": f"{spec.tool} requires a validated active Taey turn context",
         })
 
     required = {"display"}
@@ -2159,48 +2515,48 @@ def _do_linkedin_jobs(arguments: dict) -> str:
         return _json.dumps({
             "ok": False,
             "error": (
-                f"linkedin_jobs requires exactly {sorted(required)}; "
+                f"{spec.tool} requires exactly {sorted(required)}; "
                 f"received {sorted(arguments)}"
             ),
         })
 
     display = str(arguments.get("display") or "").strip()
-    if not LINKEDIN_JOBS_DISPLAYS:
+    if not spec.displays:
         return _json.dumps({
             "ok": False,
             "display": display,
-            "error": "TAEY_LINKEDIN_JOBS_DISPLAYS is unset; refusing to guess a display",
+            "error": f"{spec.displays_env_name} is unset; refusing to guess a display",
         })
-    if not 130 <= LINKEDIN_JOBS_TIMEOUT_SECS <= 1800:
+    if not 130 <= spec.timeout_secs <= 1800:
         return _json.dumps({
             "ok": False,
             "display": display,
-            "error": "TAEY_LINKEDIN_JOBS_TIMEOUT_SECS must be 130-1800",
+            "error": f"{spec.timeout_env_name} must be 130-1800",
         })
     if (
         not re.fullmatch(r":[0-9]{1,3}", display)
         or display == ":0"
-        or display not in LINKEDIN_JOBS_DISPLAYS
+        or display not in spec.displays
     ):
         return _json.dumps({
             "ok": False,
             "display": display,
             "error": (
-                "linkedin_jobs display is not in the runtime-authorized "
-                "TAEY_LINKEDIN_JOBS_DISPLAYS set"
+                f"{spec.tool} display is not in the runtime-authorized "
+                f"{spec.displays_env_name} set"
             ),
         })
 
-    if not LINKEDIN_JOBS_PRIVATE_ROOT:
+    if not spec.private_root:
         return _json.dumps({
             "ok": False,
             "display": display,
             "error": (
-                "TAEY_LINKEDIN_JOBS_PRIVATE_ROOT is unset; refusing private "
+                f"{spec.private_root_env_name} is unset; refusing private "
                 "artifacts without one runtime-owned boundary"
             ),
         })
-    private_root = Path(LINKEDIN_JOBS_PRIVATE_ROOT)
+    private_root = Path(spec.private_root)
     try:
         resolved_private_root = private_root.resolve(strict=True)
         private_metadata = os.lstat(private_root)
@@ -2208,7 +2564,7 @@ def _do_linkedin_jobs(arguments: dict) -> str:
         return _json.dumps({
             "ok": False,
             "display": display,
-            "error": "TAEY_LINKEDIN_JOBS_PRIVATE_ROOT is unavailable",
+            "error": f"{spec.private_root_env_name} is unavailable",
         })
     if (
         not private_root.is_absolute()
@@ -2221,7 +2577,7 @@ def _do_linkedin_jobs(arguments: dict) -> str:
             "ok": False,
             "display": display,
             "error": (
-                "TAEY_LINKEDIN_JOBS_PRIVATE_ROOT must be an owner-controlled "
+                f"{spec.private_root_env_name} must be an owner-controlled "
                 "nonsymlink 0700 directory"
             ),
         })
@@ -2230,7 +2586,7 @@ def _do_linkedin_jobs(arguments: dict) -> str:
         return _json.dumps({
             "ok": False,
             "display": display,
-            "error": "linkedin_jobs requires a validated correlation identity",
+            "error": f"{spec.tool} requires a validated correlation identity",
         })
     lineage_payload = {
         "correlation_id": correlation_id,
@@ -2277,7 +2633,7 @@ def _do_linkedin_jobs(arguments: dict) -> str:
             return _json.dumps({
                 "ok": False,
                 "display": display,
-                "error": f"linkedin_jobs {key} parent is unavailable",
+                "error": f"{spec.tool} {key} parent is unavailable",
             })
         if (
             resolved_target != resolved_private_root
@@ -2286,7 +2642,7 @@ def _do_linkedin_jobs(arguments: dict) -> str:
             return _json.dumps({
                 "ok": False,
                 "display": display,
-                "error": f"linkedin_jobs {key} must remain beneath the private root",
+                "error": f"{spec.tool} {key} must remain beneath the private root",
             })
         if (
             not stat.S_ISDIR(parent_metadata.st_mode)
@@ -2296,20 +2652,20 @@ def _do_linkedin_jobs(arguments: dict) -> str:
             return _json.dumps({
                 "ok": False,
                 "display": display,
-                "error": f"linkedin_jobs {key} parent must be owner-controlled mode 0700",
+                "error": f"{spec.tool} {key} parent must be owner-controlled mode 0700",
             })
 
     if not transaction_path.is_file():
         return _json.dumps({
             "ok": False,
             "display": display,
-            "error": "linkedin_jobs transaction_file is missing or not a regular file",
+            "error": f"{spec.tool} transaction_file is missing or not a regular file",
         })
     if receipt_path.exists():
         return _json.dumps({
             "ok": False,
             "display": display,
-            "error": "linkedin_jobs receipt_file already exists",
+            "error": f"{spec.tool} receipt_file already exists",
         })
 
     if not TAEYS_HANDS_ROOT:
@@ -2328,29 +2684,32 @@ def _do_linkedin_jobs(arguments: dict) -> str:
             "display": display,
             "error": "TAEYS_HANDS_ROOT must be an existing absolute directory",
         })
-    runner = hands_root / "scripts" / "run_linkedin_jobs.py"
+    runner = hands_root / "scripts" / spec.runner_name
     if not runner.is_file():
         return _json.dumps({
             "ok": False,
             "display": display,
-            "error": "public taeys-hands checkout does not contain scripts/run_linkedin_jobs.py",
+            "error": (
+                "public taeys-hands checkout does not contain "
+                f"scripts/{spec.runner_name}"
+            ),
         })
-    if not LINKEDIN_JOBS_PYTHON:
+    if not spec.python_path:
         return _json.dumps({
             "ok": False,
             "display": display,
-            "error": "TAEY_LINKEDIN_JOBS_PYTHON is unset; refusing an implicit interpreter",
+            "error": f"{spec.python_env_name} is unset; refusing an implicit interpreter",
         })
-    linkedin_python = Path(LINKEDIN_JOBS_PYTHON)
+    transaction_python = Path(spec.python_path)
     if (
-        not linkedin_python.is_absolute()
-        or not linkedin_python.is_file()
-        or not os.access(linkedin_python, os.X_OK)
+        not transaction_python.is_absolute()
+        or not transaction_python.is_file()
+        or not os.access(transaction_python, os.X_OK)
     ):
         return _json.dumps({
             "ok": False,
             "display": display,
-            "error": "TAEY_LINKEDIN_JOBS_PYTHON must be an executable absolute path",
+            "error": f"{spec.python_env_name} must be an executable absolute path",
         })
 
     transaction_digest = hashlib.sha256()
@@ -2389,14 +2748,14 @@ def _do_linkedin_jobs(arguments: dict) -> str:
         return _json.dumps({
             "ok": False,
             "display": display,
-            "error": "linkedin_jobs transaction_file failed private-file validation",
+            "error": f"{spec.tool} transaction_file failed private-file validation",
         })
     expected_transaction_sha256 = transaction_digest.hexdigest()
 
     claim = {
         "correlation_id_sha256": hashlib.sha256(correlation_id.encode("utf-8")).hexdigest(),
         "event_id_sha256": hashlib.sha256(event_id.encode("utf-8")).hexdigest(),
-        "schema": "linkedin_jobs_claim_v1",
+        "schema": spec.claim_schema,
         "seat_id": seat_id,
         "transaction_sha256": expected_transaction_sha256,
         "turn_lineage_sha256": expected_turn_lineage,
@@ -2456,26 +2815,26 @@ def _do_linkedin_jobs(arguments: dict) -> str:
         return _json.dumps({
             "ok": False,
             "display": display,
-            "error": "linkedin_jobs transaction identity was already claimed",
+            "error": f"{spec.tool} transaction identity was already claimed",
         })
     if claim_status == "not_created":
         return _json.dumps({
             "ok": False,
             "display": display,
-            "error": "linkedin_jobs claim was not created; no Hands action was admitted",
+            "error": f"{spec.tool} claim was not created; no Hands action was admitted",
         })
     if claim_status != "created":
         return _json.dumps({
             "ok": False,
             "display": display,
             "error": (
-                "linkedin_jobs claim could not be finalized; treat this transaction "
+                f"{spec.tool} claim could not be finalized; treat this transaction "
                 "identity as spent and do not retry"
             ),
         })
 
     cmd = [
-        str(linkedin_python),
+        str(transaction_python),
         str(runner),
         "--display",
         display,
@@ -2496,64 +2855,52 @@ def _do_linkedin_jobs(arguments: dict) -> str:
         "--process-generation",
         process_generation,
         "--deadline-seconds",
-        str(LINKEDIN_JOBS_DEADLINE_SECS),
+        str(spec.deadline_secs),
     ]
     try:
         completed = subprocess.run(
             cmd,
             capture_output=True,
             text=True,
-            timeout=LINKEDIN_JOBS_TIMEOUT_SECS,
+            timeout=spec.timeout_secs,
             env=dict(os.environ),
         )
     except subprocess.TimeoutExpired:
-        _audit("linkedin_jobs", {"display": display, "rc": "timeout"})
+        _audit(spec.tool, {"display": display, "rc": "timeout"})
         return _json.dumps({
             "ok": False,
             "display": display,
             "error": (
-                "linkedin_jobs exceeded its configured transaction ceiling; "
+                f"{spec.tool} exceeded its configured transaction ceiling; "
                 "do not retry this transaction identity"
             ),
         })
     except Exception as exc:
         _audit(
-            "linkedin_jobs",
+            spec.tool,
             {"display": display, "rc": "launch_error", "type": type(exc).__name__},
         )
         return _json.dumps({
             "ok": False,
             "display": display,
             "error": (
-                "linkedin_jobs runner could not be launched; no raw process output "
+                f"{spec.tool} runner could not be launched; no raw process output "
                 "was admitted to model context"
             ),
         })
 
-    _audit("linkedin_jobs", {"display": display, "rc": completed.returncode})
+    _audit(spec.tool, {"display": display, "rc": completed.returncode})
     output = (completed.stdout or "").strip()
     try:
         payload = _json.loads(output) if output else None
     except _json.JSONDecodeError:
         payload = None
-    expected_result_keys = {
-        "ok",
-        "platform",
-        "display",
-        "state",
-        "failure_code",
-        "records_observed",
-        "records_written",
-        "content_digest",
-        "receipt_sha256",
-        "turn_lineage_sha256",
-    }
-    if not isinstance(payload, dict) or set(payload) != expected_result_keys:
+    if not isinstance(payload, dict) or frozenset(payload) != spec.expected_result_keys:
         return _json.dumps({
             "ok": False,
             "display": display,
             "error": (
-                "linkedin_jobs runner returned a non-contract result; raw output "
+                f"{spec.tool} runner returned a non-contract result; raw output "
                 "was withheld from the model context"
             ),
         })
@@ -2561,170 +2908,27 @@ def _do_linkedin_jobs(arguments: dict) -> str:
         return _json.dumps({
             "ok": False,
             "display": display,
-            "error": "linkedin_jobs runner result identity does not match the request",
+            "error": f"{spec.tool} runner result identity does not match the request",
         })
-    allowed_states = {
-        "captured",
-        "already_captured",
-        "no_selected_job",
-        "postcondition_failed",
-        "technical_failure",
-    }
-    state = payload.get("state")
-    if state not in allowed_states or not isinstance(payload.get("ok"), bool):
+    result_error = spec.validate_result(payload, completed.returncode)
+    if result_error is not None:
         return _json.dumps({
             "ok": False,
             "display": display,
-            "error": "linkedin_jobs runner returned an invalid terminal state",
+            "error": f"{spec.tool} {result_error}",
         })
-    expected_ok = state in {"captured", "already_captured"}
-    if payload["ok"] is not expected_ok or (completed.returncode == 0) is not expected_ok:
-        return _json.dumps({
-            "ok": False,
-            "display": display,
-            "error": "linkedin_jobs runner result and process status disagree",
-        })
-    allowed_failure_codes_by_state = {
-        "captured": {None},
-        "already_captured": {None},
-        "no_selected_job": {"selected_job_not_exact"},
-        "postcondition_failed": {"postcondition_failed"},
-        "technical_failure": {
-            "deadline_expired",
-            "display_lock_unavailable",
-            "lock_release_indeterminate",
-            "post_observation_indeterminate",
-            "pre_observation_failed",
-            "private_input_invalid",
-            "sink_write_indeterminate",
-        },
-    }
-    failure_code = payload.get("failure_code")
-    if failure_code not in allowed_failure_codes_by_state[state]:
-        return _json.dumps({
-            "ok": False,
-            "display": display,
-            "error": "linkedin_jobs runner returned invalid failure_code",
-        })
-    lineage_payload = {
-        "correlation_id": correlation_id,
-        "process_generation": process_generation,
-        "requester": seat_id,
-        "turn_id": turn_id,
-    }
-    expected_turn_lineage = hashlib.sha256(
-        _json.dumps(
-            lineage_payload,
-            allow_nan=False,
-            ensure_ascii=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode("utf-8")
-    ).hexdigest()
     if payload.get("turn_lineage_sha256") != expected_turn_lineage:
         return _json.dumps({
             "ok": False,
             "display": display,
-            "error": "linkedin_jobs runner result lineage does not match the active turn",
+            "error": f"{spec.tool} runner result lineage does not match the active turn",
         })
-    records_observed = payload.get("records_observed")
-    if (
-        isinstance(records_observed, bool)
-        or not isinstance(records_observed, int)
-        or records_observed not in {0, 1}
-    ):
-        return _json.dumps({
-            "ok": False,
-            "display": display,
-            "error": "linkedin_jobs runner returned invalid records_observed",
-        })
-    records_written = payload.get("records_written")
-    if records_written is not None and (
-        isinstance(records_written, bool)
-        or not isinstance(records_written, int)
-        or records_written not in {0, 1}
-    ):
-        return _json.dumps({
-            "ok": False,
-            "display": display,
-            "error": "linkedin_jobs runner returned invalid records_written",
-        })
-    exact_counts = {
-        "captured": (1, 1),
-        "already_captured": (1, 0),
-        "no_selected_job": (0, 0),
-    }
-    if state in exact_counts and (
-        payload["records_observed"], payload["records_written"]
-    ) != exact_counts[state]:
-        return _json.dumps({
-            "ok": False,
-            "display": display,
-            "error": "linkedin_jobs runner returned counts inconsistent with its state",
-        })
-    if state == "postcondition_failed" and (
-        payload["records_observed"] != 1
-        or payload["records_written"] not in {0, 1}
-    ):
-        return _json.dumps({
-            "ok": False,
-            "display": display,
-            "error": "linkedin_jobs runner returned counts inconsistent with its state",
-        })
-    digest_pattern = r"[0-9a-f]{64}"
-    content_digest = payload.get("content_digest")
-    if state in {"captured", "already_captured", "postcondition_failed"}:
-        if not re.fullmatch(digest_pattern, str(content_digest or "")):
-            return _json.dumps({
-                "ok": False,
-                "display": display,
-                "error": "linkedin_jobs runner returned invalid content_digest",
-            })
-    elif state == "no_selected_job" and content_digest is not None:
-        return _json.dumps({
-            "ok": False,
-            "display": display,
-            "error": "linkedin_jobs runner returned unexpected content_digest",
-        })
-    elif state == "technical_failure" and content_digest is not None and not re.fullmatch(
-        digest_pattern, str(content_digest)
-    ):
-        return _json.dumps({
-            "ok": False,
-            "display": display,
-            "error": "linkedin_jobs runner returned invalid content_digest",
-        })
-    if state == "technical_failure" and not (
-        (
-            payload["records_observed"] == 0
-            and payload["records_written"] == 0
-            and content_digest is None
-            and failure_code != "sink_write_indeterminate"
-        )
-        or (
-            payload["records_observed"] == 1
-            and payload["records_written"] in {0, 1}
-            and content_digest is not None
-            and failure_code != "sink_write_indeterminate"
-        )
-        or (
-            payload["records_observed"] == 1
-            and payload["records_written"] is None
-            and content_digest is not None
-            and failure_code == "sink_write_indeterminate"
-        )
-    ):
-        return _json.dumps({
-            "ok": False,
-            "display": display,
-            "error": "linkedin_jobs runner returned facts inconsistent with its state",
-        })
-    if not re.fullmatch(digest_pattern, str(payload.get("receipt_sha256") or "")):
+    if not re.fullmatch(r"[0-9a-f]{64}", str(payload.get("receipt_sha256") or "")):
         return _json.dumps({
             "ok": False,
             "display": display,
             "error": (
-                "linkedin_jobs runner did not return a durable terminal receipt; "
+                f"{spec.tool} runner did not return a durable terminal receipt; "
                 "raw output was withheld from the model context"
             ),
         })
@@ -2765,11 +2969,25 @@ def _do_linkedin_jobs(arguments: dict) -> str:
             "ok": False,
             "display": display,
             "error": (
-                "linkedin_jobs runner did not persist the exact claimed terminal "
+                f"{spec.tool} runner did not persist the exact claimed terminal "
                 "receipt; raw output was withheld from model context"
             ),
         })
     return _json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+
+def _do_linkedin_jobs(arguments: dict) -> str:
+    return _do_private_transaction(
+        arguments,
+        _private_transaction_spec_for_tool("linkedin_jobs"),
+    )
+
+
+def _do_linkedin_engagers(arguments: dict) -> str:
+    return _do_private_transaction(
+        arguments,
+        _private_transaction_spec_for_tool("linkedin_engagers"),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -4495,6 +4713,7 @@ async def _chat_completions_for_turn(
     liveness_registered: bool,
 ):
     body.pop("max_rounds", None)
+    one_shot_spec = _private_transaction_spec_for_profile(turn.tool_profile)
 
     # Strip model field -- let vLLM use its loaded model
     body.pop("model", None)
@@ -4518,14 +4737,17 @@ async def _chat_completions_for_turn(
             {"role": "system", "content": _consult_chat_system_prompt},
             *messages,
         ]
-    elif turn.tool_profile == _LINKEDIN_JOBS_TOOL_PROFILE:
+    elif one_shot_spec is not None:
         messages = [
             message
             for message in body.get("messages", [])
             if message.get("role") != "system"
         ]
         body["messages"] = [
-            {"role": "system", "content": _linkedin_jobs_system_prompt},
+            {
+                "role": "system",
+                "content": _one_shot_system_prompts[one_shot_spec.profile],
+            },
             *messages,
         ]
     else:
@@ -4598,14 +4820,15 @@ async def _chat_completions_for_turn(
             choice = (payload.get("choices") or [{}])[0]
             message = choice.get("message", {}) or {}
             tool_calls = message.get("tool_calls") or []
-            if turn.tool_profile == _LINKEDIN_JOBS_TOOL_PROFILE and (
+            if one_shot_spec is not None and (
                 len(tool_calls) != 1
-                or (tool_calls[0].get("function") or {}).get("name") != "linkedin_jobs"
+                or (tool_calls[0].get("function") or {}).get("name")
+                != one_shot_spec.tool
             ):
                 raise HTTPException(
                     status_code=502,
                     detail={
-                        "error": "linkedin_jobs_one_shot_tool_call_required",
+                        "error": f"{one_shot_spec.tool}_one_shot_tool_call_required",
                         "turn_id": turn.turn_id,
                     },
                 )
@@ -4671,7 +4894,7 @@ async def _chat_completions_for_turn(
             rounds += 1
             log.info("Stream tool calls (round %d): %s", rounds,
                      [tc.get("function", {}).get("name") for tc in tool_calls])
-            if turn.tool_profile == _LINKEDIN_JOBS_TOOL_PROFILE:
+            if one_shot_spec is not None:
                 tc = tool_calls[0]
                 func = tc.get("function", {}) or {}
                 raw_args = func.get("arguments", {})
@@ -4683,7 +4906,7 @@ async def _chat_completions_for_turn(
                     except json.JSONDecodeError:
                         arguments = {}
                 resolved_answer = await execute_tool_call_async(
-                    "linkedin_jobs",
+                    one_shot_spec.tool,
                     arguments,
                     tool_call_id=tc.get("id", ""),
                     round_num=rounds,
@@ -4692,7 +4915,7 @@ async def _chat_completions_for_turn(
                     raise HTTPException(
                         status_code=502,
                         detail={
-                            "error": "linkedin_jobs_terminal_result_missing",
+                            "error": f"{one_shot_spec.tool}_terminal_result_missing",
                             "turn_id": turn.turn_id,
                         },
                     )
@@ -4845,20 +5068,21 @@ async def _chat_completions_for_turn(
                 finish_reason = choice.get("finish_reason", "")
                 tool_calls = message.get("tool_calls", [])
 
-                if turn.tool_profile == _LINKEDIN_JOBS_TOOL_PROFILE and (
+                if one_shot_spec is not None and (
                     len(tool_calls) != 1
-                    or (tool_calls[0].get("function") or {}).get("name") != "linkedin_jobs"
+                    or (tool_calls[0].get("function") or {}).get("name")
+                    != one_shot_spec.tool
                 ):
                     raise HTTPException(
                         status_code=502,
                         detail={
-                            "error": "linkedin_jobs_one_shot_tool_call_required",
+                            "error": f"{one_shot_spec.tool}_one_shot_tool_call_required",
                             "turn_id": turn.turn_id,
                         },
                     )
 
                 if not tool_calls or (
-                    turn.tool_profile != _LINKEDIN_JOBS_TOOL_PROFILE
+                    one_shot_spec is None
                     and finish_reason != "tool_calls"
                 ):
                     # No tool calls -- final response. If a schema was held aside for the tool
@@ -4874,7 +5098,7 @@ async def _chat_completions_for_turn(
                          round_num,
                          [tc.get("function", {}).get("name") for tc in tool_calls])
 
-                if turn.tool_profile == _LINKEDIN_JOBS_TOOL_PROFILE:
+                if one_shot_spec is not None:
                     tc = tool_calls[0]
                     func = tc.get("function", {}) or {}
                     raw_args = func.get("arguments", {})
@@ -4886,7 +5110,7 @@ async def _chat_completions_for_turn(
                         except json.JSONDecodeError:
                             arguments = {}
                     tool_result = await execute_tool_call_async(
-                        "linkedin_jobs",
+                        one_shot_spec.tool,
                         arguments,
                         tool_call_id=tc.get("id", ""),
                         round_num=round_num,
@@ -4895,7 +5119,7 @@ async def _chat_completions_for_turn(
                         raise HTTPException(
                             status_code=502,
                             detail={
-                                "error": "linkedin_jobs_terminal_result_missing",
+                                "error": f"{one_shot_spec.tool}_terminal_result_missing",
                                 "turn_id": turn.turn_id,
                             },
                         )
