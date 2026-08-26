@@ -414,11 +414,15 @@ For other model families, set the parsers your model expects.
 | `TAEY_TURN_LEASE_SECS` | `120` | active-turn lease; expiry is archived as an abandoned turn |
 | `TAEY_TURN_HEARTBEAT_SECS` | `30` | lease-renewal interval, capped at one-third of the lease |
 | `TAEY_DRIVE_CHAT_CAPTURE_ROOT` | *(empty → `drive_chat` refused)* | private write-once evidence root; required before any UI action |
-| `TAEYS_HANDS_ROOT` | *(empty → `linkedin_jobs` refused)* | absolute path to a committed public `palios-taey/taeys-hands` checkout |
+| `TAEYS_HANDS_ROOT` | *(empty → LinkedIn tools refused)* | absolute path to a committed public `palios-taey/taeys-hands` checkout |
 | `TAEY_LINKEDIN_JOBS_PYTHON` | *(empty → `linkedin_jobs` refused)* | explicit Python interpreter with the public Hands runtime and AT-SPI dependencies |
 | `TAEY_LINKEDIN_JOBS_PRIVATE_ROOT` | *(empty → `linkedin_jobs` refused)* | owner-controlled nonsymlink `0700` root for the manifest, permanent claim, receipt, and raw sink |
 | `TAEY_LINKEDIN_JOBS_DISPLAYS` | *(empty → `linkedin_jobs` refused)* | comma-separated runtime-authorized LinkedIn displays; `:0` is always refused |
 | `TAEY_LINKEDIN_JOBS_TIMEOUT_SECS` | `1800` | outer watchdog; the Hands-owned deadline is exactly 100 seconds earlier and must finish receipt/lock cleanup first |
+| `TAEY_LINKEDIN_ENGAGERS_PYTHON` | *(empty → `linkedin_engagers` refused)* | explicit Python interpreter with the public Hands runtime and AT-SPI dependencies |
+| `TAEY_LINKEDIN_ENGAGERS_PRIVATE_ROOT` | *(empty → `linkedin_engagers` refused)* | separate owner-controlled nonsymlink `0700` root for its transaction, permanent claim, receipt, and raw sink |
+| `TAEY_LINKEDIN_ENGAGERS_DISPLAYS` | *(empty → `linkedin_engagers` refused)* | comma-separated runtime-authorized LinkedIn displays; `:0` is always refused |
+| `TAEY_LINKEDIN_ENGAGERS_TIMEOUT_SECS` | `1800` | outer watchdog; the Hands-owned deadline is exactly 100 seconds earlier and must finish receipt/lock cleanup first |
 
 Create `TAEY_DRIVE_CHAT_CAPTURE_ROOT` as the proxy service user with mode `0700`
 and set the same absolute, non-symlink path in every proxy that exposes
@@ -478,6 +482,29 @@ curl --fail-with-body --silent --show-error \
 Change only the served model ID, runtime-authorized display, seat, event, and
 correlation identities. Never reuse an identity whose receipt path already
 exists, and never retry a terminal identity.
+
+The `linkedin-engagers` profile follows the same one-shot private-transaction
+boundary through its own immutable registry entry and separate private root. It
+exposes only `linkedin_engagers`, whose sole argument is the runtime-authorized
+display, and invokes the public Hands `scripts/run_linkedin_jobs.py` runner. The
+immutable private manifest selects the engagement operation; Presence neither
+accepts nor interprets an operation field.
+Presence derives the transaction, permanent claim, and receipt paths from the
+validated seat and correlation identity; account, post, deduplication, sink, and
+engager data remain outside model context. Its exact terminal result keys are
+`ok`, `platform`, `display`, `state`, `failure_code`, `records_observed`,
+`records_written`, `content_digest`, `receipt_sha256`, `turn_lineage_sha256`, and
+`restore_verified`. Successful `captured`, `already_known`, and `no_new_signal`
+results require the runner to prove that it restored the exact original
+shared-tab URL. The other terminal states are `ambiguous_signal`,
+`technical_failure`, `postcondition_failed`, and `sink_write_indeterminate`;
+none authorizes a retry of the spent transaction identity.
+
+Before promoting a Presence change to either LinkedIn lane, run
+`python3 serving/validate_linkedin_jobs_equivalence.py`. It compares the Jobs
+profile, prompt, environment bindings, runner arguments, claim, compact result,
+error behavior, and streaming/non-streaming one-shot path against the frozen
+public baseline while validating the Engagers registry and result contract.
 
 The durable seat has no fixed elapsed-time deadline for a complete proxy turn.
 `VLLM_REQUEST_TIMEOUT_SECS` applies to one upstream inference request, while the
