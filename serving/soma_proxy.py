@@ -3636,6 +3636,7 @@ def _do_linkedin_application_intake(arguments: dict) -> str:
 
     command = [
         str(connector_python),
+        "-P",
         "-m",
         spec.runner_name,
         "--private-root",

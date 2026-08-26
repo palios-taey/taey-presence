@@ -497,6 +497,15 @@ def main() -> int:
         package_root.mkdir(parents=True)
         (package_root / "__init__.py").write_text("", encoding="utf-8")
         (package_root / "cli.py").write_text(FAKE_CONNECTOR, encoding="utf-8")
+        shadow_marker = root / "root-shadow-executed"
+        shadow_root = public_root / "taey_apply"
+        shadow_root.mkdir()
+        (shadow_root / "__init__.py").write_text("", encoding="utf-8")
+        (shadow_root / "cli.py").write_text(
+            "from pathlib import Path\n"
+            f"Path({str(shadow_marker)!r}).touch()\n",
+            encoding="utf-8",
+        )
         private_root = root / "private"
         seat = "intake-validator-seat"
         prepare_private_root(private_root, seat)
@@ -526,6 +535,7 @@ def main() -> int:
             else:
                 os.environ["TAEY_APPLY_VALIDATOR_MARKER"] = prior_marker
         assert marker.is_file()
+        assert not shadow_marker.exists()
 
     print(json.dumps({
         "claim_mode": "0400",
@@ -533,6 +543,7 @@ def main() -> int:
         "receipt_mode": "0400",
         "result_keys": sorted(RESULT_KEYS),
         "strict_argument_cases": 12,
+        "root_shadow_isolated": True,
         "status": "PASS",
         "tool_arguments": {},
     }, sort_keys=True, separators=(",", ":")))
