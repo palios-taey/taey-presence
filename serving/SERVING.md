@@ -427,6 +427,11 @@ For other model families, set the parsers your model expects.
 | `TAEY_LINKEDIN_ENGAGERS_PRIVATE_ROOT` | *(empty → `linkedin_engagers` refused)* | separate owner-controlled nonsymlink `0700` root for its transaction, permanent claim, receipt, and raw sink |
 | `TAEY_LINKEDIN_ENGAGERS_DISPLAYS` | *(empty → `linkedin_engagers` refused)* | comma-separated runtime-authorized LinkedIn displays; `:0` is always refused |
 | `TAEY_LINKEDIN_ENGAGERS_TIMEOUT_SECS` | `1800` | outer watchdog; the Hands-owned deadline is exactly 100 seconds earlier and must finish receipt/lock cleanup first |
+| `TAEY_APPLY_PYTHON` | *(empty → `linkedin_application_intake` refused)* | explicit Python interpreter used to invoke the public connector module |
+| `TAEY_APPLY_PUBLIC_ROOT` | *(empty → `linkedin_application_intake` refused)* | canonical absolute checkout of public `palios-taey/taey-apply`; its `src` is the connector's sole `PYTHONPATH` |
+| `TAEY_APPLY_PRIVATE_ROOT` | *(empty → `linkedin_application_intake` refused)* | owner-controlled nonsymlink `0700` root for immutable transactions, permanent claims, source captures, and terminal receipts |
+| `TAEY_APPLY_DB` | *(empty → `linkedin_application_intake` refused)* | existing owner-controlled nonsymlink `0600` jobs database; Presence never creates or migrates it |
+| `TAEY_APPLY_TIMEOUT_SECS` | *(empty → `linkedin_application_intake` refused)* | explicit one-shot outer watchdog in the inclusive range 1-600 seconds |
 
 Create `TAEY_DRIVE_CHAT_CAPTURE_ROOT` as the proxy service user with mode `0700`
 and set the same absolute, non-symlink path in every proxy that exposes
@@ -533,6 +538,40 @@ Before promoting a Presence change to either LinkedIn lane, run
 profile, prompt, environment bindings, runner arguments, claim, compact result,
 error behavior, and streaming/non-streaming one-shot path against the frozen
 public baseline while validating the Engagers registry and result contract.
+
+The `linkedin-application-intake` profile exposes only
+`linkedin_application_intake`, whose argument schema is the empty object. The
+model cannot supply a display, path, job value, policy, score, ATS target, or
+application instruction. Presence derives
+`transactions/SEAT/CORRELATION.json`, `claims/SEAT/CORRELATION.json`, and
+`receipts/SEAT/CORRELATION.json` beneath the configured private root. It requires
+the canonical transaction to be an owner-owned `0400` regular file and the
+receipt to be absent, then permanently claims the identity with `O_EXCL`, fsync,
+and final mode `0400`. The claim is never removed, including on timeout or launch
+failure.
+
+After the claim, Presence invokes the public connector exactly once as
+`python -m taey_apply.cli`, with `PYTHONPATH` set only to
+`TAEY_APPLY_PUBLIC_ROOT/src`. The parent supplies the claimed transaction digest,
+private root, `0600` database, receipt destination, requester, turn,
+correlation, and process generation. Presence exposes the connector's compact
+terminal JSON only after its exact schema, state, counts, digests, active-turn
+lineage, and the immutable `0400` receipt SHA-256 all match. It takes no display
+lease and imports neither Hands nor application policy. Run
+`python3 serving/validate_linkedin_application_intake_profile.py` before review;
+the gate uses generated sanitized state and performs no real capture or
+production database write.
+
+```bash
+curl --fail-with-body --silent --show-error \
+  -H 'Content-Type: application/json' \
+  -H 'X-Taey-Seat-Id: taey-revenue-1' \
+  -H 'X-Taey-Event-Id: linkedin-intake-001' \
+  -H 'X-Taey-Correlation-Id: linkedin-intake-001' \
+  -H 'X-Taey-Tool-Profile: linkedin-application-intake' \
+  --data-binary '{"model":"SERVED_MODEL_ID","stream":false,"messages":[{"role":"user","content":"Execute the frozen LinkedIn application-intake transaction."}]}' \
+  http://127.0.0.1:8765/v1/chat/completions
+```
 
 The durable seat has no fixed elapsed-time deadline for a complete proxy turn.
 `VLLM_REQUEST_TIMEOUT_SECS` applies to one upstream inference request, while the
