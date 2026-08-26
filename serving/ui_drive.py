@@ -1778,28 +1778,57 @@ def _navigate_fresh(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str
             f"{deps.platform}: navigate accepts only the exact YAML urls.fresh "
             f"value {fresh_url!r}"
         )
-    before = _snapshot(deps)
-    before_revision = _snapshot_revision(before)
     runtime = ConsultationRuntime(deps.platform)
     if not runtime.navigate(fresh_url, verify_change=True):
+        evidence = getattr(runtime, "last_navigation_evidence", None)
         raise UiDriveError(
-            f"{deps.platform}: verified navigation to YAML urls.fresh failed"
+            f"{deps.platform}: verified navigation to YAML urls.fresh failed: "
+            + json.dumps(
+                evidence,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
         )
-    after = _snapshot(deps)
-    mapped_count = sum(len(items) for items in (after.mapped or {}).values())
-    if int(after.raw_count or 0) < 1 or mapped_count < 1:
+    evidence = getattr(runtime, "last_navigation_evidence", None)
+    if not isinstance(evidence, dict):
         raise UiDriveError(
-            f"{deps.platform}: navigation reached no populated canonical tree"
+            f"{deps.platform}: verified navigation returned no evidence receipt"
+        )
+    current_url = evidence.get("current_url")
+    raw_count = evidence.get("raw_count")
+    mapped_count = evidence.get("mapped_count")
+    evidence_valid = (
+        evidence.get("result") == "PASS"
+        and evidence.get("verify_change") is True
+        and evidence.get("target_url") == fresh_url
+        and isinstance(current_url, str)
+        and bool(current_url.strip())
+        and isinstance(raw_count, int)
+        and not isinstance(raw_count, bool)
+        and raw_count > 0
+        and isinstance(mapped_count, int)
+        and not isinstance(mapped_count, bool)
+        and mapped_count > 0
+    )
+    if not evidence_valid:
+        raise UiDriveError(
+            f"{deps.platform}: navigation evidence failed its exact postcondition: "
+            + json.dumps(
+                evidence,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
         )
     return {
         "navigated": True,
-        "target_url": fresh_url,
-        "current_url": after.url,
-        "before_snapshot_revision": before_revision,
-        "after_snapshot_revision": _snapshot_revision(after),
-        "after_raw_count": int(after.raw_count or 0),
+        "target_url": evidence["target_url"],
+        "current_url": current_url,
+        "after_raw_count": raw_count,
         "after_mapped_count": mapped_count,
         "tree_ready": True,
+        "navigation_evidence": evidence,
     }
 
 
