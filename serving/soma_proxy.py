@@ -4769,6 +4769,7 @@ def _do_ui_action(arguments: dict) -> str:
 
     ref = ""
     consumed_revision = ""
+    expected_primitive = ""
     if action == "activate":
         observed = observations.pop(display, None)
         if not isinstance(observed, dict):
@@ -4794,6 +4795,14 @@ def _do_ui_action(arguments: dict) -> str:
         if not isinstance(ref, str) or not ref:
             return terminal_refusal(
                 f"preceding observe did not map exactly one canonical {element!r} target"
+            )
+        primitives = observed.get("canonical_primitives")
+        expected_primitive = (
+            primitives.get(element) if isinstance(primitives, dict) else None
+        )
+        if expected_primitive not in {"activate", "mapped_pointer_activate"}:
+            return terminal_refusal(
+                "preceding observe did not bind one supported YAML page primitive"
             )
         consumed_revision = str(observed.get("snapshot_revision") or "")
         if not re.fullmatch(r"[0-9a-f]{64}", consumed_revision):
@@ -4889,30 +4898,50 @@ def _do_ui_action(arguments: dict) -> str:
                 "ui_action observe returned no valid revision-bound mapped list"
             )
         refs_by_element: dict[str, list[str]] = {}
+        primitives_by_element: dict[str, list[str]] = {}
         for item in mapped:
             if not isinstance(item, dict):
                 continue
             element = item.get("element")
             item_ref = item.get("ref")
             declared = item.get("declared_operation")
+            declared_method = (
+                declared.get("method") if isinstance(declared, dict) else None
+            )
             if (
                 isinstance(element, str)
                 and isinstance(item_ref, str)
                 and isinstance(declared, dict)
                 and declared.get("effect_class") == "page"
-                and declared.get("allowed_now") == ["activate"]
+                and declared_method in {"activate", "mapped_pointer_activate"}
+                and declared.get("primitives") == [declared_method]
+                and declared.get("allowed_now") == [declared_method]
             ):
                 refs_by_element.setdefault(element, []).append(item_ref)
+                primitives_by_element.setdefault(element, []).append(
+                    declared_method
+                )
         canonical_refs = {
             element: refs[0]
             for element, refs in refs_by_element.items()
             if len(refs) == 1
+        }
+        canonical_primitives = {
+            element: primitives_by_element[element][0]
+            for element in canonical_refs
+            if len(primitives_by_element.get(element) or []) == 1
+        }
+        canonical_refs = {
+            element: ref
+            for element, ref in canonical_refs.items()
+            if element in canonical_primitives
         }
         observations[display] = {
             "platform": platform,
             "snapshot_revision": revision,
             "tool_round": tool_round,
             "canonical_refs": canonical_refs,
+            "canonical_primitives": canonical_primitives,
         }
         payload["ui_sequence"] = {
             "state": "observed",
@@ -4926,7 +4955,7 @@ def _do_ui_action(arguments: dict) -> str:
     postcondition = result.get("post_action_observation")
     if (
         result.get("performed") is not True
-        or result.get("performed_primitive") != "activate"
+        or result.get("performed_primitive") != expected_primitive
         or result.get("effect_class") != "page"
         or result.get("observe_required_before_next_mutation") is not True
         or not isinstance(postcondition, dict)

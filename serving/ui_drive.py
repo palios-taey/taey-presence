@@ -1074,12 +1074,16 @@ def _observe_revenue(
             element_key,
             selected,
         )
+        declared_method = (
+            declared.get("method") if isinstance(declared, dict) else None
+        )
         if not isinstance(declared, dict):
             continue
         if (
             declared.get("effect_class") != "page"
-            or declared.get("primitives") != ["activate"]
-            or declared.get("allowed_now") != ["activate"]
+            or declared_method not in {"activate", "mapped_pointer_activate"}
+            or declared.get("primitives") != [declared_method]
+            or declared.get("allowed_now") != [declared_method]
         ):
             continue
         ref = _encode_ref(
@@ -1186,17 +1190,25 @@ def _revenue_activate(
         row["element"],
         row,
     )
+    declared_method = (
+        declared.get("method") if isinstance(declared, dict) else None
+    )
     if not isinstance(declared, dict) or (
-        declared.get("method") != "activate"
+        declared_method not in {"activate", "mapped_pointer_activate"}
         or declared.get("effect_class") != "page"
-        or declared.get("primitives") != ["activate"]
-        or declared.get("allowed_now") != ["activate"]
+        or declared.get("primitives") != [declared_method]
+        or declared.get("allowed_now") != [declared_method]
     ):
         raise UiDriveError(
             f"{row['element']} is not currently authorized for one page-bound activate"
         )
-    if not deps.interact.atspi_activate(row):
-        raise UiDriveError("activate primitive returned false")
+    operation_evidence = None
+    if declared_method == "activate":
+        if not deps.interact.atspi_activate(row):
+            raise UiDriveError("activate primitive returned false")
+    else:
+        pointer_receipt = _mapped_pointer_activate_operation(row, declared, deps)
+        operation_evidence = pointer_receipt.get("operation_evidence")
     manual = _manual_ui_module(deps.platform)
     stable_observation = (
         getattr(manual, "stable_post_action_observation", None)
@@ -1236,7 +1248,8 @@ def _revenue_activate(
         )
     return {
         "performed": True,
-        "performed_primitive": "activate",
+        "performed_primitive": declared_method,
+        "performed_operation": declared_method,
         "effect_class": "page",
         "element": {
             "category": "mapped",
@@ -1256,6 +1269,11 @@ def _revenue_activate(
             **postcondition,
         },
         "observe_required_before_next_mutation": True,
+        **(
+            {"operation_evidence": operation_evidence}
+            if operation_evidence is not None
+            else {}
+        ),
     }
 
 
