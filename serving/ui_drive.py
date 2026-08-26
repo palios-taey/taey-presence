@@ -1079,9 +1079,13 @@ def _observe_revenue(
         )
         if not isinstance(declared, dict):
             continue
+        declared_effect = declared.get("effect_class")
         if (
-            declared.get("effect_class") != "page"
-            or declared_method not in {"activate", "mapped_pointer_activate"}
+            (declared_method, declared_effect) not in {
+                ("activate", "page"),
+                ("mapped_pointer_activate", "page"),
+                ("scroll_into_view", "viewport"),
+            }
             or declared.get("primitives") != [declared_method]
             or declared.get("allowed_now") != [declared_method]
         ):
@@ -1505,6 +1509,107 @@ def _mapped_pointer_activate_operation(
     }
 
 
+def _revenue_scroll_into_view(
+    args: argparse.Namespace,
+    deps: SimpleNamespace,
+) -> dict[str, Any]:
+    row, _observed_snapshot = _resolve_revenue_target(args, deps)
+    declared = _revenue_declared_operation(
+        deps.platform,
+        row["element"],
+        row,
+    )
+    if not isinstance(declared, dict) or (
+        declared.get("method") != "scroll_into_view"
+        or declared.get("effect_class") != "viewport"
+        or declared.get("primitives") != ["scroll_into_view"]
+        or declared.get("allowed_now") != ["scroll_into_view"]
+    ):
+        raise UiDriveError(
+            f"{row['element']} is not currently authorized for one viewport scroll"
+        )
+
+    runtime = ConsultationRuntime(deps.platform)
+    element = ElementRef(
+        key=str(row["element"]),
+        name=str(row.get("name") or ""),
+        role=str(row.get("role") or ""),
+        x=None,
+        y=None,
+        states=list(row.get("states") or []),
+        text=row.get("text"),
+        description=row.get("description"),
+        atspi_obj=row.get("atspi_obj"),
+        raw={},
+    )
+    if not runtime.scroll_element_into_view(element):
+        raise UiDriveError(
+            f"{row['element']} scroll_into_view primitive returned false"
+        )
+
+    manual = _manual_ui_module(deps.platform)
+    stable_observation = (
+        getattr(manual, "stable_scroll_post_action_observation", None)
+        if manual is not None
+        else None
+    )
+    if not callable(stable_observation):
+        raise UiDriveError(
+            f"{deps.platform} has no public stable scroll post-action observation hook"
+        )
+    try:
+        post_snapshot, barrier_receipt = stable_observation(
+            row["element"],
+            time.monotonic() + LOCK_TTL_DEFAULT,
+        )
+    except Exception as exc:
+        raise UiDriveError(
+            f"{deps.platform} scroll observation barrier failed: {exc}"
+        ) from exc
+    postcondition = (
+        barrier_receipt.get("postcondition_receipt")
+        if isinstance(barrier_receipt, dict)
+        else None
+    )
+    if (
+        post_snapshot is None
+        or not isinstance(barrier_receipt, dict)
+        or barrier_receipt.get("result") != "PASS"
+        or not isinstance(postcondition, dict)
+        or postcondition.get("element_key") != row["element"]
+        or postcondition.get("operation") != "scroll_into_view"
+        or postcondition.get("effect_class") != "viewport"
+        or postcondition.get("route_exact") is not True
+        or postcondition.get("element_key_exact") is not True
+        or postcondition.get("activity_exact") is not True
+        or postcondition.get("body_sha256_exact") is not True
+        or postcondition.get("live_extent_in_viewport") is not True
+    ):
+        raise UiDriveError(
+            f"{deps.platform} scroll observation barrier did not prove the "
+            "same exact in-viewport element"
+        )
+    return {
+        "performed": True,
+        "performed_primitive": "scroll_into_view",
+        "performed_operation": "scroll_into_view",
+        "effect_class": "viewport",
+        "element": {
+            "category": "mapped",
+            "element": row["element"],
+            "name": str(row.get("name") or ""),
+            "role": str(row.get("role") or ""),
+            "states": list(row.get("states") or []),
+            "ref": row["ref"],
+        },
+        "post_action_observation": {
+            **postcondition,
+            "barrier": barrier_receipt,
+        },
+        "observe_required_before_next_mutation": True,
+    }
+
+
 def _focus_and_key_open_operation(
     row: dict[str, Any],
     declared: dict[str, Any],
@@ -1920,6 +2025,10 @@ def _parser() -> argparse.ArgumentParser:
     _add_display(revenue_activate)
     _add_target(revenue_activate)
 
+    revenue_scroll = commands.add_parser("ui-scroll-into-view")
+    _add_display(revenue_scroll)
+    _add_target(revenue_scroll)
+
     for action in ("click", "focus", "activate", "hover", "operate"):
         target = commands.add_parser(action)
         _add_display(target)
@@ -1991,6 +2100,7 @@ def _parser() -> argparse.ArgumentParser:
 _LOCK_ACTION_OPS = {
     "click", "focus", "activate", "hover", "operate", "type", "paste", "key", "navigate",
     "focus-dialog", "read-clipboard", "extract", "scroll_to_bottom", "ui-activate",
+    "ui-scroll-into-view",
 }
 
 
@@ -2227,6 +2337,8 @@ def _dispatch(args: argparse.Namespace, deps: SimpleNamespace) -> Any:
         result = _scroll_to_bottom_action(args, deps)
     elif args.action == "ui-activate":
         result = _revenue_activate(args, deps)
+    elif args.action == "ui-scroll-into-view":
+        result = _revenue_scroll_into_view(args, deps)
     elif args.action in {"click", "focus", "activate", "hover", "operate"}:
         result = _element_action(args.action, args, deps)
     elif args.action == "type":

@@ -5,8 +5,14 @@ Tools: ui_action only.
 For the requested visible transition:
 1. Call ui_action with action="observe" on the assigned display.
 2. Choose exactly one mapped element returned by that fresh observation.
-3. In a later tool round, call ui_action once with action="activate" and that exact element key.
+3. Read that element's exact declared_operation.method. In a later tool round, call ui_action once with the
+   exact element key: use action="scroll_into_view" only for method scroll_into_view; use action="activate"
+   only for method activate or mapped_pointer_activate.
 4. Call observe again. Confirm the requested visible state, then stop.
+
+If the declared action is scroll_into_view, its receipt must prove the same exact element is in the viewport.
+Observe again before any activation. Only activate when that fresh observation declares activate for the same
+exact element key.
 
 One call is one action. Never perform or request a screen sequence.
 
