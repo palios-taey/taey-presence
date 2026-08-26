@@ -1064,6 +1064,8 @@ def _observe_revenue(
     revision = _snapshot_revision(snapshot, scope="base")
     cfg = _revenue_platform_config(deps.platform)
     mapped: list[dict[str, Any]] = []
+    actionable_count = 0
+    observation_count = 0
     for element_key in sorted(snapshot.mapped):
         items = list(snapshot.mapped.get(element_key) or [])
         selected, pick = _selected_mapped_item(cfg, element_key, items)
@@ -1076,25 +1078,36 @@ def _observe_revenue(
         )
         if not isinstance(declared, dict):
             continue
-        if (
-            declared.get("effect_class") != "page"
-            or declared.get("primitives") != ["activate"]
-            or declared.get("allowed_now") != ["activate"]
-        ):
-            continue
-        ref = _encode_ref(
-            display=deps.display,
-            platform=deps.platform,
-            scope="base",
-            revision=revision,
-            element=element_key,
-            current_url=snapshot.url,
-            target_sha256=_target_fingerprint(
-                selected,
-                match_count=len(items),
-            ),
-            pick=pick,
+        observation_only = (
+            declared.get("effect_class") == "observation"
+            and declared.get("primitives") == []
+            and declared.get("allowed_now") == []
         )
+        actionable = (
+            declared.get("effect_class") == "page"
+            and declared.get("primitives") == ["activate"]
+            and declared.get("allowed_now") == ["activate"]
+        )
+        if not observation_only and not actionable:
+            continue
+        ref = None
+        if actionable:
+            ref = _encode_ref(
+                display=deps.display,
+                platform=deps.platform,
+                scope="base",
+                revision=revision,
+                element=element_key,
+                current_url=snapshot.url,
+                target_sha256=_target_fingerprint(
+                    selected,
+                    match_count=len(items),
+                ),
+                pick=pick,
+            )
+            actionable_count += 1
+        else:
+            observation_count += 1
         public_item = _public_element(
             selected,
             category="mapped",
@@ -1111,7 +1124,11 @@ def _observe_revenue(
         "snapshot_revision": revision,
         "current_url": snapshot.url,
         "raw_count": snapshot.raw_count,
-        "counts": {"mapped": len(mapped)},
+        "counts": {
+            "mapped": len(mapped),
+            "actionable": actionable_count,
+            "observation": observation_count,
+        },
         "mapped": mapped,
     }
 
