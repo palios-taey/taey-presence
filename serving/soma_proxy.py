@@ -2527,7 +2527,13 @@ def _validate_send_phase_card(
         if next_phase is not None:
             raise ValueError("Hands observe card cannot declare a next phase")
     elif allowed_action == "key":
-        if allowed != {"action": "key", "key": "space"}:
+        key = allowed.get("key")
+        if (
+            set(allowed) != {"action", "key"}
+            or not isinstance(key, str)
+            or not key
+            or key != key.strip()
+        ):
             raise ValueError("Hands key card is not exact")
         if not isinstance(next_phase, str) or not re.fullmatch(
             r"[a-z][a-z0-9_]{0,63}", next_phase
