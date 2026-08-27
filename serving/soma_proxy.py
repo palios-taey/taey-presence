@@ -1716,7 +1716,19 @@ def _tools_for_profile(profile: str) -> list[dict]:
         properties = parameters["properties"]
         properties["display"]["enum"] = [":4", ":22"]
         properties["action"]["enum"] = ["observe", "key", "click"]
+        properties["action"]["description"] = (
+            "issue only the action named by ui_sequence.allowed_next"
+        )
         properties["scope"]["enum"] = ["base"]
+        properties["scope"]["description"] = (
+            "observe only; use the exact scope in ui_sequence.allowed_next"
+        )
+        properties["key"]["description"] = (
+            "key only; use the exact key in ui_sequence.allowed_next"
+        )
+        properties["element"]["description"] = (
+            "click only; use the exact element in ui_sequence.allowed_next"
+        )
         parameters["properties"] = {
             key: properties[key]
             for key in ("display", "action", "scope", "key", "element")
