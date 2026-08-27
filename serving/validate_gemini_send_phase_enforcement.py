@@ -74,12 +74,13 @@ def _observe_result(
     *,
     platform: str,
     mapped: list[dict[str, object]],
+    scope: str = "base",
     allowed_next: object = ...,
 ) -> SimpleNamespace:
     result: dict[str, object] = {
         "snapshot_revision": REVISION,
         "surface": "browser",
-        "scope": "base",
+        "scope": scope,
         "mapped": mapped,
         "key_preconditions": {},
     }
@@ -141,6 +142,35 @@ def main() -> int:
     assert properties["action"]["enum"] == ["observe", "key", "click"]
     assert properties["scope"]["enum"] == ["base"]
     assert "output_file" not in properties
+
+    dormant_menu = _context()
+    menu_observed, menu_command, menu_monitor_calls = _run_with_context(
+        dormant_menu,
+        {"display": ":4", "action": "observe", "scope": "menu_snapshot"},
+        _observe_result(platform="gemini", mapped=[], scope="menu_snapshot"),
+    )
+    assert menu_observed["ok"] is True
+    assert menu_observed["ui_sequence"]["snapshot_scope"] == "menu_snapshot"
+    assert menu_monitor_calls == 1
+    assert "--send-phase" not in menu_command
+    assert dormant_menu["_ui_sequence"]["send_phase"] == {
+        "active": False,
+        "phase": "awaiting_initial_send",
+        "card": None,
+    }
+
+    active_menu = _context(active=True)
+    active_menu_refused, active_menu_command, active_menu_monitor_calls = (
+        _run_with_context(
+            active_menu,
+            {"display": ":4", "action": "observe", "scope": "menu_snapshot"},
+            _observe_result(platform="gemini", mapped=[], scope="menu_snapshot"),
+        )
+    )
+    assert active_menu_refused["ok"] is False
+    assert "does not exactly match" in active_menu_refused["error"]
+    assert active_menu_command == []
+    assert active_menu_monitor_calls == 0
 
     initial = _context()
     ready_initial = _card(

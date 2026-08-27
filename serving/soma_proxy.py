@@ -5771,6 +5771,7 @@ def _do_drive_chat(arguments: dict) -> str:
                     _MANUAL_CHAT_UI_SEND_TOOL_PROFILE,
                 }
                 and display in _SEND_PHASE_DISPLAYS
+                and scope == "base"
             ):
                 cmd += ["--send-phase", send_phase_name]
     if output_file is not None:
