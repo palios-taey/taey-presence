@@ -467,7 +467,11 @@ mutation must equal that request byte-for-byte in meaning, consumes the card,
 and restores observation-only authority. The ordinary `manual-chat-ui` profile
 uses the same enforcement after the first valid card activates the SEND phase,
 so the original setup turn cannot repeat submission or enter extraction. Only
-a terminal Hands card permits the existing completion-monitor handoff.
+a terminal Hands card permits the existing completion-monitor handoff. Every
+Gemini Deep Research SEND card declares `extraction_output_type: research_report`;
+Presence validates that value and copies it into the card-owned completion route
+so the monitor's extraction worker selects the research-report workflow. Routes
+registered without this card retain their existing assistant-text/default behavior.
 Scrolling, copying, clipboard reads, and all pre-SEND setup primitives are
 absent from the narrowed profile.
 

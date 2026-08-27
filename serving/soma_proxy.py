@@ -2490,6 +2490,7 @@ def _validate_send_phase_card(
         "display",
         "phase",
         "snapshot_revision",
+        "extraction_output_type",
         "allowed",
         "next_phase",
         "card_sha256",
@@ -2504,6 +2505,10 @@ def _validate_send_phase_card(
         raise ValueError("Hands allowed-next card display does not match request")
     if value["snapshot_revision"] != snapshot_revision:
         raise ValueError("Hands allowed-next card revision does not match observation")
+    if value["extraction_output_type"] != "research_report":
+        raise ValueError(
+            "Hands allowed-next card extraction output type is not research_report"
+        )
     phase = value["phase"]
     if not isinstance(phase, str) or not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", phase):
         raise ValueError("Hands allowed-next card phase is invalid")
@@ -4786,6 +4791,8 @@ def _monitor_touch(
     action: str,
     result: dict,
     request_context: dict,
+    *,
+    extraction_output_type: str | None = None,
 ) -> dict | None:
     """Register one completion route after a canonical Stop-proven send."""
     if action != "observe" or result.get("surface") != "browser":
@@ -4839,6 +4846,10 @@ def _monitor_touch(
         "last_seen": now,
         "last_action": "stop_proven_observe",
     }
+    if extraction_output_type is not None:
+        if platform != "gemini" or extraction_output_type != "research_report":
+            raise RuntimeError("invalid card-owned extraction output type")
+        record["extraction_output_type"] = extraction_output_type
     client.set(session_key, json.dumps(record), ex=_MONITOR_TTL_SECS)
     client.sadd(set_key, session_key)
     log.info(
@@ -5975,6 +5986,11 @@ def _do_drive_chat(arguments: dict) -> str:
                                     action,
                                     result,
                                     context,
+                                    extraction_output_type=(
+                                        validated_card["extraction_output_type"]
+                                        if monitor_ready
+                                        else None
+                                    ),
                                 )
                             except Exception as exc:
                                 return _terminal_refusal(
