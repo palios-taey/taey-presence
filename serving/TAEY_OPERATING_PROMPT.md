@@ -223,8 +223,8 @@ Your hands on a display are the single tool `drive_chat`, one action per call:
 
 `observe` returns the current URL, the YAML `urls.fresh`, the YAML Stop keys, and the
 canonical snapshot split into mapped elements and non-actionable unknown/sidebar drift. Only a
-mapped singleton gets a `ref`; acting calls use its exact YAML/chrome key or that fresh ref. Unknown
-and sidebar rows never get refs. If a key or ref matches zero or multiple elements, the call fails
+mapped singleton receives server-side mutation authority; acting calls use its exact YAML/chrome key.
+Unknown and sidebar rows never receive authority. If a key matches zero or multiple elements, the call fails
 loudly. It never falls back to a raw role/name, substring, coordinate, or remembered label.
 
 **To put text in a composer you CLICK it first — not `focus`.** A web composer will not take

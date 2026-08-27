@@ -1339,12 +1339,13 @@ TOOLS = [
                 "submission and manual extraction from that display's YAML and "
                 "the newly observed tree, one YAML-declared semantic operation at a time; do not use remembered platform "
                 "labels, platform shortcuts, coordinates, URLs, chooser routes, or send recipes. "
-                "For focus_and_key_open, call operate once: the driver focuses the exact ref, "
+                "For focus_and_key_open, call operate once: the driver focuses the exact "
+                "server-bound target, "
                 "verifies focus, and sends the exact YAML open key; then observe the declared "
                 "menu scope and require its exact target. Never split that method into separate "
                 "model-issued focus and key calls. "
                 "For an opened selection menu, use the exact observation scope declared by that "
-                "menu's YAML operate.scope; the returned refs remain bound to that scope. "
+                "menu's YAML operate.scope; the mapped targets remain bound to that scope. "
                 "The native GTK file chooser is a shared driver boundary rather than platform UI: "
                 "after a YAML-resolved upload action opens it, focus_dialog activates and verifies "
                 "the separate X11 chooser window. A browser-tree observation after the upload action "
@@ -1354,7 +1355,8 @@ TOOLS = [
                 "key Return. Finally observe the platform tree and verify the attachment before any "
                 "composer or send action. observe returns the current URL, YAML fresh URL, YAML "
                 "Stop keys, actionable mapped elements, and non-actionable unknown/sidebar drift. "
-                "Only an exact mapped singleton or exact YAML-selected target receives a ref. "
+                "Only an exact mapped singleton or exact YAML-selected target receives mutation "
+                "authority. Presence retains its opaque ref server-side; never transcribe one. "
                 "If the live tree shows a changed "
                 "name, role, missing mapping, duplicate mapping, or unexpected drift, stop for an "
                 "exact YAML tree-filter update. Missing or "
@@ -1382,8 +1384,9 @@ TOOLS = [
                                  "focus_dialog", "scroll_to_bottom"],
                         "description": (
                             "the single action to perform; operate executes the one operation "
-                            "declared by platform YAML for the chosen revision-bound ref; direct "
-                            "click/focus/activate/hover are only for refs with no declaration; "
+                            "declared by platform YAML for the chosen preceding-observation target; "
+                            "direct click/focus/activate/hover are only for controls with no "
+                            "declaration; "
                             "scroll_to_bottom executes the exact YAML extraction scroll step, "
                             "anchored to its exact mapped element; assistant_text remains the "
                             "default and research_report is selected only by an exact unique match, "
@@ -1406,14 +1409,6 @@ TOOLS = [
                             "readable element key from the immediately preceding fresh observe; "
                             "for click/focus/activate/hover/operate Presence resolves the exact "
                             "canonical mapped ref without model transcription"
-                        ),
-                    },
-                    "ref": {
-                        "type": "string",
-                        "description": (
-                            "transitional revision-bound ref from the immediately preceding fresh "
-                            "observe; when element is also supplied it must equal Presence's stored "
-                            "canonical mapped ref"
                         ),
                     },
                     "text": {"type": "string", "description": "text to type or paste (use for SHORT input; for a large packet use text_file instead so you don't regenerate every character)"},
@@ -2399,12 +2394,12 @@ _DRIVE_MUTATIONS = {
 }
 _DRIVE_ACTION_ARGUMENTS = {
     "observe": frozenset({"display", "action", "scope"}),
-    "click": frozenset({"display", "action", "element", "ref"}),
-    "focus": frozenset({"display", "action", "element", "ref"}),
-    "activate": frozenset({"display", "action", "element", "ref"}),
-    "hover": frozenset({"display", "action", "element", "ref"}),
-    "operate": frozenset({"display", "action", "element", "ref"}),
-    "scroll_to_bottom": frozenset({"display", "action", "element", "ref"}),
+    "click": frozenset({"display", "action", "element"}),
+    "focus": frozenset({"display", "action", "element"}),
+    "activate": frozenset({"display", "action", "element"}),
+    "hover": frozenset({"display", "action", "element"}),
+    "operate": frozenset({"display", "action", "element"}),
+    "scroll_to_bottom": frozenset({"display", "action", "element"}),
     "navigate": frozenset({"display", "action", "url"}),
     "type": frozenset({"display", "action", "text"}),
     "paste": frozenset({"display", "action", "text", "text_file"}),
@@ -5561,36 +5556,24 @@ def _do_drive_chat(arguments: dict) -> str:
     if output_file is not None:
         cmd += ["--output-file", output_file]
     if action in ("click", "focus", "activate", "hover", "operate", "scroll_to_bottom"):
-        ref = arguments.get("ref")
         element = arguments.get("element")
-        if element is not None:
-            if not isinstance(element, str) or not element:
-                return _argument_refusal(f"{action} element must be a non-empty string")
-            canonical_refs = (
-                observed.get("canonical_refs") if isinstance(observed, dict) else None
-            )
-            canonical_ref = (
-                canonical_refs.get(element)
-                if isinstance(canonical_refs, dict)
-                else None
-            )
-            if not isinstance(canonical_ref, str) or not canonical_ref:
-                return _terminal_refusal(
-                    f"preceding observe did not map exactly one canonical {element!r} target"
-                )
-            if ref is not None and ref != canonical_ref:
-                return _terminal_refusal(
-                    f"supplied {element!r} ref does not equal the preceding observe's "
-                    "canonical mapped ref"
-                )
-            ref = canonical_ref
-        if isinstance(ref, str) and ref:
-            cmd += ["--ref", ref]
-        else:
+        if not isinstance(element, str) or not element:
             return _argument_refusal(
-                f"{action} requires element=<canonical mapped target from the immediately "
-                "preceding fresh observe> or a transitional ref"
+                f"{action} element must be a non-empty string"
             )
+        canonical_refs = (
+            observed.get("canonical_refs") if isinstance(observed, dict) else None
+        )
+        ref = (
+            canonical_refs.get(element)
+            if isinstance(canonical_refs, dict)
+            else None
+        )
+        if not isinstance(ref, str) or not ref:
+            return _terminal_refusal(
+                f"preceding observe did not map exactly one canonical {element!r} target"
+            )
+        cmd += ["--ref", ref]
     elif action in ("type", "paste"):
         # Prefer text_file: the model passes a PATH and ui_drive pastes the exact
         # file bytes. A large packet as inline `text` forces the model to regenerate
@@ -5775,6 +5758,9 @@ def _do_drive_chat(arguments: dict) -> str:
                                 for element, refs in refs_by_element.items()
                                 if len(refs) == 1
                             }
+                            for item in mapped:
+                                if isinstance(item, dict):
+                                    item.pop("ref", None)
                         observations[display] = {
                             "surface": observed_surface,
                             "snapshot_revision": revision,
