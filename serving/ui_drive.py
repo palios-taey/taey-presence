@@ -1077,6 +1077,27 @@ def _observe(args: argparse.Namespace, deps: SimpleNamespace) -> dict[str, Any]:
     }
     if key_preconditions:
         result["key_preconditions"] = key_preconditions
+    send_phase = getattr(args, "send_phase", None)
+    if send_phase is not None:
+        manual = _manual_ui_module(deps.platform)
+        classify = (
+            getattr(manual, "deep_research_send_phase_card", None)
+            if manual is not None
+            else None
+        )
+        if callable(classify):
+            try:
+                result["allowed_next"] = classify(
+                    snapshot,
+                    scope=scope,
+                    phase=send_phase,
+                    snapshot_revision=revision,
+                    display=deps.display,
+                )
+            except Exception as exc:
+                raise UiDriveError(
+                    f"{deps.platform} manual SEND phase classification failed: {exc}"
+                ) from exc
     return result
 
 
@@ -2346,6 +2367,7 @@ def _parser() -> argparse.ArgumentParser:
     _add_display(observe)
     observe.add_argument("--surface", choices=OBSERVE_SURFACES, default="browser")
     observe.add_argument("--scope", choices=OBSERVE_SCOPES, default="base")
+    observe.add_argument("--send-phase", help=argparse.SUPPRESS)
 
     revenue_observe = commands.add_parser("ui-observe")
     _add_display(revenue_observe)
