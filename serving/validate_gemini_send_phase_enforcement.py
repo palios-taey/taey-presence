@@ -31,6 +31,7 @@ def _card(
         "display": ":4",
         "phase": phase,
         "snapshot_revision": REVISION,
+        "extraction_output_type": "research_report",
         "allowed": allowed,
         "next_phase": next_phase,
     }
@@ -120,6 +121,7 @@ def _run_with_context(
     def monitor_touch(*_args: object, **_kwargs: object) -> None:
         nonlocal monitor_calls
         monitor_calls += 1
+        context["_monitor_touch_kwargs"] = dict(_kwargs)
 
     token = soma_proxy._request_context.set(context)
     try:
@@ -275,6 +277,9 @@ def main() -> int:
     )
     assert monitor_observed["ui_sequence"]["state"] == "monitor_ready"
     assert monitor_calls == 1
+    assert monitor["_monitor_touch_kwargs"] == {
+        "extraction_output_type": "research_report"
+    }
     monitor["tool_round"] = 2
     refused_after_handoff, after_handoff_command, _ = _run_with_context(
         monitor,
@@ -309,6 +314,99 @@ def main() -> int:
         assert "digest does not verify" in str(exc)
     else:
         raise AssertionError("tampered Hands card was accepted")
+
+    missing_output_type = dict(ready_initial)
+    missing_output_type.pop("extraction_output_type")
+    try:
+        soma_proxy._validate_send_phase_card(
+            missing_output_type,
+            platform="gemini",
+            display=":4",
+            snapshot_revision=REVISION,
+        )
+    except ValueError as exc:
+        assert "fields do not match" in str(exc)
+    else:
+        raise AssertionError("Hands card without extraction output type was accepted")
+
+    wrong_output_type = dict(ready_initial)
+    wrong_output_type["extraction_output_type"] = "assistant_text"
+    wrong_output_type.pop("card_sha256")
+    wrong_output_type["card_sha256"] = hashlib.sha256(
+        json.dumps(
+            wrong_output_type,
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+    try:
+        soma_proxy._validate_send_phase_card(
+            wrong_output_type,
+            platform="gemini",
+            display=":4",
+            snapshot_revision=REVISION,
+        )
+    except ValueError as exc:
+        assert "is not research_report" in str(exc)
+    else:
+        raise AssertionError("Hands assistant-text send card was accepted")
+
+    class FakeRedis:
+        def __init__(self) -> None:
+            self.records: dict[str, str] = {}
+            self.set_members: dict[str, set[str]] = {}
+
+        def set(self, key: str, value: str, **_kwargs: object) -> None:
+            self.records[key] = value
+
+        def sadd(self, key: str, value: str) -> None:
+            self.set_members.setdefault(key, set()).add(value)
+
+    fake_redis = FakeRedis()
+    stop_result = {
+        "surface": "browser",
+        "stop_keys": ["yaml_owned_stop"],
+        "mapped": [{"element": "yaml_owned_stop"}],
+        "lease": {"owned": True},
+        "snapshot_revision": REVISION,
+        "current_url": "https://example.invalid/thread",
+    }
+    route_context = {
+        "seat_id": "phase-seat",
+        "turn_id": "card-route",
+        "process_generation": "a" * 32,
+    }
+    with patch.object(soma_proxy, "_mira_redis", None), patch.object(
+        soma_proxy, "_redis", fake_redis
+    ):
+        soma_proxy._monitor_touch(
+            ":4",
+            "gemini",
+            "observe",
+            stop_result,
+            route_context,
+            extraction_output_type="research_report",
+        )
+        route_context["turn_id"] = "ordinary-route"
+        soma_proxy._monitor_touch(
+            ":4",
+            "gemini",
+            "observe",
+            stop_result,
+            route_context,
+        )
+    card_record = json.loads(
+        fake_redis.records["taey:phase-seat:active_session:phase-seat-4-card-route"]
+    )
+    ordinary_record = json.loads(
+        fake_redis.records[
+            "taey:phase-seat:active_session:phase-seat-4-ordinary-route"
+        ]
+    )
+    assert card_record["extraction_output_type"] == "research_report"
+    assert "extraction_output_type" not in ordinary_record
 
     ui_drive_source = (REPO_ROOT / "serving" / "ui_drive.py").read_text(
         encoding="utf-8"
