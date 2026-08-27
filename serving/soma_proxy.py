@@ -274,6 +274,9 @@ def _parse_ui_action_bindings(value: str) -> dict[str, str]:
 _UI_ACTION_BINDINGS = _parse_ui_action_bindings(
     os.environ.get("TAEY_UI_ACTION_BINDINGS", "")
 )
+REVENUE_UI_PRIVATE_ROOT = os.environ.get(
+    "TAEY_REVENUE_UI_PRIVATE_ROOT", ""
+).strip()
 _TOOL_PROFILE_ALLOWED: dict[str, frozenset[str] | None] = {
     _FULL_TOOL_PROFILE: None,
     _MANUAL_CHAT_UI_TOOL_PROFILE: frozenset({
@@ -1421,10 +1424,11 @@ TOOLS = [
             "name": "ui_action",
             "description": (
                 "Observe a trusted revenue display, perform exactly one YAML-declared viewport "
-                "scroll, or perform exactly one mapped page-bound activate from the immediately "
+                "scroll, perform exactly one mapped page-bound activate, or paste one immutable "
+                "private transaction into one mapped editor from the immediately "
                 "preceding fresh observation. The server binds "
                 "the display to its platform; the model never supplies a platform, selector, "
-                "coordinate, URL, or sequence. After either mutation, the public platform hook "
+                "coordinate, URL, sequence, text, or path. After every mutation, the public platform hook "
                 "must verify its exact postcondition and a new observe is required before any "
                 "later mutation. Dropdown opening, option observation, option selection, and result "
                 "verification are separate calls when those capabilities are qualified."
@@ -1440,12 +1444,12 @@ TOOLS = [
                     },
                     "action": {
                         "type": "string",
-                        "enum": ["observe", "scroll_into_view", "activate"],
+                        "enum": ["observe", "scroll_into_view", "activate", "paste"],
                     },
                     "element": {
                         "type": "string",
                         "description": (
-                            "scroll_into_view or activate only: exact mapped element key "
+                            "mutation only: exact mapped element key "
                             "returned by the immediately preceding fresh observe"
                         ),
                     },
@@ -4676,6 +4680,163 @@ def _monitor_touch(
     }
 
 
+def _resolve_revenue_ui_private_paste(
+    context: dict,
+) -> dict[str, object]:
+    import json as _json
+
+    if not REVENUE_UI_PRIVATE_ROOT:
+        raise RuntimeError(
+            "TAEY_REVENUE_UI_PRIVATE_ROOT is unset; refusing private paste input"
+        )
+    seat_id = str(context.get("seat_id") or "")
+    event_id = str(context.get("event_id") or "")
+    correlation_id = str(context.get("correlation_id") or "")
+    if (
+        not _SEAT_ID_RE.fullmatch(seat_id)
+        or not _TRACE_ID_RE.fullmatch(event_id)
+        or not _TRACE_ID_RE.fullmatch(correlation_id)
+    ):
+        raise RuntimeError(
+            "revenue paste requires validated seat, event, and correlation identities"
+        )
+
+    private_root = Path(REVENUE_UI_PRIVATE_ROOT)
+    try:
+        resolved_root = private_root.resolve(strict=True)
+        root_metadata = os.lstat(private_root)
+    except OSError as exc:
+        raise RuntimeError("revenue paste private root is unavailable") from exc
+    if (
+        not private_root.is_absolute()
+        or private_root != resolved_root
+        or not stat.S_ISDIR(root_metadata.st_mode)
+        or stat.S_IMODE(root_metadata.st_mode) != 0o700
+        or root_metadata.st_uid != os.geteuid()
+    ):
+        raise RuntimeError(
+            "revenue paste private root must be an owner-controlled nonsymlink 0700 directory"
+        )
+
+    transaction_path = (
+        resolved_root / "transactions" / seat_id / f"{correlation_id}.json"
+    )
+    try:
+        resolved_parent = transaction_path.parent.resolve(strict=True)
+        parent_metadata = os.lstat(transaction_path.parent)
+    except OSError as exc:
+        raise RuntimeError("revenue paste transaction parent is unavailable") from exc
+    if (
+        resolved_root not in resolved_parent.parents
+        or not stat.S_ISDIR(parent_metadata.st_mode)
+        or stat.S_IMODE(parent_metadata.st_mode) != 0o700
+        or parent_metadata.st_uid != os.geteuid()
+    ):
+        raise RuntimeError(
+            "revenue paste transaction parent must remain owner-controlled beneath the private root"
+        )
+
+    descriptor = None
+    try:
+        descriptor = os.open(
+            transaction_path,
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+        )
+        before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or stat.S_IMODE(before.st_mode) != 0o400
+            or before.st_uid != os.geteuid()
+            or before.st_size < 1
+            or before.st_size > 4 * 1024 * 1024
+        ):
+            raise RuntimeError(
+                "revenue paste transaction must be an owner-controlled immutable regular file"
+            )
+        chunks: list[bytes] = []
+        remaining = before.st_size
+        while remaining:
+            chunk = os.read(descriptor, min(remaining, 1024 * 1024))
+            if not chunk:
+                raise RuntimeError("revenue paste transaction changed while read")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        if os.read(descriptor, 1):
+            raise RuntimeError("revenue paste transaction changed while read")
+        after = os.fstat(descriptor)
+        if (
+            before.st_dev,
+            before.st_ino,
+            before.st_size,
+            before.st_mtime_ns,
+        ) != (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+        ):
+            raise RuntimeError("revenue paste transaction changed while read")
+        transaction_bytes = b"".join(chunks)
+    except OSError as exc:
+        raise RuntimeError("revenue paste transaction failed private-file validation") from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+    def exact_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        keys = [key for key, _value in pairs]
+        if len(keys) != len(set(keys)):
+            raise ValueError("duplicate private transaction key")
+        return dict(pairs)
+
+    try:
+        transaction = _json.loads(
+            transaction_bytes.decode("utf-8"),
+            object_pairs_hook=exact_object,
+        )
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise RuntimeError("revenue paste transaction is not exact UTF-8 JSON") from exc
+    expected_keys = {
+        "schema",
+        "operation",
+        "seat_id",
+        "event_id",
+        "correlation_id",
+        "text",
+        "text_sha256",
+    }
+    if not isinstance(transaction, dict) or set(transaction) != expected_keys:
+        raise RuntimeError("revenue paste transaction has an invalid exact schema")
+    if (
+        transaction.get("schema") != "taey_revenue_ui_private_paste_v1"
+        or transaction.get("operation") != "paste"
+        or transaction.get("seat_id") != seat_id
+        or transaction.get("event_id") != event_id
+        or transaction.get("correlation_id") != correlation_id
+    ):
+        raise RuntimeError(
+            "revenue paste transaction does not match the active seat/event/correlation"
+        )
+    text = transaction.get("text")
+    text_sha256 = transaction.get("text_sha256")
+    if not isinstance(text, str) or not text or "\x00" in text:
+        raise RuntimeError("revenue paste transaction text is invalid")
+    text_bytes = text.encode("utf-8")
+    if len(text_bytes) > 1024 * 1024:
+        raise RuntimeError("revenue paste transaction exceeds the 1048576-byte ceiling")
+    if (
+        not isinstance(text_sha256, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", text_sha256)
+        or hashlib.sha256(text_bytes).hexdigest() != text_sha256
+    ):
+        raise RuntimeError("revenue paste transaction text hash is not exact")
+    return {
+        "text_bytes": text_bytes,
+        "text_sha256": text_sha256,
+        "transaction_sha256": hashlib.sha256(transaction_bytes).hexdigest(),
+    }
+
+
 def _do_ui_action(arguments: dict) -> str:
     import subprocess
     import json as _json
@@ -4753,10 +4914,10 @@ def _do_ui_action(arguments: dict) -> str:
         return terminal_refusal(
             f"display {display!r} is not bound by TAEY_UI_ACTION_BINDINGS"
         )
-    if action not in {"observe", "scroll_into_view", "activate"}:
+    if action not in {"observe", "scroll_into_view", "activate", "paste"}:
         return terminal_refusal(
             f"unknown action {action!r}; revenue-ui currently permits observe, "
-            "scroll_into_view, or activate"
+            "scroll_into_view, activate, or paste"
         )
     allowed_arguments = (
         {"display", "action"}
@@ -4772,7 +4933,8 @@ def _do_ui_action(arguments: dict) -> str:
     ref = ""
     consumed_revision = ""
     expected_primitive = ""
-    if action in {"scroll_into_view", "activate"}:
+    paste_input: dict[str, object] | None = None
+    if action in {"scroll_into_view", "activate", "paste"}:
         observed = observations.pop(display, None)
         if not isinstance(observed, dict):
             return terminal_refusal(
@@ -4806,6 +4968,7 @@ def _do_ui_action(arguments: dict) -> str:
             "activate",
             "mapped_pointer_activate",
             "scroll_into_view",
+            "paste_frozen_text",
         }:
             return terminal_refusal(
                 "preceding observe did not bind one supported YAML UI primitive"
@@ -4814,15 +4977,32 @@ def _do_ui_action(arguments: dict) -> str:
             return terminal_refusal(
                 "scroll_into_view requires a YAML-declared scroll_into_view primitive"
             )
-        if action == "activate" and expected_primitive == "scroll_into_view":
+        if action == "activate" and expected_primitive not in {
+            "activate",
+            "mapped_pointer_activate",
+        }:
             return terminal_refusal(
-                "activate cannot substitute for the YAML-declared scroll_into_view primitive"
+                "activate requires a YAML-declared page activation primitive"
+            )
+        if action == "paste" and expected_primitive != "paste_frozen_text":
+            return terminal_refusal(
+                "paste requires the YAML-declared paste_frozen_text primitive"
             )
         consumed_revision = str(observed.get("snapshot_revision") or "")
         if not re.fullmatch(r"[0-9a-f]{64}", consumed_revision):
             return terminal_refusal(
                 "preceding observe did not provide a valid snapshot revision"
             )
+        if action == "paste":
+            if sequence.get("paste_spent") is not None:
+                return terminal_refusal(
+                    "the revenue paste transaction was already spent in this turn"
+                )
+            try:
+                paste_input = _resolve_revenue_ui_private_paste(context)
+            except Exception as exc:
+                return terminal_refusal(str(exc))
+            sequence["paste_spent"] = paste_input["transaction_sha256"]
 
     lease_owner = f"taey-drive:{seat_id}:{process_generation}"
     drive_env = dict(os.environ)
@@ -4838,6 +5018,7 @@ def _do_ui_action(arguments: dict) -> str:
         "observe": "ui-observe",
         "scroll_into_view": "ui-scroll-into-view",
         "activate": "ui-activate",
+        "paste": "ui-paste",
     }[action]
     command = [
         UI_DRIVE_PYTHON,
@@ -4846,17 +5027,30 @@ def _do_ui_action(arguments: dict) -> str:
         "--display",
         display,
     ]
-    if action in {"scroll_into_view", "activate"}:
+    if action in {"scroll_into_view", "activate", "paste"}:
         command.extend(["--ref", ref])
+    if action == "paste":
+        assert isinstance(paste_input, dict)
+        command.extend(["--text-sha256", str(paste_input["text_sha256"])])
 
     try:
-        completed = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            timeout=90,
-            env=drive_env,
-        )
+        if action == "paste":
+            assert isinstance(paste_input, dict)
+            completed = subprocess.run(
+                command,
+                input=paste_input["text_bytes"],
+                capture_output=True,
+                timeout=90,
+                env=drive_env,
+            )
+        else:
+            completed = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=90,
+                env=drive_env,
+            )
     except subprocess.TimeoutExpired:
         _audit("ui_action", {
             "display": display,
@@ -4880,7 +5074,21 @@ def _do_ui_action(arguments: dict) -> str:
         "action": action,
         "rc": completed.returncode,
     })
-    stdout = (completed.stdout or "").strip()
+    stdout_value = (
+        completed.stdout or b""
+        if action == "paste"
+        else completed.stdout or ""
+    )
+    stderr_value = (
+        completed.stderr or b""
+        if action == "paste"
+        else completed.stderr or ""
+    )
+    stdout = (
+        stdout_value.decode("utf-8", errors="replace")
+        if isinstance(stdout_value, bytes)
+        else stdout_value
+    ).strip()
     try:
         payload = _json.loads(stdout) if stdout else None
     except Exception:
@@ -4894,7 +5102,11 @@ def _do_ui_action(arguments: dict) -> str:
         and isinstance(payload.get("result"), dict)
     )
     if not succeeded:
-        stderr_excerpt = (completed.stderr or "").strip()[:1000]
+        stderr_excerpt = (
+            stderr_value.decode("utf-8", errors="replace")
+            if isinstance(stderr_value, bytes)
+            else stderr_value
+        ).strip()[:1000]
         if isinstance(payload, dict):
             detail = str(payload.get("error") or "").strip()
             if stderr_excerpt:
@@ -4937,6 +5149,7 @@ def _do_ui_action(arguments: dict) -> str:
                     ("activate", "page"),
                     ("mapped_pointer_activate", "page"),
                     ("scroll_into_view", "viewport"),
+                    ("paste_frozen_text", "draft"),
                 }
                 and declared.get("primitives") == [declared_method]
                 and declared.get("allowed_now") == [declared_method]
@@ -4977,6 +5190,38 @@ def _do_ui_action(arguments: dict) -> str:
         return _json.dumps(payload)
 
     postcondition = result.get("post_action_observation")
+    if action == "paste":
+        assert isinstance(paste_input, dict)
+        expected_text_sha256 = str(paste_input["text_sha256"])
+        if (
+            result.get("performed") is not True
+            or result.get("performed_primitive") != "paste_frozen_text"
+            or result.get("performed_operation") != "paste_frozen_text"
+            or result.get("effect_class") != "draft"
+            or result.get("text_sha256") != expected_text_sha256
+            or result.get("observe_required_before_next_mutation") is not True
+            or not isinstance(postcondition, dict)
+            or postcondition.get("element_key") != arguments.get("element")
+            or postcondition.get("operation") != "paste_frozen_text"
+            or postcondition.get("effect_class") != "draft"
+            or postcondition.get("route_exact") is not True
+            or postcondition.get("activity_exact") is not True
+            or postcondition.get("editor_text_sha256") != expected_text_sha256
+            or postcondition.get("editor_text_chars") != result.get("pasted_chars")
+        ):
+            return terminal_refusal(
+                "ui_action paste returned no exact editor text postcondition receipt"
+            )
+        payload["ui_sequence"] = {
+            "state": "draft_transition_complete",
+            "consumed_snapshot_revision": consumed_revision,
+            "text_sha256": expected_text_sha256,
+            "postcondition": postcondition,
+            "observe_required_before_next_mutation": True,
+            "mutation_token_issued": False,
+        }
+        return _json.dumps(payload)
+
     if action == "scroll_into_view":
         if (
             result.get("performed") is not True

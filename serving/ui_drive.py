@@ -1172,6 +1172,7 @@ def _observe_revenue(
                 ("activate", "page"),
                 ("mapped_pointer_activate", "page"),
                 ("scroll_into_view", "viewport"),
+                ("paste_frozen_text", "draft"),
             }
             or declared.get("primitives") != [declared_method]
             or declared.get("allowed_now") != [declared_method]
@@ -1697,6 +1698,118 @@ def _revenue_scroll_into_view(
     }
 
 
+def _revenue_paste(
+    args: argparse.Namespace,
+    deps: SimpleNamespace,
+) -> dict[str, Any]:
+    expected_text_sha256 = str(args.text_sha256 or "")
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_text_sha256):
+        raise UiDriveError("revenue paste requires one exact lowercase SHA-256")
+    text_bytes = sys.stdin.buffer.read(1024 * 1024 + 1)
+    if not text_bytes or len(text_bytes) > 1024 * 1024:
+        raise UiDriveError(
+            "revenue paste stdin must contain 1-1048576 immutable UTF-8 bytes"
+        )
+    if hashlib.sha256(text_bytes).hexdigest() != expected_text_sha256:
+        raise UiDriveError("revenue paste stdin bytes do not match --text-sha256")
+    try:
+        text = text_bytes.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise UiDriveError("revenue paste stdin is not exact UTF-8") from exc
+    if "\x00" in text:
+        raise UiDriveError("revenue paste text contains a NUL character")
+
+    row, observed_snapshot = _resolve_revenue_target(args, deps)
+    declared = _revenue_declared_operation(
+        deps.platform,
+        row["element"],
+        row,
+    )
+    if not isinstance(declared, dict) or (
+        declared.get("method") != "paste_frozen_text"
+        or declared.get("effect_class") != "draft"
+        or declared.get("primitives") != ["paste_frozen_text"]
+        or declared.get("allowed_now") != ["paste_frozen_text"]
+    ):
+        raise UiDriveError(
+            f"{row['element']} is not currently authorized for one editor paste"
+        )
+    if not deps.input.clipboard_paste(text):
+        raise UiDriveError("clipboard_paste primitive returned false")
+
+    manual = _manual_ui_module(deps.platform)
+    stable_observation = (
+        getattr(manual, "stable_post_action_observation", None)
+        if manual is not None
+        else None
+    )
+    if not callable(stable_observation):
+        raise UiDriveError(
+            f"{deps.platform} has no public stable post-action observation hook"
+        )
+    try:
+        post_snapshot, barrier_receipt = stable_observation(
+            row["element"],
+            "paste_frozen_text",
+            time.monotonic() + LOCK_TTL_DEFAULT,
+            expected_text=text,
+        )
+    except Exception as exc:
+        raise UiDriveError(
+            f"{deps.platform} paste observation barrier failed: {exc}"
+        ) from exc
+    postcondition = (
+        barrier_receipt.get("postcondition_receipt")
+        if isinstance(barrier_receipt, dict)
+        else None
+    )
+    if (
+        not isinstance(post_snapshot, Snapshot)
+        or not isinstance(barrier_receipt, dict)
+        or barrier_receipt.get("result") != "PASS"
+        or barrier_receipt.get("next_mutation_authorized") is not True
+        or barrier_receipt.get("observe_required_before_next_mutation") is not True
+        or not isinstance(postcondition, dict)
+        or postcondition.get("element_key") != row["element"]
+        or postcondition.get("operation") != "paste_frozen_text"
+        or postcondition.get("effect_class") != "draft"
+        or postcondition.get("route_exact") is not True
+        or postcondition.get("activity_exact") is not True
+        or postcondition.get("editor_text_sha256") != expected_text_sha256
+        or postcondition.get("editor_text_chars") != len(text)
+    ):
+        raise UiDriveError(
+            f"{deps.platform} paste observation barrier did not prove the exact editor bytes"
+        )
+    return {
+        "performed": True,
+        "performed_primitive": "paste_frozen_text",
+        "performed_operation": "paste_frozen_text",
+        "effect_class": "draft",
+        "element": {
+            "category": "mapped",
+            "element": row["element"],
+            "name": str(row.get("name") or ""),
+            "role": str(row.get("role") or ""),
+            "states": list(row.get("states") or []),
+            "ref": row["ref"],
+        },
+        "pasted_bytes": len(text_bytes),
+        "pasted_chars": len(text),
+        "text_sha256": expected_text_sha256,
+        "consumed_snapshot_revision": _snapshot_revision(
+            observed_snapshot,
+            scope="base",
+        ),
+        "post_action_observation": {
+            "snapshot_revision": _snapshot_revision(post_snapshot, scope="base"),
+            "barrier": barrier_receipt,
+            **postcondition,
+        },
+        "observe_required_before_next_mutation": True,
+    }
+
+
 def _focus_and_key_open_operation(
     row: dict[str, Any],
     declared: dict[str, Any],
@@ -2145,6 +2258,11 @@ def _parser() -> argparse.ArgumentParser:
     _add_display(revenue_scroll)
     _add_target(revenue_scroll)
 
+    revenue_paste = commands.add_parser("ui-paste")
+    _add_display(revenue_paste)
+    _add_target(revenue_paste)
+    revenue_paste.add_argument("--text-sha256", required=True)
+
     for action in ("click", "focus", "activate", "hover", "operate"):
         target = commands.add_parser(action)
         _add_display(target)
@@ -2223,7 +2341,7 @@ def _parser() -> argparse.ArgumentParser:
 _LOCK_ACTION_OPS = {
     "click", "focus", "activate", "hover", "operate", "type", "paste", "key", "navigate",
     "focus-dialog", "read-clipboard", "extract", "scroll_to_bottom", "ui-activate",
-    "ui-scroll-into-view",
+    "ui-scroll-into-view", "ui-paste",
 }
 
 
@@ -2462,6 +2580,8 @@ def _dispatch(args: argparse.Namespace, deps: SimpleNamespace) -> Any:
         result = _revenue_activate(args, deps)
     elif args.action == "ui-scroll-into-view":
         result = _revenue_scroll_into_view(args, deps)
+    elif args.action == "ui-paste":
+        result = _revenue_paste(args, deps)
     elif args.action in {"click", "focus", "activate", "hover", "operate"}:
         result = _element_action(args.action, args, deps)
     elif args.action == "type":
