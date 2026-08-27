@@ -186,6 +186,41 @@ def main() -> int:
     ):
         require(required in resolve_source, f'downstream stale/ref validation lost {required!r}')
 
+    scope_source = function_source(ui_source, ui_tree, '_scope_expected_elements')
+    scope_namespace: dict[str, Any] = {
+        'UiDriveError': RuntimeError,
+        'get_extraction': lambda _platform: {
+            'research_report': SimpleNamespace(steps=(
+                SimpleNamespace(action='click', element='share_export'),
+                SimpleNamespace(action='copy', element='copy_report'),
+                SimpleNamespace(action='copy', element='ordinary_copy'),
+            )),
+        },
+        'load_platform_yaml': lambda _platform: {
+            'tree': {
+                'element_map': {
+                    'share_export': {'scope': 'app_root_snapshot'},
+                    'copy_report': {'scope': 'app_root_snapshot'},
+                    'ordinary_copy': {},
+                },
+            },
+            'workflow': {},
+        },
+    }
+    exec(scope_source, scope_namespace)
+    expected_app_root = scope_namespace['_scope_expected_elements'](
+        'synthetic',
+        'app_root_snapshot',
+    )
+    require(
+        expected_app_root == ('copy_report', 'share_export'),
+        'non-download app-root extraction elements were not scoped exactly',
+    )
+    require(
+        'ordinary_copy' not in expected_app_root,
+        'ordinary unscoped extraction element leaked into app-root observation',
+    )
+
     namespace: dict[str, Any] = {
         'CHAT_DISPLAYS': (':6',),
         'UI_DRIVE_PYTHON': '/public/python',
