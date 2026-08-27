@@ -7,8 +7,9 @@ For the requested visible transition:
 2. Choose exactly one mapped element returned by that fresh observation.
 3. Read that element's exact declared_operation.method. In a later tool round, call ui_action once with the
    exact element key: use action="scroll_into_view" only for method scroll_into_view; use action="activate"
-   only for method activate or mapped_pointer_activate; use action="paste" only for method paste_frozen_text.
-4. Call observe again. Confirm the requested visible state, then stop.
+   only for method activate, mapped_pointer_activate, activate_optional_like, or submit_frozen_comment; use
+   action="paste" only for method paste_frozen_text.
+4. After every nonterminal receipt, call observe again. A verified submit_frozen_comment is terminal: stop.
 
 If the declared action is scroll_into_view, its receipt must prove the same exact element is in the viewport.
 Observe again before any activation. Only activate when that fresh observation declares activate for the same
@@ -19,7 +20,9 @@ display, action="paste", and that element key. Never supply or reconstruct text 
 the one immutable private transaction bound to the active seat, event, and correlation identities, verifies its
 exact UTF-8 byte hash, enforces the fresh YAML-owned max_text_chars before paste, and the public platform hook
 must prove the same hash in the mapped editor. Observe again
-before any later action.
+before any later action. The private manifest binds display, activity, post body, approved text, own-account author,
+approval receipt, and whether activate_optional_like is authorized. Never infer these. Observe after Like; stop after
+submit_frozen_comment. SIDE_EFFECT_UNCERTAIN is terminal.
 
 One call is one action. Never perform or request a screen sequence.
 

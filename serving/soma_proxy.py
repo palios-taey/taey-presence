@@ -27,6 +27,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
+from revenue_ui_contract import (
+    SEMANTIC_OUTWARD,
+    canonical_json_bytes,
+    semantic_input,
+    validate_operation_evidence,
+    validate_operation_card,
+    validate_semantic_receipt,
+)
+
 import asyncio
 import redis
 from starlette.background import BackgroundTask
@@ -4680,162 +4689,142 @@ def _monitor_touch(
     }
 
 
-def _resolve_revenue_ui_private_paste(
-    context: dict,
-) -> dict[str, object]:
-    import json as _json
-
-    if not REVENUE_UI_PRIVATE_ROOT:
-        raise RuntimeError(
-            "TAEY_REVENUE_UI_PRIVATE_ROOT is unset; refusing private paste input"
-        )
-    seat_id = str(context.get("seat_id") or "")
-    event_id = str(context.get("event_id") or "")
-    correlation_id = str(context.get("correlation_id") or "")
-    if (
-        not _SEAT_ID_RE.fullmatch(seat_id)
-        or not _TRACE_ID_RE.fullmatch(event_id)
-        or not _TRACE_ID_RE.fullmatch(correlation_id)
-    ):
-        raise RuntimeError(
-            "revenue paste requires validated seat, event, and correlation identities"
-        )
-
-    private_root = Path(REVENUE_UI_PRIVATE_ROOT)
+def _read_revenue_ui_private_json(
+    path: Path, root: Path, label: str, maximum: int,
+    modes: frozenset[int], beneath: bool,
+) -> tuple[dict, bytes]:
     try:
-        resolved_root = private_root.resolve(strict=True)
-        root_metadata = os.lstat(private_root)
+        resolved_path = path.resolve(strict=True)
+        resolved_parent = path.parent.resolve(strict=True)
+        parent = os.lstat(path.parent)
     except OSError as exc:
-        raise RuntimeError("revenue paste private root is unavailable") from exc
-    if (
-        not private_root.is_absolute()
-        or private_root != resolved_root
-        or not stat.S_ISDIR(root_metadata.st_mode)
-        or stat.S_IMODE(root_metadata.st_mode) != 0o700
-        or root_metadata.st_uid != os.geteuid()
-    ):
-        raise RuntimeError(
-            "revenue paste private root must be an owner-controlled nonsymlink 0700 directory"
-        )
-
-    transaction_path = (
-        resolved_root / "transactions" / seat_id / f"{correlation_id}.json"
-    )
-    try:
-        resolved_parent = transaction_path.parent.resolve(strict=True)
-        parent_metadata = os.lstat(transaction_path.parent)
-    except OSError as exc:
-        raise RuntimeError("revenue paste transaction parent is unavailable") from exc
-    if (
-        resolved_root not in resolved_parent.parents
-        or not stat.S_ISDIR(parent_metadata.st_mode)
-        or stat.S_IMODE(parent_metadata.st_mode) != 0o700
-        or parent_metadata.st_uid != os.geteuid()
-    ):
-        raise RuntimeError(
-            "revenue paste transaction parent must remain owner-controlled beneath the private root"
-        )
-
+        raise RuntimeError(f"revenue comment {label} is unavailable") from exc
+    if (not path.is_absolute() or path != resolved_path or not stat.S_ISDIR(parent.st_mode)
+            or parent.st_uid != os.geteuid() or (beneath and root not in resolved_parent.parents)
+            or (beneath and stat.S_IMODE(parent.st_mode) != 0o700)):
+        raise RuntimeError(f"revenue comment {label} parent is not owner-controlled")
     descriptor = None
     try:
-        descriptor = os.open(
-            transaction_path,
-            os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
-        )
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
         before = os.fstat(descriptor)
-        if (
-            not stat.S_ISREG(before.st_mode)
-            or stat.S_IMODE(before.st_mode) != 0o400
-            or before.st_uid != os.geteuid()
-            or before.st_size < 1
-            or before.st_size > 4 * 1024 * 1024
-        ):
-            raise RuntimeError(
-                "revenue paste transaction must be an owner-controlled immutable regular file"
-            )
-        chunks: list[bytes] = []
-        remaining = before.st_size
-        while remaining:
-            chunk = os.read(descriptor, min(remaining, 1024 * 1024))
-            if not chunk:
-                raise RuntimeError("revenue paste transaction changed while read")
-            chunks.append(chunk)
-            remaining -= len(chunk)
-        if os.read(descriptor, 1):
-            raise RuntimeError("revenue paste transaction changed while read")
+        if (not stat.S_ISREG(before.st_mode) or stat.S_IMODE(before.st_mode) not in modes
+                or before.st_uid != os.geteuid() or not 0 < before.st_size <= maximum):
+            raise RuntimeError(f"revenue comment {label} is not an exact private file")
+        raw = b"".join(iter(lambda: os.read(descriptor, 1024 * 1024), b""))
         after = os.fstat(descriptor)
-        if (
-            before.st_dev,
-            before.st_ino,
-            before.st_size,
-            before.st_mtime_ns,
-        ) != (
-            after.st_dev,
-            after.st_ino,
-            after.st_size,
-            after.st_mtime_ns,
-        ):
-            raise RuntimeError("revenue paste transaction changed while read")
-        transaction_bytes = b"".join(chunks)
+        signature = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+        if len(raw) != before.st_size or signature != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns):
+            raise RuntimeError(f"revenue comment {label} changed while read")
     except OSError as exc:
-        raise RuntimeError("revenue paste transaction failed private-file validation") from exc
+        raise RuntimeError(f"revenue comment {label} failed private-file validation") from exc
     finally:
         if descriptor is not None:
             os.close(descriptor)
-
-    def exact_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
-        keys = [key for key, _value in pairs]
-        if len(keys) != len(set(keys)):
-            raise ValueError("duplicate private transaction key")
+    def exact(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        if len(pairs) != len({key for key, _ in pairs}):
+            raise ValueError(f"duplicate {label} key")
         return dict(pairs)
-
     try:
-        transaction = _json.loads(
-            transaction_bytes.decode("utf-8"),
-            object_pairs_hook=exact_object,
-        )
+        value = json.loads(raw.decode(), object_pairs_hook=exact)
     except (UnicodeDecodeError, ValueError) as exc:
-        raise RuntimeError("revenue paste transaction is not exact UTF-8 JSON") from exc
-    expected_keys = {
-        "schema",
-        "operation",
-        "seat_id",
-        "event_id",
-        "correlation_id",
-        "text",
-        "text_sha256",
-    }
-    if not isinstance(transaction, dict) or set(transaction) != expected_keys:
-        raise RuntimeError("revenue paste transaction has an invalid exact schema")
-    if (
-        transaction.get("schema") != "taey_revenue_ui_private_paste_v1"
-        or transaction.get("operation") != "paste"
-        or transaction.get("seat_id") != seat_id
-        or transaction.get("event_id") != event_id
-        or transaction.get("correlation_id") != correlation_id
-    ):
-        raise RuntimeError(
-            "revenue paste transaction does not match the active seat/event/correlation"
-        )
+        raise RuntimeError(f"revenue comment {label} is not exact UTF-8 JSON") from exc
+    if not isinstance(value, dict):
+        raise RuntimeError(f"revenue comment {label} is not a JSON object")
+    return value, raw
+
+
+def _resolve_revenue_ui_private_comment(context: dict) -> dict[str, object]:
+    if not REVENUE_UI_PRIVATE_ROOT:
+        raise RuntimeError("TAEY_REVENUE_UI_PRIVATE_ROOT is unset")
+    seat_id = str(context.get("seat_id") or "")
+    event_id = str(context.get("event_id") or "")
+    correlation_id = str(context.get("correlation_id") or "")
+    if (not _SEAT_ID_RE.fullmatch(seat_id) or not _TRACE_ID_RE.fullmatch(event_id)
+            or not _TRACE_ID_RE.fullmatch(correlation_id)):
+        raise RuntimeError("revenue comment identities are invalid")
+    private_root = Path(REVENUE_UI_PRIVATE_ROOT)
+    try:
+        resolved_root = private_root.resolve(strict=True)
+        metadata = os.lstat(private_root)
+    except OSError as exc:
+        raise RuntimeError("revenue comment private root is unavailable") from exc
+    if (not private_root.is_absolute() or private_root != resolved_root
+            or not stat.S_ISDIR(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) != 0o700
+            or metadata.st_uid != os.geteuid()):
+        raise RuntimeError("revenue comment private root is not an owner-controlled 0700 directory")
+    transaction_path = resolved_root / "transactions" / seat_id / f"{correlation_id}.json"
+    transaction, transaction_bytes = _read_revenue_ui_private_json(
+        transaction_path, resolved_root, "transaction", 4 * 1024 * 1024,
+        frozenset({0o400}), True,
+    )
+    keys = {"schema", "operation", "platform", "display", "seat_id", "event_id",
+            "correlation_id", "action_id", "selected_activity", "selected_post_body_sha256",
+            "gate_receipt_path", "gate_receipt_sha256", "gate_receipt_version",
+            "gate_receipt_kind", "source_artifact_sha256", "like_authorized",
+            "expected_author_name", "text", "text_sha256"}
+    if set(transaction) != keys:
+        raise RuntimeError("revenue comment transaction has an invalid exact schema")
+    expected = {"schema": "taey_revenue_ui_private_comment_v1", "operation": "comment",
+                "platform": "linkedin", "seat_id": seat_id, "event_id": event_id,
+                "correlation_id": correlation_id, "gate_receipt_version": "linkedin_gate_signoff_v1",
+                "gate_receipt_kind": "feed_comment"}
+    if any(transaction.get(key) != value for key, value in expected.items()):
+        raise RuntimeError("revenue comment transaction does not match its active identity")
+    display = transaction.get("display")
+    action_id = transaction.get("action_id")
+    selected_activity = transaction.get("selected_activity")
+    selected_post_body_sha256 = transaction.get("selected_post_body_sha256")
+    expected_author_name = transaction.get("expected_author_name")
+    gate_receipt_path_value = transaction.get("gate_receipt_path")
+    gate_receipt_sha256 = transaction.get("gate_receipt_sha256")
+    source_artifact_sha256 = transaction.get("source_artifact_sha256")
+    like_authorized = transaction.get("like_authorized")
+    if (not isinstance(display, str) or not re.fullmatch(r":[1-9][0-9]*", display)
+        or not isinstance(selected_activity, str) or not selected_activity.isdigit()
+        or not isinstance(action_id, str) or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,160}", action_id)
+        or any(not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value)
+               for value in (selected_post_body_sha256, gate_receipt_sha256, source_artifact_sha256))
+        or not isinstance(like_authorized, bool)
+        or not isinstance(gate_receipt_path_value, str) or not gate_receipt_path_value
+        or not isinstance(expected_author_name, str)
+        or not expected_author_name or expected_author_name != expected_author_name.strip()
+        or len(expected_author_name) > 200
+        or any(ord(char) < 32 or ord(char) == 127 for char in expected_author_name)):
+        raise RuntimeError("revenue comment target or approval identity is invalid")
     text = transaction.get("text")
     text_sha256 = transaction.get("text_sha256")
-    if not isinstance(text, str) or not text or "\x00" in text:
-        raise RuntimeError("revenue paste transaction text is invalid")
-    text_bytes = text.encode("utf-8")
-    if len(text_bytes) > 1024 * 1024:
-        raise RuntimeError("revenue paste transaction exceeds the 1048576-byte ceiling")
-    if (
-        not isinstance(text_sha256, str)
-        or not re.fullmatch(r"[0-9a-f]{64}", text_sha256)
-        or hashlib.sha256(text_bytes).hexdigest() != text_sha256
-    ):
-        raise RuntimeError("revenue paste transaction text hash is not exact")
-    return {
-        "text_bytes": text_bytes,
-        "text_chars": len(text),
-        "text_sha256": text_sha256,
-        "transaction_sha256": hashlib.sha256(transaction_bytes).hexdigest(),
-    }
+    if not isinstance(text, str) or not text or "\x00" in text or len(text.encode()) > 1024 * 1024:
+        raise RuntimeError("revenue comment transaction text is invalid")
+    text_bytes = text.encode()
+    if (not isinstance(text_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", text_sha256)
+            or hashlib.sha256(text_bytes).hexdigest() != text_sha256):
+        raise RuntimeError("revenue comment transaction text hash is not exact")
+    gate_receipt_path = Path(gate_receipt_path_value)
+    gate_receipt, gate_bytes = _read_revenue_ui_private_json(
+        gate_receipt_path, resolved_root, "gate receipt", 1024 * 1024,
+        frozenset({0o400, 0o440, 0o444, 0o600, 0o640, 0o644, 0o660, 0o664}), False,
+    )
+    if hashlib.sha256(gate_bytes).hexdigest() != gate_receipt_sha256:
+        raise RuntimeError("revenue comment gate receipt hash is not exact")
+    required = {"action_id", "claims_traced", "content_hash", "failing_gate", "gates", "kind",
+                "packet_kind", "receipt_path", "receipt_version", "source_activity_id",
+                "source_artifact_sha256", "text_hash", "verdict"}
+    normalized = hashlib.sha256(re.sub(r"\s+", " ", text.strip()).encode()).hexdigest()
+    gate_expected = {"receipt_version": "linkedin_gate_signoff_v1", "packet_kind": "comment",
+                     "kind": "feed_comment", "verdict": "signoff", "failing_gate": None,
+                     "claims_traced": True, "receipt_path": str(gate_receipt_path),
+                     "action_id": action_id, "source_activity_id": selected_activity,
+                     "source_artifact_sha256": source_artifact_sha256,
+                     "text_hash": normalized, "content_hash": normalized}
+    rows = gate_receipt.get("gates")
+    if (not required.issubset(gate_receipt)
+            or any(gate_receipt.get(key) != value for key, value in gate_expected.items())
+            or not isinstance(rows, list) or not rows
+            or any(not isinstance(row, dict) or row.get("passed") is not True for row in rows)):
+        raise RuntimeError("revenue comment gate receipt is not an exact signoff")
+    return {**transaction, "text_bytes": text_bytes, "text_chars": len(text),
+            "transaction_sha256": hashlib.sha256(transaction_bytes).hexdigest(),
+            "expected_author_name_sha256": hashlib.sha256(expected_author_name.encode()).hexdigest()}
 
 
 def _do_ui_action(arguments: dict) -> str:
@@ -4910,6 +4899,10 @@ def _do_ui_action(arguments: dict) -> str:
         return terminal_refusal(
             "a prior ui_action failure ended this turn; all later UI calls are refused"
         )
+    if isinstance(sequence.get("terminal_delivery"), dict):
+        return terminal_refusal(
+            "a prior comment delivery ended this turn; all later UI calls are refused"
+        )
     platform = _UI_ACTION_BINDINGS.get(display)
     if not platform:
         return terminal_refusal(
@@ -4935,7 +4928,9 @@ def _do_ui_action(arguments: dict) -> str:
     consumed_revision = ""
     expected_primitive = ""
     expected_max_text_chars: int | None = None
-    paste_input: dict[str, object] | None = None
+    card: dict[str, object] | None = None
+    private_comment: dict[str, object] | None = None
+    private_semantic_input_bytes: bytes | None = None
     if action in {"scroll_into_view", "activate", "paste"}:
         observed = observations.pop(display, None)
         if not isinstance(observed, dict):
@@ -4956,25 +4951,14 @@ def _do_ui_action(arguments: dict) -> str:
             return terminal_refusal(
                 f"{action} requires one mapped element from the preceding observe"
             )
-        refs = observed.get("canonical_refs")
-        ref = refs.get(element) if isinstance(refs, dict) else None
-        if not isinstance(ref, str) or not ref:
+        cards = observed.get("canonical_cards")
+        card = cards.get(element) if isinstance(cards, dict) else None
+        if not isinstance(card, dict):
             return terminal_refusal(
                 f"preceding observe did not map exactly one canonical {element!r} target"
             )
-        primitives = observed.get("canonical_primitives")
-        expected_primitive = (
-            primitives.get(element) if isinstance(primitives, dict) else None
-        )
-        if expected_primitive not in {
-            "activate",
-            "mapped_pointer_activate",
-            "scroll_into_view",
-            "paste_frozen_text",
-        }:
-            return terminal_refusal(
-                "preceding observe did not bind one supported YAML UI primitive"
-            )
+        ref = str(card.get("ref") or "")
+        expected_primitive = str(card.get("method") or "")
         if action == "scroll_into_view" and expected_primitive != "scroll_into_view":
             return terminal_refusal(
                 "scroll_into_view requires a YAML-declared scroll_into_view primitive"
@@ -4982,6 +4966,8 @@ def _do_ui_action(arguments: dict) -> str:
         if action == "activate" and expected_primitive not in {
             "activate",
             "mapped_pointer_activate",
+            "activate_optional_like",
+            "submit_frozen_comment",
         }:
             return terminal_refusal(
                 "activate requires a YAML-declared page activation primitive"
@@ -4991,12 +4977,7 @@ def _do_ui_action(arguments: dict) -> str:
                 "paste requires the YAML-declared paste_frozen_text primitive"
             )
         if action == "paste":
-            observed_maxima = observed.get("canonical_max_text_chars")
-            expected_max_text_chars = (
-                observed_maxima.get(element)
-                if isinstance(observed_maxima, dict)
-                else None
-            )
+            expected_max_text_chars = card.get("max_text_chars")
             if (
                 isinstance(expected_max_text_chars, bool)
                 or not isinstance(expected_max_text_chars, int)
@@ -5010,29 +4991,60 @@ def _do_ui_action(arguments: dict) -> str:
             return terminal_refusal(
                 "preceding observe did not provide a valid snapshot revision"
             )
-        if action == "paste":
-            if sequence.get("paste_spent") is not None:
+        if action == "paste" or expected_primitive in SEMANTIC_OUTWARD:
+            spent_key = {
+                "paste_frozen_text": "paste_spent",
+                "activate_optional_like": "like_spent",
+                "submit_frozen_comment": "submit_spent",
+            }[expected_primitive]
+            if sequence.get(spent_key) is not None:
                 return terminal_refusal(
-                    "the revenue paste transaction was already spent in this turn"
+                    f"the revenue {spent_key.removesuffix('_spent')} transaction "
+                    "was already spent in this turn"
                 )
             try:
-                paste_input = _resolve_revenue_ui_private_paste(context)
+                private_comment = _resolve_revenue_ui_private_comment(context)
             except Exception as exc:
                 return terminal_refusal(str(exc))
-            private_text_chars = paste_input.get("text_chars")
+            if (
+                private_comment.get("display") != display
+                or private_comment.get("selected_activity")
+                != card.get("selected_activity")
+                or private_comment.get("selected_post_body_sha256")
+                != card.get("selected_post_body_sha256")
+            ):
+                return terminal_refusal(
+                    "private comment manifest does not match the fresh display/activity/body"
+                )
+            if sequence.setdefault("comment_binding", private_comment["transaction_sha256"]) != private_comment["transaction_sha256"]:
+                return terminal_refusal("private comment manifest changed within the active turn")
+            private_text_chars = private_comment.get("text_chars")
             if (
                 isinstance(private_text_chars, bool)
                 or not isinstance(private_text_chars, int)
                 or private_text_chars < 1
             ):
                 return terminal_refusal(
-                    "private paste transaction returned no exact positive text length"
+                    "private comment transaction returned no exact positive text length"
                 )
-            if private_text_chars > expected_max_text_chars:
+            if action == "paste" and private_text_chars > expected_max_text_chars:
                 return terminal_refusal(
                     "private paste text exceeds the fresh YAML-owned max_text_chars"
                 )
-            sequence["paste_spent"] = paste_input["transaction_sha256"]
+            if expected_primitive == "activate_optional_like" and private_comment.get("like_authorized") is not True:
+                return terminal_refusal("optional Like is not authorized by the private manifest")
+            if expected_primitive == "submit_frozen_comment" and (
+                sequence.get("paste_spent") != private_comment.get("transaction_sha256")
+                or card.get("draft_sha256") != private_comment.get("text_sha256")
+            ):
+                return terminal_refusal(
+                    "submit requires the same spent manifest and exact pasted draft hash"
+                )
+            if expected_primitive in SEMANTIC_OUTWARD:
+                private_semantic_input_bytes = canonical_json_bytes(
+                    semantic_input(private_comment, card)
+                )
+            sequence[spent_key] = private_comment["transaction_sha256"]
 
     lease_owner = f"taey-drive:{seat_id}:{process_generation}"
     drive_env = dict(os.environ)
@@ -5058,19 +5070,34 @@ def _do_ui_action(arguments: dict) -> str:
         display,
     ]
     if action in {"scroll_into_view", "activate", "paste"}:
+        assert isinstance(card, dict)
         command.extend(["--ref", ref])
+        command.extend(["--operation-card-sha256", str(card["card_sha256"])])
     if action == "paste":
-        assert isinstance(paste_input, dict)
+        assert isinstance(private_comment, dict)
         assert isinstance(expected_max_text_chars, int)
-        command.extend(["--text-sha256", str(paste_input["text_sha256"])])
+        command.extend(["--text-sha256", str(private_comment["text_sha256"])])
         command.extend(["--max-text-chars", str(expected_max_text_chars)])
+    if action == "activate" and expected_primitive in SEMANTIC_OUTWARD:
+        assert isinstance(private_semantic_input_bytes, bytes)
+        command.extend([
+            "--private-semantic-input-sha256",
+            hashlib.sha256(private_semantic_input_bytes).hexdigest(),
+        ])
 
     try:
-        if action == "paste":
-            assert isinstance(paste_input, dict)
+        private_stdin = action == "paste" or (
+            action == "activate" and expected_primitive in SEMANTIC_OUTWARD
+        )
+        if private_stdin:
+            assert isinstance(private_comment, dict)
             completed = subprocess.run(
                 command,
-                input=paste_input["text_bytes"],
+                input=(
+                    private_comment["text_bytes"]
+                    if action == "paste"
+                    else private_semantic_input_bytes
+                ),
                 capture_output=True,
                 timeout=90,
                 env=drive_env,
@@ -5090,7 +5117,10 @@ def _do_ui_action(arguments: dict) -> str:
             "action": action,
             "rc": "timeout",
         })
-        return terminal_refusal("ui_action timed out after 90s")
+        timeout_message = "ui_action timed out after 90s"
+        if expected_primitive in SEMANTIC_OUTWARD:
+            timeout_message = f"SIDE_EFFECT_UNCERTAIN: {timeout_message}"
+        return terminal_refusal(timeout_message)
     except Exception as exc:
         _audit("ui_action", {
             "display": display,
@@ -5106,14 +5136,17 @@ def _do_ui_action(arguments: dict) -> str:
         "action": action,
         "rc": completed.returncode,
     })
+    binary_subprocess = action == "paste" or (
+        action == "activate" and expected_primitive in SEMANTIC_OUTWARD
+    )
     stdout_value = (
         completed.stdout or b""
-        if action == "paste"
+        if binary_subprocess
         else completed.stdout or ""
     )
     stderr_value = (
         completed.stderr or b""
-        if action == "paste"
+        if binary_subprocess
         else completed.stderr or ""
     )
     stdout = (
@@ -5149,7 +5182,12 @@ def _do_ui_action(arguments: dict) -> str:
             detail = (
                 f"ui_drive exit={completed.returncode}; stderr={stderr_excerpt}"
             )
-        return terminal_refusal(detail or "ui_action failed")
+        detail = detail or "ui_action failed"
+        if expected_primitive in SEMANTIC_OUTWARD and not detail.startswith(
+            "SIDE_EFFECT_UNCERTAIN:"
+        ):
+            detail = f"SIDE_EFFECT_UNCERTAIN: {detail}"
+        return terminal_refusal(detail)
 
     result = payload["result"]
     if action == "observe":
@@ -5159,102 +5197,52 @@ def _do_ui_action(arguments: dict) -> str:
             return terminal_refusal(
                 "ui_action observe returned no valid revision-bound mapped list"
             )
-        refs_by_element: dict[str, list[str]] = {}
-        primitives_by_element: dict[str, list[str]] = {}
-        maxima_by_element: dict[str, list[int]] = {}
+        cards_by_element: dict[str, list[dict[str, object]]] = {}
         for item in mapped:
             if not isinstance(item, dict):
                 continue
             element = item.get("element")
             item_ref = item.get("ref")
-            declared = item.get("declared_operation")
-            declared_method = (
-                declared.get("method") if isinstance(declared, dict) else None
-            )
-            declared_effect = (
-                declared.get("effect_class") if isinstance(declared, dict) else None
-            )
-            if (
+            public_card = item.get("operation_card")
+            if not (
                 isinstance(element, str)
                 and isinstance(item_ref, str)
-                and isinstance(declared, dict)
-                and (declared_method, declared_effect) in {
-                    ("activate", "page"),
-                    ("mapped_pointer_activate", "page"),
-                    ("scroll_into_view", "viewport"),
-                    ("paste_frozen_text", "draft"),
-                }
-                and declared.get("primitives") == [declared_method]
-                and declared.get("allowed_now") == [declared_method]
+                and isinstance(public_card, dict)
             ):
-                refs_by_element.setdefault(element, []).append(item_ref)
-                primitives_by_element.setdefault(element, []).append(
-                    declared_method
-                )
-                if declared_method == "paste_frozen_text":
-                    max_text_chars = declared.get("max_text_chars")
-                    if (
-                        isinstance(max_text_chars, int)
-                        and not isinstance(max_text_chars, bool)
-                        and max_text_chars > 0
-                    ):
-                        maxima_by_element.setdefault(element, []).append(
-                            max_text_chars
-                        )
-        canonical_refs = {
-            element: refs[0]
-            for element, refs in refs_by_element.items()
-            if len(refs) == 1
-        }
-        canonical_primitives = {
-            element: primitives_by_element[element][0]
-            for element in canonical_refs
-            if len(primitives_by_element.get(element) or []) == 1
-        }
-        canonical_refs = {
-            element: ref
-            for element, ref in canonical_refs.items()
-            if element in canonical_primitives
-        }
-        canonical_max_text_chars = {
-            element: maxima_by_element[element][0]
-            for element, primitive in canonical_primitives.items()
-            if primitive == "paste_frozen_text"
-            and len(maxima_by_element.get(element) or []) == 1
-        }
-        canonical_refs = {
-            element: ref
-            for element, ref in canonical_refs.items()
-            if canonical_primitives[element] != "paste_frozen_text"
-            or element in canonical_max_text_chars
-        }
-        canonical_primitives = {
-            element: primitive
-            for element, primitive in canonical_primitives.items()
-            if element in canonical_refs
+                continue
+            try:
+                card = validate_operation_card(public_card)
+            except ValueError:
+                continue
+            if card.get("element") == element and card.get("ref") == item_ref:
+                cards_by_element.setdefault(element, []).append(card)
+        canonical_cards = {
+            element: cards[0]
+            for element, cards in cards_by_element.items()
+            if len(cards) == 1
         }
         observations[display] = {
             "platform": platform,
             "snapshot_revision": revision,
             "tool_round": tool_round,
-            "canonical_refs": canonical_refs,
-            "canonical_primitives": canonical_primitives,
-            "canonical_max_text_chars": canonical_max_text_chars,
+            "canonical_cards": canonical_cards,
         }
         payload["ui_sequence"] = {
             "state": "observed",
             "snapshot_revision": revision,
             "tool_round": tool_round,
-            "mapped_actions": sorted(canonical_refs),
-            "mutation_token_issued": bool(canonical_refs),
+            "mapped_actions": sorted(canonical_cards),
+            "mutation_token_issued": bool(canonical_cards),
         }
         return _json.dumps(payload)
 
     postcondition = result.get("post_action_observation")
     if action == "paste":
-        assert isinstance(paste_input, dict)
+        assert isinstance(private_comment, dict)
+        assert isinstance(card, dict)
         assert isinstance(expected_max_text_chars, int)
-        expected_text_sha256 = str(paste_input["text_sha256"])
+        expected_text_sha256 = str(private_comment["text_sha256"])
+        evidence = result.get("postcondition_evidence")
         if (
             result.get("performed") is not True
             or result.get("performed_primitive") != "paste_frozen_text"
@@ -5264,22 +5252,28 @@ def _do_ui_action(arguments: dict) -> str:
             or result.get("consumed_max_text_chars") != expected_max_text_chars
             or result.get("observe_required_before_next_mutation") is not True
             or not isinstance(postcondition, dict)
-            or postcondition.get("element_key") != arguments.get("element")
-            or postcondition.get("operation") != "paste_frozen_text"
-            or postcondition.get("effect_class") != "draft"
-            or postcondition.get("route_exact") is not True
-            or postcondition.get("activity_exact") is not True
-            or postcondition.get("editor_text_sha256") != expected_text_sha256
-            or postcondition.get("editor_text_chars") != result.get("pasted_chars")
+            or not isinstance(evidence, dict)
         ):
             return terminal_refusal(
                 "ui_action paste returned no exact editor text postcondition receipt"
             )
+        try:
+            validate_operation_evidence(
+                card=card, manifest=private_comment, precondition=None,
+                postcondition=evidence, precondition_sha256=None,
+                postcondition_sha256=result.get("postcondition_sha256"),
+            )
+        except Exception as exc:
+            return terminal_refusal(f"ui_action paste evidence refused: {exc}")
         payload["ui_sequence"] = {
             "state": "draft_transition_complete",
             "consumed_snapshot_revision": consumed_revision,
             "text_sha256": expected_text_sha256,
             "consumed_max_text_chars": expected_max_text_chars,
+            "selected_activity": card["selected_activity"],
+            "selected_post_body_sha256": card["selected_post_body_sha256"],
+            "manifest_sha256": private_comment["transaction_sha256"],
+            "gate_receipt_sha256": private_comment["gate_receipt_sha256"],
             "postcondition": postcondition,
             "observe_required_before_next_mutation": True,
             "mutation_token_issued": False,
@@ -5308,6 +5302,38 @@ def _do_ui_action(arguments: dict) -> str:
             "consumed_snapshot_revision": consumed_revision,
             "postcondition": postcondition,
             "observe_required_before_next_mutation": True,
+            "mutation_token_issued": False,
+        }
+        return _json.dumps(payload)
+
+    if expected_primitive in SEMANTIC_OUTWARD:
+        assert isinstance(private_comment, dict)
+        assert isinstance(card, dict)
+        try:
+            receipt = validate_semantic_receipt(
+                result.get("semantic_receipt"),
+                card=card,
+                manifest=private_comment,
+            )
+        except Exception as exc:
+            return terminal_refusal(
+                f"SIDE_EFFECT_UNCERTAIN: semantic receipt refused: {exc}"
+            )
+        submit = expected_primitive == "submit_frozen_comment"
+        if submit:
+            sequence["terminal_delivery"] = receipt
+        payload["ui_sequence"] = {
+            "state": (
+                "terminal_delivery_verified"
+                if submit
+                else "optional_like_transition_complete"
+            ),
+            "consumed_snapshot_revision": consumed_revision,
+            "semantic_receipt": receipt,
+            "gate_receipt_sha256": private_comment["gate_receipt_sha256"],
+            "next_mutation_authorized": not submit,
+            "terminal_delivery_verified": submit,
+            "observe_required_before_next_mutation": not submit,
             "mutation_token_issued": False,
         }
         return _json.dumps(payload)
