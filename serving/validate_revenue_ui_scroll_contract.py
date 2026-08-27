@@ -49,6 +49,14 @@ def main() -> int:
         '("paste_frozen_text", "draft")' in observe,
         'revenue observe does not expose the declared editor paste transition',
     )
+    for required in (
+        '(declared_method, declared_effect) == ("observe", "observation")',
+        'declared.get("primitives") == []',
+        'declared.get("allowed_now") == []',
+        'declared_method == "paste_frozen_text"',
+        'max_text_chars <= 0',
+    ):
+        require(required in observe, f'revenue observe missing {required!r}')
 
     scroll = function_source(UI_DRIVE, '_revenue_scroll_into_view')
     for required in (
@@ -77,6 +85,8 @@ def main() -> int:
         '_resolve_revenue_target(args, deps)',
         'declared.get("method") != "paste_frozen_text"',
         'declared.get("effect_class") != "draft"',
+        'declared.get("max_text_chars") != consumed_max_text_chars',
+        'len(text) > consumed_max_text_chars',
         'deps.input.clipboard_paste(text)',
         'stable_post_action_observation',
         'postcondition.get("element_key") != row["element"]',
@@ -95,6 +105,7 @@ def main() -> int:
     observed_snapshot = FakeSnapshot()
     post_snapshot = FakeSnapshot()
     exact_text = 'Exact private comment\n'
+    declared_max_text_chars = len(exact_text)
     exact_text_sha256 = hashlib.sha256(exact_text.encode('utf-8')).hexdigest()
     clipboard_calls: list[str] = []
 
@@ -143,6 +154,7 @@ def main() -> int:
             'effect_class': 'draft',
             'primitives': ['paste_frozen_text'],
             'allowed_now': ['paste_frozen_text'],
+            'max_text_chars': declared_max_text_chars,
         },
         '_snapshot_revision': lambda snapshot, scope='base': (
             'a' * 64 if snapshot is observed_snapshot else 'b' * 64
@@ -156,7 +168,10 @@ def main() -> int:
     }
     exec(paste, paste_namespace)
     paste_result = paste_namespace['_revenue_paste'](
-        SimpleNamespace(text_sha256=exact_text_sha256),
+        SimpleNamespace(
+            text_sha256=exact_text_sha256,
+            max_text_chars=declared_max_text_chars,
+        ),
         SimpleNamespace(
             platform='linkedin',
             input=SimpleNamespace(
@@ -170,6 +185,29 @@ def main() -> int:
         and paste_result['performed_primitive'] == 'paste_frozen_text',
         'revenue paste did not execute one exact hash-bound primitive',
     )
+    oversized_text = exact_text + 'x'
+    paste_namespace['sys'].stdin.buffer = io.BytesIO(oversized_text.encode('utf-8'))
+    try:
+        paste_namespace['_revenue_paste'](
+            SimpleNamespace(
+                text_sha256=hashlib.sha256(oversized_text.encode('utf-8')).hexdigest(),
+                max_text_chars=declared_max_text_chars,
+            ),
+            SimpleNamespace(
+                platform='linkedin',
+                input=SimpleNamespace(
+                    clipboard_paste=lambda text: clipboard_calls.append(text) is None,
+                ),
+            ),
+        )
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError('revenue paste accepted text over observed max_text_chars')
+    require(
+        clipboard_calls == [exact_text],
+        'over-limit revenue text reached the clipboard paste side effect',
+    )
     parser = function_source(UI_DRIVE, '_parser')
     paste_parser = parser.split(
         'commands.add_parser("ui-paste")',
@@ -177,6 +215,7 @@ def main() -> int:
     )[1].split('for action in', 1)[0]
     require(
         '--text-sha256' in paste_parser
+        and '--max-text-chars' in paste_parser
         and '--text"' not in paste_parser
         and '--text-file' not in paste_parser,
         'ui-paste must accept a hash but no model-supplied text or path',
@@ -189,10 +228,14 @@ def main() -> int:
         '"paste": "ui-paste"',
         'expected_primitive != "scroll_into_view"',
         'expected_primitive != "paste_frozen_text"',
+        'private_text_chars > expected_max_text_chars',
+        '"canonical_max_text_chars": canonical_max_text_chars',
+        '"--max-text-chars", str(expected_max_text_chars)',
         '_resolve_revenue_ui_private_paste(context)',
         'input=paste_input["text_bytes"]',
         '"state": "draft_transition_complete"',
         'postcondition.get("editor_text_sha256") != expected_text_sha256',
+        'result.get("consumed_max_text_chars") != expected_max_text_chars',
         '"state": "viewport_transition_complete"',
         'postcondition.get("live_extent_in_viewport") is not True',
     ):
@@ -257,6 +300,7 @@ def main() -> int:
         })
         require(
             resolved['text_bytes'] == text.encode('utf-8')
+            and resolved['text_chars'] == len(text)
             and resolved['text_sha256'] == text_sha256,
             'private paste resolver did not return the exact immutable bytes and hash',
         )
@@ -295,6 +339,7 @@ def main() -> int:
         'action="scroll_into_view" only for method scroll_into_view' in normalized_prompt
         and 'action="paste" only for method paste_frozen_text' in normalized_prompt
         and 'Never supply or reconstruct text or a file path.' in normalized_prompt
+        and 'enforces the fresh YAML-owned max_text_chars before paste' in normalized_prompt
         and 'Observe again before any later action.' in normalized_prompt,
         'Taey revenue prompt does not preserve the separate observed one-action sequence',
     )

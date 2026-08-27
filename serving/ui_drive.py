@@ -1167,16 +1167,31 @@ def _observe_revenue(
         if not isinstance(declared, dict):
             continue
         declared_effect = declared.get("effect_class")
-        if (
-            (declared_method, declared_effect) not in {
+        mutation_declared = (
+            (declared_method, declared_effect) in {
                 ("activate", "page"),
                 ("mapped_pointer_activate", "page"),
                 ("scroll_into_view", "viewport"),
                 ("paste_frozen_text", "draft"),
             }
-            or declared.get("primitives") != [declared_method]
-            or declared.get("allowed_now") != [declared_method]
+            and declared.get("primitives") == [declared_method]
+            and declared.get("allowed_now") == [declared_method]
+        )
+        observation_declared = (
+            (declared_method, declared_effect) == ("observe", "observation")
+            and declared.get("primitives") == []
+            and declared.get("allowed_now") == []
+        )
+        max_text_chars = declared.get("max_text_chars")
+        if declared_method == "paste_frozen_text" and (
+                isinstance(max_text_chars, bool)
+                or not isinstance(max_text_chars, int)
+                or max_text_chars <= 0
         ):
+            raise UiDriveError(
+                f"{element_key} paste_frozen_text has no positive YAML max_text_chars"
+            )
+        if not mutation_declared and not observation_declared:
             continue
         ref = _encode_ref(
             display=deps.display,
@@ -1718,6 +1733,15 @@ def _revenue_paste(
         raise UiDriveError("revenue paste stdin is not exact UTF-8") from exc
     if "\x00" in text:
         raise UiDriveError("revenue paste text contains a NUL character")
+    consumed_max_text_chars = args.max_text_chars
+    if (
+        isinstance(consumed_max_text_chars, bool)
+        or not isinstance(consumed_max_text_chars, int)
+        or consumed_max_text_chars <= 0
+    ):
+        raise UiDriveError(
+            "revenue paste requires one positive observed YAML max_text_chars"
+        )
 
     row, observed_snapshot = _resolve_revenue_target(args, deps)
     declared = _revenue_declared_operation(
@@ -1730,9 +1754,14 @@ def _revenue_paste(
         or declared.get("effect_class") != "draft"
         or declared.get("primitives") != ["paste_frozen_text"]
         or declared.get("allowed_now") != ["paste_frozen_text"]
+        or declared.get("max_text_chars") != consumed_max_text_chars
     ):
         raise UiDriveError(
             f"{row['element']} is not currently authorized for one editor paste"
+        )
+    if len(text) > consumed_max_text_chars:
+        raise UiDriveError(
+            "revenue paste text exceeds the fresh YAML-owned max_text_chars"
         )
     if not deps.input.clipboard_paste(text):
         raise UiDriveError("clipboard_paste primitive returned false")
@@ -1797,6 +1826,7 @@ def _revenue_paste(
         "pasted_bytes": len(text_bytes),
         "pasted_chars": len(text),
         "text_sha256": expected_text_sha256,
+        "consumed_max_text_chars": consumed_max_text_chars,
         "consumed_snapshot_revision": _snapshot_revision(
             observed_snapshot,
             scope="base",
@@ -2262,6 +2292,7 @@ def _parser() -> argparse.ArgumentParser:
     _add_display(revenue_paste)
     _add_target(revenue_paste)
     revenue_paste.add_argument("--text-sha256", required=True)
+    revenue_paste.add_argument("--max-text-chars", required=True, type=int)
 
     for action in ("click", "focus", "activate", "hover", "operate"):
         target = commands.add_parser(action)

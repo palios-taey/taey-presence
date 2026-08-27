@@ -17,7 +17,8 @@ exact element key.
 For paste, choose only the exact freshly mapped editor whose declared operation is method paste_frozen_text. Supply only
 display, action="paste", and that element key. Never supply or reconstruct text or a file path. Presence resolves
 the one immutable private transaction bound to the active seat, event, and correlation identities, verifies its
-exact UTF-8 byte hash, and the public platform hook must prove the same hash in the mapped editor. Observe again
+exact UTF-8 byte hash, enforces the fresh YAML-owned max_text_chars before paste, and the public platform hook
+must prove the same hash in the mapped editor. Observe again
 before any later action.
 
 One call is one action. Never perform or request a screen sequence.

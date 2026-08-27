@@ -4832,6 +4832,7 @@ def _resolve_revenue_ui_private_paste(
         raise RuntimeError("revenue paste transaction text hash is not exact")
     return {
         "text_bytes": text_bytes,
+        "text_chars": len(text),
         "text_sha256": text_sha256,
         "transaction_sha256": hashlib.sha256(transaction_bytes).hexdigest(),
     }
@@ -4933,6 +4934,7 @@ def _do_ui_action(arguments: dict) -> str:
     ref = ""
     consumed_revision = ""
     expected_primitive = ""
+    expected_max_text_chars: int | None = None
     paste_input: dict[str, object] | None = None
     if action in {"scroll_into_view", "activate", "paste"}:
         observed = observations.pop(display, None)
@@ -4988,6 +4990,21 @@ def _do_ui_action(arguments: dict) -> str:
             return terminal_refusal(
                 "paste requires the YAML-declared paste_frozen_text primitive"
             )
+        if action == "paste":
+            observed_maxima = observed.get("canonical_max_text_chars")
+            expected_max_text_chars = (
+                observed_maxima.get(element)
+                if isinstance(observed_maxima, dict)
+                else None
+            )
+            if (
+                isinstance(expected_max_text_chars, bool)
+                or not isinstance(expected_max_text_chars, int)
+                or expected_max_text_chars <= 0
+            ):
+                return terminal_refusal(
+                    "paste requires one positive fresh YAML-owned max_text_chars"
+                )
         consumed_revision = str(observed.get("snapshot_revision") or "")
         if not re.fullmatch(r"[0-9a-f]{64}", consumed_revision):
             return terminal_refusal(
@@ -5002,6 +5019,19 @@ def _do_ui_action(arguments: dict) -> str:
                 paste_input = _resolve_revenue_ui_private_paste(context)
             except Exception as exc:
                 return terminal_refusal(str(exc))
+            private_text_chars = paste_input.get("text_chars")
+            if (
+                isinstance(private_text_chars, bool)
+                or not isinstance(private_text_chars, int)
+                or private_text_chars < 1
+            ):
+                return terminal_refusal(
+                    "private paste transaction returned no exact positive text length"
+                )
+            if private_text_chars > expected_max_text_chars:
+                return terminal_refusal(
+                    "private paste text exceeds the fresh YAML-owned max_text_chars"
+                )
             sequence["paste_spent"] = paste_input["transaction_sha256"]
 
     lease_owner = f"taey-drive:{seat_id}:{process_generation}"
@@ -5031,7 +5061,9 @@ def _do_ui_action(arguments: dict) -> str:
         command.extend(["--ref", ref])
     if action == "paste":
         assert isinstance(paste_input, dict)
+        assert isinstance(expected_max_text_chars, int)
         command.extend(["--text-sha256", str(paste_input["text_sha256"])])
+        command.extend(["--max-text-chars", str(expected_max_text_chars)])
 
     try:
         if action == "paste":
@@ -5129,6 +5161,7 @@ def _do_ui_action(arguments: dict) -> str:
             )
         refs_by_element: dict[str, list[str]] = {}
         primitives_by_element: dict[str, list[str]] = {}
+        maxima_by_element: dict[str, list[int]] = {}
         for item in mapped:
             if not isinstance(item, dict):
                 continue
@@ -5158,6 +5191,16 @@ def _do_ui_action(arguments: dict) -> str:
                 primitives_by_element.setdefault(element, []).append(
                     declared_method
                 )
+                if declared_method == "paste_frozen_text":
+                    max_text_chars = declared.get("max_text_chars")
+                    if (
+                        isinstance(max_text_chars, int)
+                        and not isinstance(max_text_chars, bool)
+                        and max_text_chars > 0
+                    ):
+                        maxima_by_element.setdefault(element, []).append(
+                            max_text_chars
+                        )
         canonical_refs = {
             element: refs[0]
             for element, refs in refs_by_element.items()
@@ -5173,12 +5216,30 @@ def _do_ui_action(arguments: dict) -> str:
             for element, ref in canonical_refs.items()
             if element in canonical_primitives
         }
+        canonical_max_text_chars = {
+            element: maxima_by_element[element][0]
+            for element, primitive in canonical_primitives.items()
+            if primitive == "paste_frozen_text"
+            and len(maxima_by_element.get(element) or []) == 1
+        }
+        canonical_refs = {
+            element: ref
+            for element, ref in canonical_refs.items()
+            if canonical_primitives[element] != "paste_frozen_text"
+            or element in canonical_max_text_chars
+        }
+        canonical_primitives = {
+            element: primitive
+            for element, primitive in canonical_primitives.items()
+            if element in canonical_refs
+        }
         observations[display] = {
             "platform": platform,
             "snapshot_revision": revision,
             "tool_round": tool_round,
             "canonical_refs": canonical_refs,
             "canonical_primitives": canonical_primitives,
+            "canonical_max_text_chars": canonical_max_text_chars,
         }
         payload["ui_sequence"] = {
             "state": "observed",
@@ -5192,6 +5253,7 @@ def _do_ui_action(arguments: dict) -> str:
     postcondition = result.get("post_action_observation")
     if action == "paste":
         assert isinstance(paste_input, dict)
+        assert isinstance(expected_max_text_chars, int)
         expected_text_sha256 = str(paste_input["text_sha256"])
         if (
             result.get("performed") is not True
@@ -5199,6 +5261,7 @@ def _do_ui_action(arguments: dict) -> str:
             or result.get("performed_operation") != "paste_frozen_text"
             or result.get("effect_class") != "draft"
             or result.get("text_sha256") != expected_text_sha256
+            or result.get("consumed_max_text_chars") != expected_max_text_chars
             or result.get("observe_required_before_next_mutation") is not True
             or not isinstance(postcondition, dict)
             or postcondition.get("element_key") != arguments.get("element")
@@ -5216,6 +5279,7 @@ def _do_ui_action(arguments: dict) -> str:
             "state": "draft_transition_complete",
             "consumed_snapshot_revision": consumed_revision,
             "text_sha256": expected_text_sha256,
+            "consumed_max_text_chars": expected_max_text_chars,
             "postcondition": postcondition,
             "observe_required_before_next_mutation": True,
             "mutation_token_issued": False,
