@@ -369,11 +369,6 @@ def _scope_expected_elements(platform: str, scope: str) -> tuple[str, ...]:
             expected.add(menu_target)
     if scope == "app_root_snapshot":
         for extraction_workflow in get_extraction(platform).values():
-            if not any(
-                step.action == "download" and step.element
-                for step in extraction_workflow.steps
-            ):
-                continue
             for step in extraction_workflow.steps:
                 if not step.element:
                     continue
