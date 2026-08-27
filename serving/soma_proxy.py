@@ -27,6 +27,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
+from revenue_ui_contract import (
+    SEMANTIC_OUTWARD,
+    canonical_json_bytes,
+    semantic_input,
+    validate_operation_evidence,
+    validate_operation_card,
+    validate_semantic_receipt,
+)
+
 import asyncio
 import redis
 from starlette.background import BackgroundTask
@@ -274,6 +283,9 @@ def _parse_ui_action_bindings(value: str) -> dict[str, str]:
 _UI_ACTION_BINDINGS = _parse_ui_action_bindings(
     os.environ.get("TAEY_UI_ACTION_BINDINGS", "")
 )
+REVENUE_UI_PRIVATE_ROOT = os.environ.get(
+    "TAEY_REVENUE_UI_PRIVATE_ROOT", ""
+).strip()
 _TOOL_PROFILE_ALLOWED: dict[str, frozenset[str] | None] = {
     _FULL_TOOL_PROFILE: None,
     _MANUAL_CHAT_UI_TOOL_PROFILE: frozenset({
@@ -1421,10 +1433,11 @@ TOOLS = [
             "name": "ui_action",
             "description": (
                 "Observe a trusted revenue display, perform exactly one YAML-declared viewport "
-                "scroll, or perform exactly one mapped page-bound activate from the immediately "
+                "scroll, perform exactly one mapped page-bound activate, or paste one immutable "
+                "private transaction into one mapped editor from the immediately "
                 "preceding fresh observation. The server binds "
                 "the display to its platform; the model never supplies a platform, selector, "
-                "coordinate, URL, or sequence. After either mutation, the public platform hook "
+                "coordinate, URL, sequence, text, or path. After every mutation, the public platform hook "
                 "must verify its exact postcondition and a new observe is required before any "
                 "later mutation. Dropdown opening, option observation, option selection, and result "
                 "verification are separate calls when those capabilities are qualified."
@@ -1440,12 +1453,12 @@ TOOLS = [
                     },
                     "action": {
                         "type": "string",
-                        "enum": ["observe", "scroll_into_view", "activate"],
+                        "enum": ["observe", "scroll_into_view", "activate", "paste"],
                     },
                     "element": {
                         "type": "string",
                         "description": (
-                            "scroll_into_view or activate only: exact mapped element key "
+                            "mutation only: exact mapped element key "
                             "returned by the immediately preceding fresh observe"
                         ),
                     },
@@ -4676,6 +4689,144 @@ def _monitor_touch(
     }
 
 
+def _read_revenue_ui_private_json(
+    path: Path, root: Path, label: str, maximum: int,
+    modes: frozenset[int], beneath: bool,
+) -> tuple[dict, bytes]:
+    try:
+        resolved_path = path.resolve(strict=True)
+        resolved_parent = path.parent.resolve(strict=True)
+        parent = os.lstat(path.parent)
+    except OSError as exc:
+        raise RuntimeError(f"revenue comment {label} is unavailable") from exc
+    if (not path.is_absolute() or path != resolved_path or not stat.S_ISDIR(parent.st_mode)
+            or parent.st_uid != os.geteuid() or (beneath and root not in resolved_parent.parents)
+            or (beneath and stat.S_IMODE(parent.st_mode) != 0o700)):
+        raise RuntimeError(f"revenue comment {label} parent is not owner-controlled")
+    descriptor = None
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        before = os.fstat(descriptor)
+        if (not stat.S_ISREG(before.st_mode) or stat.S_IMODE(before.st_mode) not in modes
+                or before.st_uid != os.geteuid() or not 0 < before.st_size <= maximum):
+            raise RuntimeError(f"revenue comment {label} is not an exact private file")
+        raw = b"".join(iter(lambda: os.read(descriptor, 1024 * 1024), b""))
+        after = os.fstat(descriptor)
+        signature = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+        if len(raw) != before.st_size or signature != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns):
+            raise RuntimeError(f"revenue comment {label} changed while read")
+    except OSError as exc:
+        raise RuntimeError(f"revenue comment {label} failed private-file validation") from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+    def exact(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        if len(pairs) != len({key for key, _ in pairs}):
+            raise ValueError(f"duplicate {label} key")
+        return dict(pairs)
+    try:
+        value = json.loads(raw.decode(), object_pairs_hook=exact)
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise RuntimeError(f"revenue comment {label} is not exact UTF-8 JSON") from exc
+    if not isinstance(value, dict):
+        raise RuntimeError(f"revenue comment {label} is not a JSON object")
+    return value, raw
+
+
+def _resolve_revenue_ui_private_comment(context: dict) -> dict[str, object]:
+    if not REVENUE_UI_PRIVATE_ROOT:
+        raise RuntimeError("TAEY_REVENUE_UI_PRIVATE_ROOT is unset")
+    seat_id = str(context.get("seat_id") or "")
+    event_id = str(context.get("event_id") or "")
+    correlation_id = str(context.get("correlation_id") or "")
+    if (not _SEAT_ID_RE.fullmatch(seat_id) or not _TRACE_ID_RE.fullmatch(event_id)
+            or not _TRACE_ID_RE.fullmatch(correlation_id)):
+        raise RuntimeError("revenue comment identities are invalid")
+    private_root = Path(REVENUE_UI_PRIVATE_ROOT)
+    try:
+        resolved_root = private_root.resolve(strict=True)
+        metadata = os.lstat(private_root)
+    except OSError as exc:
+        raise RuntimeError("revenue comment private root is unavailable") from exc
+    if (not private_root.is_absolute() or private_root != resolved_root
+            or not stat.S_ISDIR(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) != 0o700
+            or metadata.st_uid != os.geteuid()):
+        raise RuntimeError("revenue comment private root is not an owner-controlled 0700 directory")
+    transaction_path = resolved_root / "transactions" / seat_id / f"{correlation_id}.json"
+    transaction, transaction_bytes = _read_revenue_ui_private_json(
+        transaction_path, resolved_root, "transaction", 4 * 1024 * 1024,
+        frozenset({0o400}), True,
+    )
+    keys = {"schema", "operation", "platform", "display", "seat_id", "event_id",
+            "correlation_id", "action_id", "selected_activity", "selected_post_body_sha256",
+            "gate_receipt_path", "gate_receipt_sha256", "gate_receipt_version",
+            "gate_receipt_kind", "source_artifact_sha256", "like_authorized",
+            "expected_author_name", "text", "text_sha256"}
+    if set(transaction) != keys:
+        raise RuntimeError("revenue comment transaction has an invalid exact schema")
+    expected = {"schema": "taey_revenue_ui_private_comment_v1", "operation": "comment",
+                "platform": "linkedin", "seat_id": seat_id, "event_id": event_id,
+                "correlation_id": correlation_id, "gate_receipt_version": "linkedin_gate_signoff_v1",
+                "gate_receipt_kind": "feed_comment"}
+    if any(transaction.get(key) != value for key, value in expected.items()):
+        raise RuntimeError("revenue comment transaction does not match its active identity")
+    display = transaction.get("display")
+    action_id = transaction.get("action_id")
+    selected_activity = transaction.get("selected_activity")
+    selected_post_body_sha256 = transaction.get("selected_post_body_sha256")
+    expected_author_name = transaction.get("expected_author_name")
+    gate_receipt_path_value = transaction.get("gate_receipt_path")
+    gate_receipt_sha256 = transaction.get("gate_receipt_sha256")
+    source_artifact_sha256 = transaction.get("source_artifact_sha256")
+    like_authorized = transaction.get("like_authorized")
+    if (not isinstance(display, str) or not re.fullmatch(r":[1-9][0-9]*", display)
+        or not isinstance(selected_activity, str) or not selected_activity.isdigit()
+        or not isinstance(action_id, str) or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,160}", action_id)
+        or any(not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value)
+               for value in (selected_post_body_sha256, gate_receipt_sha256, source_artifact_sha256))
+        or not isinstance(like_authorized, bool)
+        or not isinstance(gate_receipt_path_value, str) or not gate_receipt_path_value
+        or not isinstance(expected_author_name, str)
+        or not expected_author_name or expected_author_name != expected_author_name.strip()
+        or len(expected_author_name) > 200
+        or any(ord(char) < 32 or ord(char) == 127 for char in expected_author_name)):
+        raise RuntimeError("revenue comment target or approval identity is invalid")
+    text = transaction.get("text")
+    text_sha256 = transaction.get("text_sha256")
+    if not isinstance(text, str) or not text or "\x00" in text or len(text.encode()) > 1024 * 1024:
+        raise RuntimeError("revenue comment transaction text is invalid")
+    text_bytes = text.encode()
+    if (not isinstance(text_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", text_sha256)
+            or hashlib.sha256(text_bytes).hexdigest() != text_sha256):
+        raise RuntimeError("revenue comment transaction text hash is not exact")
+    gate_receipt_path = Path(gate_receipt_path_value)
+    gate_receipt, gate_bytes = _read_revenue_ui_private_json(
+        gate_receipt_path, resolved_root, "gate receipt", 1024 * 1024,
+        frozenset({0o400, 0o440, 0o444, 0o600, 0o640, 0o644, 0o660, 0o664}), False,
+    )
+    if hashlib.sha256(gate_bytes).hexdigest() != gate_receipt_sha256:
+        raise RuntimeError("revenue comment gate receipt hash is not exact")
+    required = {"action_id", "claims_traced", "content_hash", "failing_gate", "gates", "kind",
+                "packet_kind", "receipt_path", "receipt_version", "source_activity_id",
+                "source_artifact_sha256", "text_hash", "verdict"}
+    normalized = hashlib.sha256(re.sub(r"\s+", " ", text.strip()).encode()).hexdigest()
+    gate_expected = {"receipt_version": "linkedin_gate_signoff_v1", "packet_kind": "comment",
+                     "kind": "feed_comment", "verdict": "signoff", "failing_gate": None,
+                     "claims_traced": True, "receipt_path": str(gate_receipt_path),
+                     "action_id": action_id, "source_activity_id": selected_activity,
+                     "source_artifact_sha256": source_artifact_sha256,
+                     "text_hash": normalized, "content_hash": normalized}
+    rows = gate_receipt.get("gates")
+    if (not required.issubset(gate_receipt)
+            or any(gate_receipt.get(key) != value for key, value in gate_expected.items())
+            or not isinstance(rows, list) or not rows
+            or any(not isinstance(row, dict) or row.get("passed") is not True for row in rows)):
+        raise RuntimeError("revenue comment gate receipt is not an exact signoff")
+    return {**transaction, "text_bytes": text_bytes, "text_chars": len(text),
+            "transaction_sha256": hashlib.sha256(transaction_bytes).hexdigest(),
+            "expected_author_name_sha256": hashlib.sha256(expected_author_name.encode()).hexdigest()}
+
+
 def _do_ui_action(arguments: dict) -> str:
     import subprocess
     import json as _json
@@ -4748,15 +4899,19 @@ def _do_ui_action(arguments: dict) -> str:
         return terminal_refusal(
             "a prior ui_action failure ended this turn; all later UI calls are refused"
         )
+    if isinstance(sequence.get("terminal_delivery"), dict):
+        return terminal_refusal(
+            "a prior comment delivery ended this turn; all later UI calls are refused"
+        )
     platform = _UI_ACTION_BINDINGS.get(display)
     if not platform:
         return terminal_refusal(
             f"display {display!r} is not bound by TAEY_UI_ACTION_BINDINGS"
         )
-    if action not in {"observe", "scroll_into_view", "activate"}:
+    if action not in {"observe", "scroll_into_view", "activate", "paste"}:
         return terminal_refusal(
             f"unknown action {action!r}; revenue-ui currently permits observe, "
-            "scroll_into_view, or activate"
+            "scroll_into_view, activate, or paste"
         )
     allowed_arguments = (
         {"display", "action"}
@@ -4772,7 +4927,11 @@ def _do_ui_action(arguments: dict) -> str:
     ref = ""
     consumed_revision = ""
     expected_primitive = ""
-    if action in {"scroll_into_view", "activate"}:
+    expected_max_text_chars: int | None = None
+    card: dict[str, object] | None = None
+    private_comment: dict[str, object] | None = None
+    private_semantic_input_bytes: bytes | None = None
+    if action in {"scroll_into_view", "activate", "paste"}:
         observed = observations.pop(display, None)
         if not isinstance(observed, dict):
             return terminal_refusal(
@@ -4792,37 +4951,100 @@ def _do_ui_action(arguments: dict) -> str:
             return terminal_refusal(
                 f"{action} requires one mapped element from the preceding observe"
             )
-        refs = observed.get("canonical_refs")
-        ref = refs.get(element) if isinstance(refs, dict) else None
-        if not isinstance(ref, str) or not ref:
+        cards = observed.get("canonical_cards")
+        card = cards.get(element) if isinstance(cards, dict) else None
+        if not isinstance(card, dict):
             return terminal_refusal(
                 f"preceding observe did not map exactly one canonical {element!r} target"
             )
-        primitives = observed.get("canonical_primitives")
-        expected_primitive = (
-            primitives.get(element) if isinstance(primitives, dict) else None
-        )
-        if expected_primitive not in {
-            "activate",
-            "mapped_pointer_activate",
-            "scroll_into_view",
-        }:
-            return terminal_refusal(
-                "preceding observe did not bind one supported YAML UI primitive"
-            )
+        ref = str(card.get("ref") or "")
+        expected_primitive = str(card.get("method") or "")
         if action == "scroll_into_view" and expected_primitive != "scroll_into_view":
             return terminal_refusal(
                 "scroll_into_view requires a YAML-declared scroll_into_view primitive"
             )
-        if action == "activate" and expected_primitive == "scroll_into_view":
+        if action == "activate" and expected_primitive not in {
+            "activate",
+            "mapped_pointer_activate",
+            "activate_optional_like",
+            "submit_frozen_comment",
+        }:
             return terminal_refusal(
-                "activate cannot substitute for the YAML-declared scroll_into_view primitive"
+                "activate requires a YAML-declared page activation primitive"
             )
+        if action == "paste" and expected_primitive != "paste_frozen_text":
+            return terminal_refusal(
+                "paste requires the YAML-declared paste_frozen_text primitive"
+            )
+        if action == "paste":
+            expected_max_text_chars = card.get("max_text_chars")
+            if (
+                isinstance(expected_max_text_chars, bool)
+                or not isinstance(expected_max_text_chars, int)
+                or expected_max_text_chars <= 0
+            ):
+                return terminal_refusal(
+                    "paste requires one positive fresh YAML-owned max_text_chars"
+                )
         consumed_revision = str(observed.get("snapshot_revision") or "")
         if not re.fullmatch(r"[0-9a-f]{64}", consumed_revision):
             return terminal_refusal(
                 "preceding observe did not provide a valid snapshot revision"
             )
+        if action == "paste" or expected_primitive in SEMANTIC_OUTWARD:
+            spent_key = {
+                "paste_frozen_text": "paste_spent",
+                "activate_optional_like": "like_spent",
+                "submit_frozen_comment": "submit_spent",
+            }[expected_primitive]
+            if sequence.get(spent_key) is not None:
+                return terminal_refusal(
+                    f"the revenue {spent_key.removesuffix('_spent')} transaction "
+                    "was already spent in this turn"
+                )
+            try:
+                private_comment = _resolve_revenue_ui_private_comment(context)
+            except Exception as exc:
+                return terminal_refusal(str(exc))
+            if (
+                private_comment.get("display") != display
+                or private_comment.get("selected_activity")
+                != card.get("selected_activity")
+                or private_comment.get("selected_post_body_sha256")
+                != card.get("selected_post_body_sha256")
+            ):
+                return terminal_refusal(
+                    "private comment manifest does not match the fresh display/activity/body"
+                )
+            if sequence.setdefault("comment_binding", private_comment["transaction_sha256"]) != private_comment["transaction_sha256"]:
+                return terminal_refusal("private comment manifest changed within the active turn")
+            private_text_chars = private_comment.get("text_chars")
+            if (
+                isinstance(private_text_chars, bool)
+                or not isinstance(private_text_chars, int)
+                or private_text_chars < 1
+            ):
+                return terminal_refusal(
+                    "private comment transaction returned no exact positive text length"
+                )
+            if action == "paste" and private_text_chars > expected_max_text_chars:
+                return terminal_refusal(
+                    "private paste text exceeds the fresh YAML-owned max_text_chars"
+                )
+            if expected_primitive == "activate_optional_like" and private_comment.get("like_authorized") is not True:
+                return terminal_refusal("optional Like is not authorized by the private manifest")
+            if expected_primitive == "submit_frozen_comment" and (
+                sequence.get("paste_spent") != private_comment.get("transaction_sha256")
+                or card.get("draft_sha256") != private_comment.get("text_sha256")
+            ):
+                return terminal_refusal(
+                    "submit requires the same spent manifest and exact pasted draft hash"
+                )
+            if expected_primitive in SEMANTIC_OUTWARD:
+                private_semantic_input_bytes = canonical_json_bytes(
+                    semantic_input(private_comment, card)
+                )
+            sequence[spent_key] = private_comment["transaction_sha256"]
 
     lease_owner = f"taey-drive:{seat_id}:{process_generation}"
     drive_env = dict(os.environ)
@@ -4838,6 +5060,7 @@ def _do_ui_action(arguments: dict) -> str:
         "observe": "ui-observe",
         "scroll_into_view": "ui-scroll-into-view",
         "activate": "ui-activate",
+        "paste": "ui-paste",
     }[action]
     command = [
         UI_DRIVE_PYTHON,
@@ -4846,17 +5069,47 @@ def _do_ui_action(arguments: dict) -> str:
         "--display",
         display,
     ]
-    if action in {"scroll_into_view", "activate"}:
+    if action in {"scroll_into_view", "activate", "paste"}:
+        assert isinstance(card, dict)
         command.extend(["--ref", ref])
+        command.extend(["--operation-card-sha256", str(card["card_sha256"])])
+    if action == "paste":
+        assert isinstance(private_comment, dict)
+        assert isinstance(expected_max_text_chars, int)
+        command.extend(["--text-sha256", str(private_comment["text_sha256"])])
+        command.extend(["--max-text-chars", str(expected_max_text_chars)])
+    if action == "activate" and expected_primitive in SEMANTIC_OUTWARD:
+        assert isinstance(private_semantic_input_bytes, bytes)
+        command.extend([
+            "--private-semantic-input-sha256",
+            hashlib.sha256(private_semantic_input_bytes).hexdigest(),
+        ])
 
     try:
-        completed = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            timeout=90,
-            env=drive_env,
+        private_stdin = action == "paste" or (
+            action == "activate" and expected_primitive in SEMANTIC_OUTWARD
         )
+        if private_stdin:
+            assert isinstance(private_comment, dict)
+            completed = subprocess.run(
+                command,
+                input=(
+                    private_comment["text_bytes"]
+                    if action == "paste"
+                    else private_semantic_input_bytes
+                ),
+                capture_output=True,
+                timeout=90,
+                env=drive_env,
+            )
+        else:
+            completed = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=90,
+                env=drive_env,
+            )
     except subprocess.TimeoutExpired:
         _audit("ui_action", {
             "display": display,
@@ -4864,7 +5117,10 @@ def _do_ui_action(arguments: dict) -> str:
             "action": action,
             "rc": "timeout",
         })
-        return terminal_refusal("ui_action timed out after 90s")
+        timeout_message = "ui_action timed out after 90s"
+        if expected_primitive in SEMANTIC_OUTWARD:
+            timeout_message = f"SIDE_EFFECT_UNCERTAIN: {timeout_message}"
+        return terminal_refusal(timeout_message)
     except Exception as exc:
         _audit("ui_action", {
             "display": display,
@@ -4880,7 +5136,24 @@ def _do_ui_action(arguments: dict) -> str:
         "action": action,
         "rc": completed.returncode,
     })
-    stdout = (completed.stdout or "").strip()
+    binary_subprocess = action == "paste" or (
+        action == "activate" and expected_primitive in SEMANTIC_OUTWARD
+    )
+    stdout_value = (
+        completed.stdout or b""
+        if binary_subprocess
+        else completed.stdout or ""
+    )
+    stderr_value = (
+        completed.stderr or b""
+        if binary_subprocess
+        else completed.stderr or ""
+    )
+    stdout = (
+        stdout_value.decode("utf-8", errors="replace")
+        if isinstance(stdout_value, bytes)
+        else stdout_value
+    ).strip()
     try:
         payload = _json.loads(stdout) if stdout else None
     except Exception:
@@ -4894,7 +5167,11 @@ def _do_ui_action(arguments: dict) -> str:
         and isinstance(payload.get("result"), dict)
     )
     if not succeeded:
-        stderr_excerpt = (completed.stderr or "").strip()[:1000]
+        stderr_excerpt = (
+            stderr_value.decode("utf-8", errors="replace")
+            if isinstance(stderr_value, bytes)
+            else stderr_value
+        ).strip()[:1000]
         if isinstance(payload, dict):
             detail = str(payload.get("error") or "").strip()
             if stderr_excerpt:
@@ -4905,7 +5182,12 @@ def _do_ui_action(arguments: dict) -> str:
             detail = (
                 f"ui_drive exit={completed.returncode}; stderr={stderr_excerpt}"
             )
-        return terminal_refusal(detail or "ui_action failed")
+        detail = detail or "ui_action failed"
+        if expected_primitive in SEMANTIC_OUTWARD and not detail.startswith(
+            "SIDE_EFFECT_UNCERTAIN:"
+        ):
+            detail = f"SIDE_EFFECT_UNCERTAIN: {detail}"
+        return terminal_refusal(detail)
 
     result = payload["result"]
     if action == "observe":
@@ -4915,68 +5197,89 @@ def _do_ui_action(arguments: dict) -> str:
             return terminal_refusal(
                 "ui_action observe returned no valid revision-bound mapped list"
             )
-        refs_by_element: dict[str, list[str]] = {}
-        primitives_by_element: dict[str, list[str]] = {}
+        cards_by_element: dict[str, list[dict[str, object]]] = {}
         for item in mapped:
             if not isinstance(item, dict):
                 continue
             element = item.get("element")
             item_ref = item.get("ref")
-            declared = item.get("declared_operation")
-            declared_method = (
-                declared.get("method") if isinstance(declared, dict) else None
-            )
-            declared_effect = (
-                declared.get("effect_class") if isinstance(declared, dict) else None
-            )
-            if (
+            public_card = item.get("operation_card")
+            if not (
                 isinstance(element, str)
                 and isinstance(item_ref, str)
-                and isinstance(declared, dict)
-                and (declared_method, declared_effect) in {
-                    ("activate", "page"),
-                    ("mapped_pointer_activate", "page"),
-                    ("scroll_into_view", "viewport"),
-                }
-                and declared.get("primitives") == [declared_method]
-                and declared.get("allowed_now") == [declared_method]
+                and isinstance(public_card, dict)
             ):
-                refs_by_element.setdefault(element, []).append(item_ref)
-                primitives_by_element.setdefault(element, []).append(
-                    declared_method
-                )
-        canonical_refs = {
-            element: refs[0]
-            for element, refs in refs_by_element.items()
-            if len(refs) == 1
-        }
-        canonical_primitives = {
-            element: primitives_by_element[element][0]
-            for element in canonical_refs
-            if len(primitives_by_element.get(element) or []) == 1
-        }
-        canonical_refs = {
-            element: ref
-            for element, ref in canonical_refs.items()
-            if element in canonical_primitives
+                continue
+            try:
+                card = validate_operation_card(public_card)
+            except ValueError:
+                continue
+            if card.get("element") == element and card.get("ref") == item_ref:
+                cards_by_element.setdefault(element, []).append(card)
+        canonical_cards = {
+            element: cards[0]
+            for element, cards in cards_by_element.items()
+            if len(cards) == 1
         }
         observations[display] = {
             "platform": platform,
             "snapshot_revision": revision,
             "tool_round": tool_round,
-            "canonical_refs": canonical_refs,
-            "canonical_primitives": canonical_primitives,
+            "canonical_cards": canonical_cards,
         }
         payload["ui_sequence"] = {
             "state": "observed",
             "snapshot_revision": revision,
             "tool_round": tool_round,
-            "mapped_actions": sorted(canonical_refs),
-            "mutation_token_issued": bool(canonical_refs),
+            "mapped_actions": sorted(canonical_cards),
+            "mutation_token_issued": bool(canonical_cards),
         }
         return _json.dumps(payload)
 
     postcondition = result.get("post_action_observation")
+    if action == "paste":
+        assert isinstance(private_comment, dict)
+        assert isinstance(card, dict)
+        assert isinstance(expected_max_text_chars, int)
+        expected_text_sha256 = str(private_comment["text_sha256"])
+        evidence = result.get("postcondition_evidence")
+        if (
+            result.get("performed") is not True
+            or result.get("performed_primitive") != "paste_frozen_text"
+            or result.get("performed_operation") != "paste_frozen_text"
+            or result.get("effect_class") != "draft"
+            or result.get("text_sha256") != expected_text_sha256
+            or result.get("consumed_max_text_chars") != expected_max_text_chars
+            or result.get("observe_required_before_next_mutation") is not True
+            or not isinstance(postcondition, dict)
+            or not isinstance(evidence, dict)
+        ):
+            return terminal_refusal(
+                "ui_action paste returned no exact editor text postcondition receipt"
+            )
+        try:
+            validate_operation_evidence(
+                card=card, manifest=private_comment, precondition=None,
+                postcondition=evidence, precondition_sha256=None,
+                postcondition_sha256=result.get("postcondition_sha256"),
+            )
+        except Exception as exc:
+            return terminal_refusal(f"ui_action paste evidence refused: {exc}")
+        payload["ui_sequence"] = {
+            "state": "draft_transition_complete",
+            "consumed_snapshot_revision": consumed_revision,
+            "text_sha256": expected_text_sha256,
+            "consumed_max_text_chars": expected_max_text_chars,
+            "selected_activity": card["selected_activity"],
+            "selected_post_body_sha256": card["selected_post_body_sha256"],
+            "manifest_sha256": private_comment["transaction_sha256"],
+            "gate_receipt_sha256": private_comment["gate_receipt_sha256"],
+            "postcondition": postcondition,
+            "observe_required_before_next_mutation": True,
+            "mutation_token_issued": False,
+        }
+        return _json.dumps(payload)
+
     if action == "scroll_into_view":
         if (
             result.get("performed") is not True
@@ -4999,6 +5302,38 @@ def _do_ui_action(arguments: dict) -> str:
             "consumed_snapshot_revision": consumed_revision,
             "postcondition": postcondition,
             "observe_required_before_next_mutation": True,
+            "mutation_token_issued": False,
+        }
+        return _json.dumps(payload)
+
+    if expected_primitive in SEMANTIC_OUTWARD:
+        assert isinstance(private_comment, dict)
+        assert isinstance(card, dict)
+        try:
+            receipt = validate_semantic_receipt(
+                result.get("semantic_receipt"),
+                card=card,
+                manifest=private_comment,
+            )
+        except Exception as exc:
+            return terminal_refusal(
+                f"SIDE_EFFECT_UNCERTAIN: semantic receipt refused: {exc}"
+            )
+        submit = expected_primitive == "submit_frozen_comment"
+        if submit:
+            sequence["terminal_delivery"] = receipt
+        payload["ui_sequence"] = {
+            "state": (
+                "terminal_delivery_verified"
+                if submit
+                else "optional_like_transition_complete"
+            ),
+            "consumed_snapshot_revision": consumed_revision,
+            "semantic_receipt": receipt,
+            "gate_receipt_sha256": private_comment["gate_receipt_sha256"],
+            "next_mutation_authorized": not submit,
+            "terminal_delivery_verified": submit,
+            "observe_required_before_next_mutation": not submit,
             "mutation_token_issued": False,
         }
         return _json.dumps(payload)

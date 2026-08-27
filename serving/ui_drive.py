@@ -18,6 +18,15 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+from revenue_ui_contract import (
+    DECLARED_EFFECTS,
+    SEMANTIC_OUTWARD,
+    canonical_sha256,
+    operation_card,
+    parse_semantic_input,
+    semantic_receipt,
+)
+
 
 # The AT-SPI primitives live in the PUBLIC palios-taey/taeys-hands repo
 # (consultation_v2/: platforms_runtime, primitives, atspi, clipboard, input, interact,
@@ -1166,16 +1175,19 @@ def _observe_revenue(
         )
         if not isinstance(declared, dict):
             continue
-        declared_effect = declared.get("effect_class")
-        if (
-            (declared_method, declared_effect) not in {
-                ("activate", "page"),
-                ("mapped_pointer_activate", "page"),
-                ("scroll_into_view", "viewport"),
-            }
-            or declared.get("primitives") != [declared_method]
-            or declared.get("allowed_now") != [declared_method]
-        ):
+        observation_declared = (
+            (declared_method, declared.get("effect_class"))
+            == ("observe", "observation")
+            and declared.get("primitives") == []
+            and declared.get("allowed_now") == []
+        )
+        unavailable_declared = (
+            declared_method in DECLARED_EFFECTS
+            and declared.get("effect_class") == DECLARED_EFFECTS[declared_method]
+            and declared.get("primitives") == [declared_method]
+            and declared.get("allowed_now") == []
+        )
+        if declared_method not in DECLARED_EFFECTS and not observation_declared:
             continue
         ref = _encode_ref(
             display=deps.display,
@@ -1198,6 +1210,13 @@ def _observe_revenue(
             ref=ref,
         )
         public_item["declared_operation"] = declared
+        if not observation_declared and not unavailable_declared:
+            try:
+                public_item["operation_card"] = operation_card(
+                    element=element_key, ref=ref, declared=declared,
+                )
+            except ValueError as exc:
+                raise UiDriveError(str(exc)) from exc
         mapped.append(public_item)
     return {
         "platform": deps.platform,
@@ -1271,25 +1290,93 @@ def _resolve_revenue_target(
     return row, snapshot
 
 
+def _revenue_semantic_activate(
+    row: dict[str, Any], observed_snapshot: Snapshot, declared: dict[str, Any],
+    card: dict[str, Any], args: argparse.Namespace, deps: SimpleNamespace,
+) -> dict[str, Any]:
+    try:
+        private = parse_semantic_input(
+            sys.stdin.buffer.read(1024 * 1024 + 1),
+            str(args.private_semantic_input_sha256 or ""), card=card, display=deps.display,
+        )
+    except Exception as exc:
+        raise UiDriveError(f"private semantic input refused: {exc}") from exc
+    method, manual = card["method"], _manual_ui_module(deps.platform)
+    precondition = None
+    if method == "submit_frozen_comment":
+        verify = getattr(manual, "verify_comment_submit_precondition", None)
+        if not callable(verify):
+            raise UiDriveError(f"{deps.platform} lacks the submit precondition hook")
+        try:
+            precondition = verify(
+                observed_snapshot, row["element"],
+                private["expected_text"], private["expected_author_name"],
+            )
+        except Exception as exc:
+            raise UiDriveError(f"{deps.platform} submit precondition failed: {exc}") from exc
+        required = {
+            "element_key": card["element"], "operation": method,
+            "effect_class": "outward", "precondition": declared["precondition"]["kind"],
+            "route_exact": True, "activity_exact": True, "body_sha256_exact": True,
+            "draft_sha256": private["expected_text_sha256"],
+            "draft_chars": len(private["expected_text"]),
+            "existing_exact_own_comment_count": 0,
+        }
+        if not isinstance(precondition, dict) or any(precondition.get(k) != v for k, v in required.items()):
+            raise UiDriveError(f"{deps.platform} submit precondition receipt is not exact")
+    if not deps.interact.atspi_activate(row):
+        raise UiDriveError("SIDE_EFFECT_UNCERTAIN: atspi_activate primitive returned false")
+    stable = getattr(manual, "stable_post_action_observation", None)
+    if not callable(stable):
+        raise UiDriveError(f"SIDE_EFFECT_UNCERTAIN: {deps.platform} lacks the stable post-action hook")
+    kwargs = ({"expected_text": private["expected_text"],
+               "expected_author_name": private["expected_author_name"]}
+              if method == "submit_frozen_comment" else {})
+    try:
+        post_snapshot, barrier = stable(
+            row["element"], method, time.monotonic() + LOCK_TTL_DEFAULT, **kwargs,
+        )
+    except Exception as exc:
+        raise UiDriveError(f"SIDE_EFFECT_UNCERTAIN: {deps.platform} observation barrier failed: {exc}") from exc
+    postcondition = barrier.get("postcondition_receipt") if isinstance(barrier, dict) else None
+    try:
+        if not isinstance(post_snapshot, Snapshot) or not isinstance(postcondition, dict):
+            raise ValueError("semantic barrier returned no exact snapshot")
+        receipt = semantic_receipt(card=card, private=private, barrier=barrier,
+                                   postcondition=postcondition, precondition=precondition)
+    except Exception as exc:
+        raise UiDriveError(f"SIDE_EFFECT_UNCERTAIN: {exc}") from exc
+    return {
+        "performed": True,
+        "performed_primitive": "atspi_activate", "performed_operation": method,
+        "effect_class": "outward",
+        "element": {"element": row["element"], "ref": row["ref"]},
+        "consumed_snapshot_revision": _snapshot_revision(observed_snapshot, scope="base"),
+        "post_action_observation": {"snapshot_revision": _snapshot_revision(post_snapshot, scope="base"),
+                                    "barrier": barrier, **postcondition},
+        "observe_required_before_next_mutation": barrier.get("observe_required_before_next_mutation"),
+        "next_mutation_authorized": barrier.get("next_mutation_authorized"),
+        "terminal_delivery_verified": barrier.get("terminal_delivery_verified"),
+        "semantic_receipt": receipt,
+    }
+
+
 def _revenue_activate(
     args: argparse.Namespace,
     deps: SimpleNamespace,
 ) -> dict[str, Any]:
     row, observed_snapshot = _resolve_revenue_target(args, deps)
-    declared = _revenue_declared_operation(
-        deps.platform,
-        row["element"],
-        row,
-    )
-    declared_method = (
-        declared.get("method") if isinstance(declared, dict) else None
-    )
-    if not isinstance(declared, dict) or (
-        declared_method not in {"activate", "mapped_pointer_activate"}
-        or declared.get("effect_class") != "page"
-        or declared.get("primitives") != [declared_method]
-        or declared.get("allowed_now") != [declared_method]
-    ):
+    declared = _revenue_declared_operation(deps.platform, row["element"], row)
+    try:
+        card = operation_card(element=row["element"], ref=args.ref, declared=declared)
+    except (TypeError, ValueError) as exc:
+        raise UiDriveError(str(exc)) from exc
+    if card["card_sha256"] != args.operation_card_sha256:
+        raise UiDriveError("fresh operation card does not match the observed card hash")
+    declared_method = card["method"]
+    if declared_method in SEMANTIC_OUTWARD:
+        return _revenue_semantic_activate(row, observed_snapshot, declared, card, args, deps)
+    if declared_method not in {"activate", "mapped_pointer_activate"}:
         raise UiDriveError(
             f"{row['element']} is not currently authorized for one page-bound activate"
         )
@@ -1606,11 +1693,13 @@ def _revenue_scroll_into_view(
         row["element"],
         row,
     )
-    if not isinstance(declared, dict) or (
-        declared.get("method") != "scroll_into_view"
-        or declared.get("effect_class") != "viewport"
-        or declared.get("primitives") != ["scroll_into_view"]
-        or declared.get("allowed_now") != ["scroll_into_view"]
+    try:
+        card = operation_card(element=row["element"], ref=args.ref, declared=declared)
+    except (TypeError, ValueError) as exc:
+        raise UiDriveError(str(exc)) from exc
+    if (
+        card["card_sha256"] != args.operation_card_sha256
+        or card["method"] != "scroll_into_view"
     ):
         raise UiDriveError(
             f"{row['element']} is not currently authorized for one viewport scroll"
@@ -1693,6 +1782,130 @@ def _revenue_scroll_into_view(
             **postcondition,
             "barrier": barrier_receipt,
         },
+        "observe_required_before_next_mutation": True,
+    }
+
+
+def _revenue_paste(
+    args: argparse.Namespace,
+    deps: SimpleNamespace,
+) -> dict[str, Any]:
+    expected_text_sha256 = str(args.text_sha256 or "")
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_text_sha256):
+        raise UiDriveError("revenue paste requires one exact lowercase SHA-256")
+    text_bytes = sys.stdin.buffer.read(1024 * 1024 + 1)
+    if not text_bytes or len(text_bytes) > 1024 * 1024:
+        raise UiDriveError(
+            "revenue paste stdin must contain 1-1048576 immutable UTF-8 bytes"
+        )
+    if hashlib.sha256(text_bytes).hexdigest() != expected_text_sha256:
+        raise UiDriveError("revenue paste stdin bytes do not match --text-sha256")
+    try:
+        text = text_bytes.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise UiDriveError("revenue paste stdin is not exact UTF-8") from exc
+    if "\x00" in text:
+        raise UiDriveError("revenue paste text contains a NUL character")
+    consumed_max_text_chars = args.max_text_chars
+    if (
+        isinstance(consumed_max_text_chars, bool)
+        or not isinstance(consumed_max_text_chars, int)
+        or consumed_max_text_chars <= 0
+    ):
+        raise UiDriveError(
+            "revenue paste requires one positive observed YAML max_text_chars"
+        )
+    row, observed_snapshot = _resolve_revenue_target(args, deps)
+    declared = _revenue_declared_operation(
+        deps.platform,
+        row["element"],
+        row,
+    )
+    try:
+        card = operation_card(element=row["element"], ref=args.ref, declared=declared)
+    except (TypeError, ValueError) as exc:
+        raise UiDriveError(str(exc)) from exc
+    if (
+        card["card_sha256"] != args.operation_card_sha256
+        or card["method"] != "paste_frozen_text"
+        or card["max_text_chars"] != consumed_max_text_chars
+    ):
+        raise UiDriveError(
+            f"{row['element']} is not currently authorized for one editor paste"
+        )
+    if len(text) > consumed_max_text_chars:
+        raise UiDriveError(
+            "revenue paste text exceeds the fresh YAML-owned max_text_chars"
+        )
+    if not deps.input.clipboard_paste(text):
+        raise UiDriveError("clipboard_paste primitive returned false")
+
+    manual = _manual_ui_module(deps.platform)
+    stable_observation = (
+        getattr(manual, "stable_post_action_observation", None)
+        if manual is not None
+        else None
+    )
+    if not callable(stable_observation):
+        raise UiDriveError(
+            f"{deps.platform} has no public stable post-action observation hook"
+        )
+    try:
+        post_snapshot, barrier_receipt = stable_observation(
+            row["element"],
+            "paste_frozen_text",
+            time.monotonic() + LOCK_TTL_DEFAULT,
+            expected_text=text,
+        )
+    except Exception as exc:
+        raise UiDriveError(
+            f"{deps.platform} paste observation barrier failed: {exc}"
+        ) from exc
+    postcondition = (
+        barrier_receipt.get("postcondition_receipt")
+        if isinstance(barrier_receipt, dict)
+        else None
+    )
+    if (
+        not isinstance(post_snapshot, Snapshot)
+        or not isinstance(barrier_receipt, dict)
+        or barrier_receipt.get("result") != "PASS"
+        or barrier_receipt.get("next_mutation_authorized") is not True
+        or barrier_receipt.get("observe_required_before_next_mutation") is not True
+        or not isinstance(postcondition, dict)
+    ):
+        raise UiDriveError(
+            f"{deps.platform} paste observation barrier did not prove the exact editor bytes"
+        )
+    postcondition_sha256 = canonical_sha256(postcondition)
+    return {
+        "performed": True,
+        "performed_primitive": "paste_frozen_text",
+        "performed_operation": "paste_frozen_text",
+        "effect_class": "draft",
+        "element": {
+            "category": "mapped",
+            "element": row["element"],
+            "name": str(row.get("name") or ""),
+            "role": str(row.get("role") or ""),
+            "states": list(row.get("states") or []),
+            "ref": row["ref"],
+        },
+        "pasted_bytes": len(text_bytes),
+        "pasted_chars": len(text),
+        "text_sha256": expected_text_sha256,
+        "consumed_max_text_chars": consumed_max_text_chars,
+        "consumed_snapshot_revision": _snapshot_revision(
+            observed_snapshot,
+            scope="base",
+        ),
+        "post_action_observation": {
+            "snapshot_revision": _snapshot_revision(post_snapshot, scope="base"),
+            "barrier": barrier_receipt,
+            **postcondition,
+        },
+        "postcondition_evidence": postcondition,
+        "postcondition_sha256": postcondition_sha256,
         "observe_required_before_next_mutation": True,
     }
 
@@ -2140,10 +2353,20 @@ def _parser() -> argparse.ArgumentParser:
     revenue_activate = commands.add_parser("ui-activate")
     _add_display(revenue_activate)
     _add_target(revenue_activate)
+    revenue_activate.add_argument("--operation-card-sha256", required=True)
+    revenue_activate.add_argument("--private-semantic-input-sha256")
 
     revenue_scroll = commands.add_parser("ui-scroll-into-view")
     _add_display(revenue_scroll)
     _add_target(revenue_scroll)
+    revenue_scroll.add_argument("--operation-card-sha256", required=True)
+
+    revenue_paste = commands.add_parser("ui-paste")
+    _add_display(revenue_paste)
+    _add_target(revenue_paste)
+    revenue_paste.add_argument("--text-sha256", required=True)
+    revenue_paste.add_argument("--max-text-chars", required=True, type=int)
+    revenue_paste.add_argument("--operation-card-sha256", required=True)
 
     for action in ("click", "focus", "activate", "hover", "operate"):
         target = commands.add_parser(action)
@@ -2223,7 +2446,7 @@ def _parser() -> argparse.ArgumentParser:
 _LOCK_ACTION_OPS = {
     "click", "focus", "activate", "hover", "operate", "type", "paste", "key", "navigate",
     "focus-dialog", "read-clipboard", "extract", "scroll_to_bottom", "ui-activate",
-    "ui-scroll-into-view",
+    "ui-scroll-into-view", "ui-paste",
 }
 
 
@@ -2462,6 +2685,8 @@ def _dispatch(args: argparse.Namespace, deps: SimpleNamespace) -> Any:
         result = _revenue_activate(args, deps)
     elif args.action == "ui-scroll-into-view":
         result = _revenue_scroll_into_view(args, deps)
+    elif args.action == "ui-paste":
+        result = _revenue_paste(args, deps)
     elif args.action in {"click", "focus", "activate", "hover", "operate"}:
         result = _element_action(args.action, args, deps)
     elif args.action == "type":

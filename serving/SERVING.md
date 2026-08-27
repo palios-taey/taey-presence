@@ -457,16 +457,12 @@ builder. A missing or unsafe root refuses the action before mutation; a
 result-finalization failure terminalizes the turn so Taey cannot continue
 without its evidence.
 
-The `revenue-ui` profile exposes only `ui_action`. It is the manual production
-boundary for revenue sites: fresh observe, exactly one mapped primitive, exact
-postcondition, then another fresh observe. The server—not the model—binds each
-display to its platform through `TAEY_UI_ACTION_BINDINGS`. The first qualified
-slice accepts only `linkedin=:N`, `observe`, the exact LinkedIn-only
-`scroll_into_view` viewport transition, and the exact page-bound `activate`
-declared by LinkedIn's public `manual.py`. A scroll must reacquire and prove the
-same exact element in the viewport; another observe is mandatory before
-activation. It cannot type, paste, navigate, select an unobserved option,
-execute a screen, or use `drive_chat`.
+The `revenue-ui` profile exposes only `ui_action`: fresh observe, one mapped primitive, its exact Hands postcondition
+barrier, then another observe. The server binds display/platform through `TAEY_UI_ACTION_BINDINGS`. LinkedIn supports
+private `paste_frozen_text`, authorized `activate_optional_like`, and terminal `submit_frozen_comment`; each consumes
+one hashed operation card and the same owner-controlled `0400` comment manifest. The manifest supplies exact text and
+own-account author and binds the gate receipt by path and SHA. Any indeterminate outward result becomes structurally
+non-retryable `SIDE_EFFECT_UNCERTAIN`; no public producer exists yet, so this is not production-ready.
 
 Use one visible transition per request. This canonical request opens LinkedIn
 Notifications and verifies the exact Notifications route, then stops:
