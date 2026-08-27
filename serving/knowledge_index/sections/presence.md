@@ -91,13 +91,15 @@ production status, which is exactly a new artifact commit.
   "entry_doc": "serving/DEPLOYMENT_TOPOLOGY.md",
   "artifact_paths": [
     "serving/DEPLOYMENT_TOPOLOGY.md",
+    "serving/TAEY_CHAT_UI_SEND_SYSTEM.md",
     "serving/TAEY_LINKEDIN_APPLICATION_CLASSIFICATION_SYSTEM.md",
     "serving/TAEY_LINKEDIN_ENGAGERS_SYSTEM.md",
     "serving/TAEY_LINKEDIN_JOBS_RESTORE_SYSTEM.md",
     "serving/TAEY_LINKEDIN_JOBS_SYSTEM.md",
     "serving/TAEY_OPERATING_PROMPT.md",
     "serving/gates_manifest.json",
-    "serving/soma_proxy.py"
+    "serving/soma_proxy.py",
+    "serving/ui_drive.py"
   ],
   "bootstrap": {
     "cmd": "systemctl --user start taey-soma-proxy-mira.service",

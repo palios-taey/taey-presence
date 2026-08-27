@@ -93,6 +93,10 @@ MANUAL_CHAT_UI_SYSTEM_PROMPT_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
     "TAEY_CHAT_UI_SYSTEM.md",
 )
+MANUAL_CHAT_UI_SEND_SYSTEM_PROMPT_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "TAEY_CHAT_UI_SEND_SYSTEM.md",
+)
 REVENUE_UI_SYSTEM_PROMPT_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
     "TAEY_REVENUE_UI_SYSTEM.md",
@@ -152,6 +156,7 @@ _http: Optional[httpx.AsyncClient] = None
 _ecosystem_http: Optional[httpx.Client] = None
 _system_prompt: str = ""
 _manual_chat_ui_system_prompt: str = ""
+_manual_chat_ui_send_system_prompt: str = ""
 _revenue_ui_system_prompt: str = ""
 _consult_chat_system_prompt: str = ""
 _one_shot_system_prompts: dict[str, str] = {}
@@ -242,6 +247,7 @@ _active_turns: dict[str, TurnContext] = {}
 
 _FULL_TOOL_PROFILE = "full"
 _MANUAL_CHAT_UI_TOOL_PROFILE = "manual-chat-ui"
+_MANUAL_CHAT_UI_SEND_TOOL_PROFILE = "manual-chat-ui-send"
 _REVENUE_UI_TOOL_PROFILE = "revenue-ui"
 _CONSULT_CHAT_TOOL_PROFILE = "consult-chat"
 _LINKEDIN_JOBS_TOOL_PROFILE = "linkedin-jobs"
@@ -289,6 +295,9 @@ REVENUE_UI_PRIVATE_ROOT = os.environ.get(
 _TOOL_PROFILE_ALLOWED: dict[str, frozenset[str] | None] = {
     _FULL_TOOL_PROFILE: None,
     _MANUAL_CHAT_UI_TOOL_PROFILE: frozenset({
+        "drive_chat",
+    }),
+    _MANUAL_CHAT_UI_SEND_TOOL_PROFILE: frozenset({
         "drive_chat",
     }),
     _REVENUE_UI_TOOL_PROFILE: frozenset({
@@ -341,7 +350,8 @@ SOMATIC_BLOCK_RE = re.compile(
 async def startup():
     global _redis, _mira_redis, _http, _ecosystem_http
     global _consult_chat_system_prompt
-    global _manual_chat_ui_system_prompt, _revenue_ui_system_prompt, _permanent_kernel
+    global _manual_chat_ui_send_system_prompt, _manual_chat_ui_system_prompt
+    global _revenue_ui_system_prompt, _permanent_kernel
     global _static_system_prefix, _system_prompt
     global _liveness_reaper_task
     if not _serving_socket_reserved:
@@ -422,6 +432,20 @@ async def startup():
         raise RuntimeError(
             f"manual chat UI system prompt is empty: {manual_chat_prompt_path}"
         )
+    manual_chat_send_prompt_path = Path(MANUAL_CHAT_UI_SEND_SYSTEM_PROMPT_PATH)
+    if not manual_chat_send_prompt_path.is_file():
+        raise RuntimeError(
+            "manual chat UI SEND system prompt is missing or not a regular file: "
+            f"{manual_chat_send_prompt_path}"
+        )
+    _manual_chat_ui_send_system_prompt = manual_chat_send_prompt_path.read_text(
+        encoding="utf-8"
+    )
+    if not _manual_chat_ui_send_system_prompt.strip():
+        raise RuntimeError(
+            "manual chat UI SEND system prompt is empty: "
+            f"{manual_chat_send_prompt_path}"
+        )
     revenue_ui_prompt_path = Path(REVENUE_UI_SYSTEM_PROMPT_PATH)
     if not revenue_ui_prompt_path.is_file():
         raise RuntimeError(
@@ -465,6 +489,11 @@ async def startup():
         "Manual chat UI system prompt loaded from %s (%d chars)",
         manual_chat_prompt_path,
         len(_manual_chat_ui_system_prompt),
+    )
+    log.info(
+        "Manual chat UI SEND system prompt loaded from %s (%d chars)",
+        manual_chat_send_prompt_path,
+        len(_manual_chat_ui_send_system_prompt),
     )
     log.info(
         "Revenue UI system prompt loaded from %s (%d chars)",
@@ -1679,6 +1708,26 @@ def _tools_for_profile(profile: str) -> list[dict]:
         raise RuntimeError(
             f"tool profile {profile!r} references missing tools: {missing}"
         )
+    if profile == _MANUAL_CHAT_UI_SEND_TOOL_PROFILE:
+        if len(selected) != 1:
+            raise RuntimeError("manual chat UI SEND profile requires one drive_chat tool")
+        send_tool = json.loads(json.dumps(selected[0]))
+        parameters = send_tool["function"]["parameters"]
+        properties = parameters["properties"]
+        properties["display"]["enum"] = [":4", ":22"]
+        properties["action"]["enum"] = ["observe", "key", "click"]
+        properties["scope"]["enum"] = ["base"]
+        parameters["properties"] = {
+            key: properties[key]
+            for key in ("display", "action", "scope", "key", "element")
+        }
+        send_tool["function"]["description"] = (
+            "Execute only the card-directed SEND phase of one frozen consultation. "
+            "Begin with observe. Presence accepts a later mutation only when the "
+            "immediately preceding canonical observation carried a valid Hands-owned "
+            "opaque allowed-next card for that exact request."
+        )
+        return [send_tool]
     return selected
 
 
@@ -2407,6 +2456,110 @@ _DRIVE_ACTION_ARGUMENTS = {
     "read_clipboard": frozenset({"display", "action", "output_file"}),
     "focus_dialog": frozenset({"display", "action"}),
 }
+
+_SEND_PHASE_CARD_SCHEMA = "taey.gemini_dr_send_phase.v1"
+_SEND_PHASE_PROFILE_ACTIONS = frozenset({"observe", "key", "click"})
+_SEND_PHASE_DISPLAYS = frozenset({":4", ":22"})
+_SEND_PHASE_INITIAL_PHASE = "awaiting_initial_send"
+
+
+def _validate_send_phase_card(
+    value: object,
+    *,
+    platform: str,
+    display: str,
+    snapshot_revision: str,
+) -> dict:
+    if not isinstance(value, dict):
+        raise ValueError("Hands allowed-next card must be an object")
+    required = {
+        "schema",
+        "platform",
+        "display",
+        "phase",
+        "snapshot_revision",
+        "allowed",
+        "next_phase",
+        "card_sha256",
+    }
+    if set(value) != required:
+        raise ValueError("Hands allowed-next card fields do not match the public schema")
+    if value["schema"] != _SEND_PHASE_CARD_SCHEMA:
+        raise ValueError("Hands allowed-next card schema is not supported")
+    if value["platform"] != platform or platform != "gemini":
+        raise ValueError("Hands allowed-next card platform does not match observation")
+    if value["display"] != display:
+        raise ValueError("Hands allowed-next card display does not match request")
+    if value["snapshot_revision"] != snapshot_revision:
+        raise ValueError("Hands allowed-next card revision does not match observation")
+    phase = value["phase"]
+    if not isinstance(phase, str) or not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", phase):
+        raise ValueError("Hands allowed-next card phase is invalid")
+    claimed_sha256 = value["card_sha256"]
+    if not isinstance(claimed_sha256, str) or not re.fullmatch(
+        r"[0-9a-f]{64}", claimed_sha256
+    ):
+        raise ValueError("Hands allowed-next card digest is invalid")
+    digest_input = {key: item for key, item in value.items() if key != "card_sha256"}
+    encoded = json.dumps(
+        digest_input,
+        allow_nan=False,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    if not hashlib.sha256(encoded).hexdigest() == claimed_sha256:
+        raise ValueError("Hands allowed-next card digest does not verify")
+    allowed = value["allowed"]
+    next_phase = value["next_phase"]
+    if allowed is None:
+        if phase != "monitor_ready":
+            raise ValueError("Hands terminal card phase is not monitor-ready")
+        if next_phase is not None:
+            raise ValueError("Hands terminal card cannot declare a next phase")
+        return json.loads(json.dumps(value))
+    if not isinstance(allowed, dict):
+        raise ValueError("Hands allowed-next request must be an object or null")
+    allowed_action = allowed.get("action")
+    if allowed_action == "observe":
+        if allowed != {"action": "observe", "scope": "base"}:
+            raise ValueError("Hands observe card is not exact")
+        if next_phase is not None:
+            raise ValueError("Hands observe card cannot declare a next phase")
+    elif allowed_action == "key":
+        if allowed != {"action": "key", "key": "space"}:
+            raise ValueError("Hands key card is not exact")
+        if not isinstance(next_phase, str) or not re.fullmatch(
+            r"[a-z][a-z0-9_]{0,63}", next_phase
+        ):
+            raise ValueError("Hands key card requires an exact next phase")
+    elif allowed_action == "click":
+        element = allowed.get("element")
+        if (
+            set(allowed) != {"action", "element"}
+            or not isinstance(element, str)
+            or not element
+            or element != element.strip()
+        ):
+            raise ValueError("Hands click card is not exact")
+        if not isinstance(next_phase, str) or not re.fullmatch(
+            r"[a-z][a-z0-9_]{0,63}", next_phase
+        ):
+            raise ValueError("Hands click card requires an exact next phase")
+    else:
+        raise ValueError("Hands allowed-next action is not permitted in SEND phase")
+    return json.loads(json.dumps(value))
+
+
+def _send_phase_request(arguments: dict) -> dict:
+    action = str(arguments.get("action") or "")
+    if action == "observe":
+        return {"action": action, "scope": str(arguments.get("scope") or "base")}
+    if action == "key":
+        return {"action": action, "key": arguments.get("key")}
+    if action == "click":
+        return {"action": action, "element": arguments.get("element")}
+    return {"action": action}
 
 
 def _do_consult_chat(arguments: dict) -> str:
@@ -5355,7 +5508,8 @@ def _do_ui_action(arguments: dict) -> str:
 
 
 def _do_drive_chat(arguments: dict) -> str:
-    import subprocess, json as _json
+    import json as _json
+    import subprocess
 
     def _err(display, action, msg):
         return _json.dumps({"ok": False, "action": action, "display": display,
@@ -5464,6 +5618,46 @@ def _do_drive_chat(arguments: dict) -> str:
             f"accepted arguments are {sorted(_DRIVE_ACTION_ARGUMENTS[action])}"
         )
 
+    profile = str(context.get("tool_profile") or _FULL_TOOL_PROFILE)
+    send_phase = sequence.setdefault(
+        "send_phase",
+        {
+            "active": profile == _MANUAL_CHAT_UI_SEND_TOOL_PROFILE,
+            "phase": _SEND_PHASE_INITIAL_PHASE,
+            "card": None,
+        },
+    )
+    if not isinstance(send_phase, dict):
+        return _terminal_refusal("invalid request-local SEND phase state; refusing")
+    send_phase_active = send_phase.get("active")
+    if not isinstance(send_phase_active, bool):
+        return _terminal_refusal("invalid request-local SEND phase activation; refusing")
+    send_phase_name = send_phase.get("phase")
+    if not isinstance(send_phase_name, str) or not re.fullmatch(
+        r"[a-z][a-z0-9_]{0,63}", send_phase_name
+    ):
+        return _terminal_refusal("invalid request-local SEND phase name; refusing")
+    if profile == _MANUAL_CHAT_UI_SEND_TOOL_PROFILE and action not in _SEND_PHASE_PROFILE_ACTIONS:
+        return _terminal_refusal(
+            f"action {action!r} is unavailable in the manual chat UI SEND profile"
+        )
+    if send_phase_active:
+        card = send_phase.get("card")
+        allowed = card.get("allowed") if isinstance(card, dict) else {
+            "action": "observe",
+            "scope": "base",
+        }
+        if allowed is None:
+            return _terminal_refusal(
+                "Hands transferred SEND-phase ownership to the completion monitor"
+            )
+        requested = _send_phase_request(arguments)
+        if requested != allowed:
+            return _terminal_refusal(
+                "requested UI action does not exactly match the Hands-owned "
+                "allowed-next card"
+            )
+
     expected_revision = ""
     expected_scope = ""
     expected_key_precondition = ""
@@ -5553,6 +5747,14 @@ def _do_drive_chat(arguments: dict) -> str:
         cmd += ["--surface", expected_surface]
         if expected_surface == "browser":
             cmd += ["--scope", scope]
+            if (
+                profile in {
+                    _MANUAL_CHAT_UI_TOOL_PROFILE,
+                    _MANUAL_CHAT_UI_SEND_TOOL_PROFILE,
+                }
+                and display in _SEND_PHASE_DISPLAYS
+            ):
+                cmd += ["--send-phase", send_phase_name]
     if output_file is not None:
         cmd += ["--output-file", output_file]
     if action in ("click", "focus", "activate", "hover", "operate", "scroll_to_bottom"):
@@ -5709,19 +5911,57 @@ def _do_drive_chat(arguments: dict) -> str:
                                 f"expected {expected_surface!r} observation but received "
                                 f"{observed_surface!r}",
                             )
-                        try:
-                            monitor_receipt = _monitor_touch(
-                                display,
-                                payload["platform"],
-                                action,
-                                result,
-                                context,
-                            )
-                        except Exception as exc:
+                        card_present = "allowed_next" in result
+                        raw_card = result.pop("allowed_next", None)
+                        validated_card = None
+                        if card_present and raw_card is not None:
+                            try:
+                                validated_card = _validate_send_phase_card(
+                                    raw_card,
+                                    platform=str(payload["platform"]),
+                                    display=display,
+                                    snapshot_revision=revision,
+                                )
+                            except (TypeError, ValueError) as exc:
+                                return _terminal_refusal(
+                                    f"Hands allowed-next card refused: {exc}"
+                                )
+                            send_phase["active"] = True
+                            send_phase["phase"] = validated_card["phase"]
+                            send_phase["card"] = validated_card
+                        elif send_phase_active:
                             return _terminal_refusal(
-                                "Stop-proven send could not register its completion "
-                                f"monitor: {type(exc).__name__}: {exc}"
+                                "active SEND phase observation returned no Hands "
+                                "allowed-next card"
                             )
+                        elif profile == _MANUAL_CHAT_UI_SEND_TOOL_PROFILE:
+                            return _terminal_refusal(
+                                "manual chat UI SEND observation returned no Hands "
+                                "allowed-next card"
+                            )
+                        send_phase_controls_monitor = (
+                            send_phase_active or validated_card is not None
+                        )
+                        monitor_ready = (
+                            isinstance(validated_card, dict)
+                            and validated_card.get("phase") == "monitor_ready"
+                            and validated_card.get("allowed") is None
+                        )
+                        monitor_receipt = None
+                        if not send_phase_controls_monitor or monitor_ready:
+                            try:
+                                monitor_receipt = _monitor_touch(
+                                    display,
+                                    payload["platform"],
+                                    action,
+                                    result,
+                                    context,
+                                )
+                            except Exception as exc:
+                                return _terminal_refusal(
+                                    "Stop-proven send could not register its completion "
+                                    f"monitor: {type(exc).__name__}: {exc}"
+                                )
                         if monitor_receipt is not None:
                             result["completion_monitor"] = monitor_receipt
                         canonical_refs = {}
@@ -5777,6 +6017,23 @@ def _do_drive_chat(arguments: dict) -> str:
                             "tool_round": tool_round,
                             "mutation_token_issued": True,
                         }
+                        if validated_card is not None:
+                            allowed_next = validated_card["allowed"]
+                            payload["ui_sequence"].update({
+                                "state": (
+                                    "monitor_ready"
+                                    if allowed_next is None
+                                    else "observe_required"
+                                    if allowed_next.get("action") == "observe"
+                                    else "ready_for_one_action"
+                                ),
+                                "send_phase": validated_card["phase"],
+                                "allowed_next": allowed_next,
+                                "mutation_token_issued": (
+                                    allowed_next is not None
+                                    and allowed_next.get("action") != "observe"
+                                ),
+                            })
                 elif action == "focus_dialog":
                     expected_surfaces[display] = "native_dialog"
                     payload["ui_sequence"] = {
@@ -5787,6 +6044,19 @@ def _do_drive_chat(arguments: dict) -> str:
                         "mutation_token_issued": False,
                     }
                 elif action in _DRIVE_MUTATIONS:
+                    if send_phase_active:
+                        current_card = send_phase.get("card")
+                        next_phase = (
+                            current_card.get("next_phase")
+                            if isinstance(current_card, dict)
+                            else None
+                        )
+                        if not isinstance(next_phase, str):
+                            return _terminal_refusal(
+                                "Hands mutation card did not declare the next observation phase"
+                            )
+                        send_phase["phase"] = next_phase
+                        send_phase["card"] = None
                     if native_dialog_revision:
                         expected_surfaces[display] = (
                             "browser"
@@ -6985,6 +7255,11 @@ async def chat_completions(request: Request):
     turn = _turn_context(request, body)
     turn_payload = _turn_payload(turn)
     turn_payload["_ui_sequence"] = {"observations": {}, "terminal": None}
+    turn_payload["_ui_sequence"]["send_phase"] = {
+        "active": turn.tool_profile == _MANUAL_CHAT_UI_SEND_TOOL_PROFILE,
+        "phase": _SEND_PHASE_INITIAL_PHASE,
+        "card": None,
+    }
     turn_payload["_revenue_ui_sequence"] = {
         "observations": {},
         "terminal": None,
@@ -7098,6 +7373,16 @@ async def _chat_completions_for_turn(
         ]
         body["messages"] = [
             {"role": "system", "content": _manual_chat_ui_system_prompt},
+            *messages,
+        ]
+    elif turn.tool_profile == _MANUAL_CHAT_UI_SEND_TOOL_PROFILE:
+        messages = [
+            message
+            for message in body.get("messages", [])
+            if message.get("role") != "system"
+        ]
+        body["messages"] = [
+            {"role": "system", "content": _manual_chat_ui_send_system_prompt},
             *messages,
         ]
     elif turn.tool_profile == _REVENUE_UI_TOOL_PROFILE:

@@ -457,6 +457,20 @@ builder. A missing or unsafe root refuses the action before mutation; a
 result-finalization failure terminalizes the turn so Taey cannot continue
 without its evidence.
 
+The `manual-chat-ui-send` profile is the structurally narrowed SEND-phase
+surface for Gemini displays `:4` and `:22`. Its model-facing `drive_chat`
+schema contains only base observation, one exact key action, and one exact
+mapped click. Presence begins with observation authority only. A successful
+Hands observation may return a private, hash-bound allowed-next card; Presence
+retains that card request-locally and exposes only its exact next request. A
+mutation must equal that request byte-for-byte in meaning, consumes the card,
+and restores observation-only authority. The ordinary `manual-chat-ui` profile
+uses the same enforcement after the first valid card activates the SEND phase,
+so the original setup turn cannot repeat submission or enter extraction. Only
+a terminal Hands card permits the existing completion-monitor handoff.
+Scrolling, copying, clipboard reads, and all pre-SEND setup primitives are
+absent from the narrowed profile.
+
 The `revenue-ui` profile exposes only `ui_action`: fresh observe, one mapped primitive, its exact Hands postcondition
 barrier, then another observe. The server binds display/platform through `TAEY_UI_ACTION_BINDINGS`. LinkedIn supports
 private `paste_frozen_text`, authorized `activate_optional_like`, and terminal `submit_frozen_comment`; each consumes
