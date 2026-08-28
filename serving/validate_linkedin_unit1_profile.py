@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import argparse
 import ast
 import hashlib
 import json
@@ -9,6 +10,7 @@ from pathlib import Path
 import re
 import stat
 import subprocess
+import sys
 import tempfile
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -161,7 +163,77 @@ def completed(result: dict) -> SimpleNamespace:
     )
 
 
+class UiDriveParserError(RuntimeError):
+    pass
+
+
+def ui_drive_parser() -> argparse.ArgumentParser:
+    path = SERVING_ROOT / "ui_drive.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    required = {
+        "JsonArgumentParser",
+        "_add_display",
+        "_add_target",
+        "_add_expected_revision",
+        "_add_key_or_type_surface",
+        "_parser",
+    }
+    nodes = [
+        node
+        for node in tree.body
+        if isinstance(node, (ast.ClassDef, ast.FunctionDef))
+        and node.name in required
+    ]
+    require(
+        {node.name for node in nodes} == required,
+        "real ui_drive parser definitions are incomplete",
+    )
+    namespace = {
+        "argparse": argparse,
+        "UiDriveError": UiDriveParserError,
+        "OBSERVE_SCOPES": ("base", "menu_snapshot", "app_root_snapshot"),
+        "OBSERVE_SURFACES": ("browser", "native_dialog"),
+    }
+    module = ast.Module(body=nodes, type_ignores=[])
+    ast.fix_missing_locations(module)
+    exec(compile(module, str(path), "exec"), namespace)
+    return namespace["_parser"]()
+
+
+def parser_checked_completed(result: dict, expected_action: str):
+    def invoke(command: list[str], **kwargs) -> SimpleNamespace:
+        require(
+            command[:2] == [sys.executable, str(SERVING_ROOT / "ui_drive.py")],
+            "LinkedIn Unit 1 command did not use the public ui_drive entrypoint",
+        )
+        require(
+            command[2] == expected_action,
+            f"LinkedIn Unit 1 command used {command[2]!r}, expected {expected_action!r}",
+        )
+        parsed = ui_drive_parser().parse_args(command[2:])
+        require(
+            parsed.action == expected_action,
+            "constructed LinkedIn Unit 1 command did not parse to its exact action",
+        )
+        return completed(result)
+
+    return invoke
+
+
 def main() -> int:
+    try:
+        ui_drive_parser().parse_args([
+            "linkedin-unit1-observe",
+            "--display",
+            ":18",
+            "--input-sha256",
+            "0" * 64,
+        ])
+    except UiDriveParserError:
+        pass
+    else:
+        raise AssertionError("nonexistent linkedin-unit1-observe alias was accepted")
+
     profile = ast.literal_eval(proxy_assignment("_LINKEDIN_UNIT1_TOOL_PROFILE"))
     require(profile == "linkedin-unit1", "LinkedIn Unit 1 profile name drifted")
     profile_map = proxy_assignment("_TOOL_PROFILE_ALLOWED")
@@ -249,13 +321,17 @@ def main() -> int:
         "_SEAT_ID_RE": re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"),
         "_TRACE_ID_RE": re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$"),
         "_DRIVE_GENERATION_FENCE_KEY": "taey:soma:drive_process_generation:validator",
-        "UI_DRIVE_PYTHON": "/usr/bin/python3",
-        "UI_DRIVE_SCRIPT": "/public/serving/ui_drive.py",
+        "UI_DRIVE_PYTHON": sys.executable,
+        "UI_DRIVE_SCRIPT": str(SERVING_ROOT / "ui_drive.py"),
         "canonical_json_bytes": canonical_bytes,
         "hashlib": hashlib,
         "os": os,
         "re": re,
     }
+    action_namespace["_linkedin_unit1_prepare_transport_action"] = proxy_function(
+        "_linkedin_unit1_prepare_transport_action",
+        {},
+    )
     do_linkedin_unit1 = proxy_function("_do_linkedin_unit1", action_namespace)
 
     with tempfile.TemporaryDirectory(prefix="linkedin-unit1-presence-") as temp:
@@ -276,7 +352,14 @@ def main() -> int:
                 },
                 "runtime_card": {"card_sha256": runtime_card_sha256},
             }
-            with patch.object(subprocess, "run", return_value=completed(compile_result)):
+            with patch.object(
+                subprocess,
+                "run",
+                side_effect=parser_checked_completed(
+                    compile_result,
+                    "linkedin-unit1-compile",
+                ),
+            ):
                 observed = json.loads(do_linkedin_unit1({
                     "display": ":18",
                     "action": "observe",
@@ -300,7 +383,14 @@ def main() -> int:
                 "terminal": True,
                 "operation_evidence_sha256": "8" * 64,
             }
-            with patch.object(subprocess, "run", return_value=completed(operate_result)):
+            with patch.object(
+                subprocess,
+                "run",
+                side_effect=parser_checked_completed(
+                    operate_result,
+                    "linkedin-unit1-operate",
+                ),
+            ):
                 operated = json.loads(do_linkedin_unit1({
                     "display": ":18",
                     "action": "operate",
@@ -356,7 +446,10 @@ def main() -> int:
                 with patch.object(
                     subprocess,
                     "run",
-                    return_value=completed(compile_result),
+                    side_effect=parser_checked_completed(
+                        compile_result,
+                        "linkedin-unit1-compile",
+                    ),
                 ):
                     observed = json.loads(do_linkedin_unit1({
                         "display": ":18",

@@ -7366,6 +7366,8 @@ def _do_linkedin_unit1(arguments: dict) -> str:
         if not isinstance(observed_round, int) or observed_round >= tool_round:
             return terminal_refusal("operate requires an observe from an earlier model round")
 
+    transport_action = _linkedin_unit1_prepare_transport_action(action)
+
     envelope = (
         {
             "private_input": private_input,
@@ -7392,7 +7394,7 @@ def _do_linkedin_unit1(arguments: dict) -> str:
     command = [
         UI_DRIVE_PYTHON,
         UI_DRIVE_SCRIPT,
-        f"linkedin-unit1-{action}",
+        f"linkedin-unit1-{transport_action}",
         "--display",
         display,
         "--input-sha256",

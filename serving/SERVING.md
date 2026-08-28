@@ -570,6 +570,14 @@ Any other terminal state spends that identity: do not retry it, do not start
 delivery after failed preparation, and do not substitute `revenue-ui` or a
 private runbook.
 
+Production delivery identity `id16` stopped before any UI action because Presence
+translated model-facing `observe` into the nonexistent `linkedin-unit1-observe`
+transport command. The public `ui_drive.py` parser exposes only
+`linkedin-unit1-compile` and `linkedin-unit1-operate`. Presence now keeps the
+model-facing `observe | operate` grammar while translating it through the same
+exact `observe -> compile`, `operate -> operate` mapping already used by
+preparation. `id16` remains spent and must not be retried.
+
 The `linkedin-jobs` tool profile exposes only `linkedin_jobs`, with one
 runtime-authorized display as its sole argument. Before the request, the caller
 registers the immutable transaction at
