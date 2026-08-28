@@ -327,6 +327,9 @@ LINKEDIN_UNIT1_PREPARE_PRIVATE_ROOT = os.environ.get(
 GREENHOUSE_ATS_PRIVATE_ROOT = os.environ.get(
     "TAEY_GREENHOUSE_ATS_PRIVATE_ROOT", ""
 ).strip()
+GREENHOUSE_ATS_HANDS_ROOT = os.environ.get(
+    "TAEY_GREENHOUSE_ATS_HANDS_ROOT", ""
+).strip()
 GREENHOUSE_ATS_BINDING = os.environ.get(
     "TAEY_GREENHOUSE_ATS_BINDING", ""
 ).strip()
@@ -5403,11 +5406,16 @@ def _greenhouse_ats_runtime() -> dict[str, str | int]:
         raise RuntimeError(
             "TAEY_GREENHOUSE_ATS_HANDS_COMMIT does not match the reviewed fd-only API"
         )
-    if not re.fullmatch(
-        r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}",
-        GREENHOUSE_ATS_HANDS_INCARNATION_ID,
-    ):
-        raise RuntimeError("TAEY_GREENHOUSE_ATS_HANDS_INCARNATION_ID is invalid")
+    try:
+        hands_incarnation_id = str(uuid.UUID(GREENHOUSE_ATS_HANDS_INCARNATION_ID))
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise RuntimeError(
+            "TAEY_GREENHOUSE_ATS_HANDS_INCARNATION_ID must be a lowercase UUID"
+        ) from exc
+    if GREENHOUSE_ATS_HANDS_INCARNATION_ID != hands_incarnation_id:
+        raise RuntimeError(
+            "TAEY_GREENHOUSE_ATS_HANDS_INCARNATION_ID must be a lowercase UUID"
+        )
     if not 30 <= GREENHOUSE_ATS_TIMEOUT_SECS <= 900:
         raise RuntimeError("TAEY_GREENHOUSE_ATS_TIMEOUT_SECS must be 30-900")
     if not GREENHOUSE_ATS_FIREFOX_PID.isdigit() or int(
@@ -5415,7 +5423,7 @@ def _greenhouse_ats_runtime() -> dict[str, str | int]:
     ) <= 0:
         raise RuntimeError("TAEY_GREENHOUSE_ATS_FIREFOX_PID must be positive")
     python_path = Path(GREENHOUSE_ATS_PYTHON)
-    hands_root = Path(TAEYS_HANDS_ROOT)
+    hands_root = Path(GREENHOUSE_ATS_HANDS_ROOT)
     receipt_root = Path(GREENHOUSE_ATS_RECEIPT_ROOT)
     bus_path = Path(GREENHOUSE_ATS_AT_SPI_BUS_FILE)
     runner = hands_root / "scripts" / "run_ats_greenhouse_one_action.py"
@@ -5426,7 +5434,9 @@ def _greenhouse_ats_runtime() -> dict[str, str | int]:
     ):
         raise RuntimeError("TAEY_GREENHOUSE_ATS_PYTHON must be an executable absolute path")
     if not hands_root.is_absolute() or not hands_root.is_dir() or not runner.is_file():
-        raise RuntimeError("TAEYS_HANDS_ROOT does not contain the Greenhouse runner")
+        raise RuntimeError(
+            "TAEY_GREENHOUSE_ATS_HANDS_ROOT does not contain the Greenhouse runner"
+        )
     if not receipt_root.is_absolute() or not receipt_root.is_dir():
         raise RuntimeError("TAEY_GREENHOUSE_ATS_RECEIPT_ROOT is unavailable")
     receipt_metadata = os.lstat(receipt_root)
@@ -5940,7 +5950,9 @@ def _do_greenhouse_ats_ui(arguments: dict) -> str:
         "ATS_ONE_ACTION_LEASE_SECRET": GREENHOUSE_ATS_LEASE_SECRET,
         "ATS_ONE_ACTION_RECEIPT_ROOT": str(runtime["receipt_root"]),
         "ATS_HANDS_COMMIT": GREENHOUSE_ATS_HANDS_COMMIT,
-        "ATS_PRESENCE_INCARNATION_ID": str(context["process_generation"]),
+        "ATS_PRESENCE_INCARNATION_ID": str(
+            uuid.UUID(hex=str(context["process_generation"]))
+        ),
         "ATS_HANDS_INCARNATION_ID": GREENHOUSE_ATS_HANDS_INCARNATION_ID,
     })
     completed = None

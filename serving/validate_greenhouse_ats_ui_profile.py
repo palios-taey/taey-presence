@@ -468,10 +468,70 @@ def main() -> int:
     for token in (
         "run_ats_greenhouse_one_action.py",
         "rev-parse",
+        "GREENHOUSE_ATS_HANDS_ROOT",
         "TAEY_GREENHOUSE_ATS_HANDS_COMMIT",
         "TAEY_GREENHOUSE_ATS_AT_SPI_BUS_FILE",
+        "uuid.UUID(GREENHOUSE_ATS_HANDS_INCARNATION_ID)",
+        "GREENHOUSE_ATS_HANDS_INCARNATION_ID != hands_incarnation_id",
     ):
         require(token in runtime_source, f"runtime lost exact binding {token}")
+    require(
+        "Path(TAEYS_HANDS_ROOT)" not in runtime_source,
+        "Greenhouse still borrows the shared Hands checkout",
+    )
+    runtime_namespace = {
+        "GREENHOUSE_ATS_BINDING": "greenhouse=:17",
+        "GREENHOUSE_ATS_LEASE_SECRET": "5" * 64,
+        "GREENHOUSE_ATS_HANDS_COMMIT": REQUIRED_HANDS_COMMIT,
+        "GREENHOUSE_ATS_REQUIRED_HANDS_COMMIT": REQUIRED_HANDS_COMMIT,
+        "GREENHOUSE_ATS_HANDS_INCARNATION_ID": "hands-greenhouse-prod",
+        "GREENHOUSE_ATS_HANDS_ROOT": "",
+        "GREENHOUSE_ATS_TIMEOUT_SECS": 29,
+        "re": re,
+        "uuid": uuid,
+    }
+    greenhouse_runtime = load_function("_greenhouse_ats_runtime", runtime_namespace)
+    try:
+        greenhouse_runtime()
+    except RuntimeError as exc:
+        require(
+            str(exc)
+            == "TAEY_GREENHOUSE_ATS_HANDS_INCARNATION_ID must be a lowercase UUID",
+            "non-UUID Hands incarnation did not fail at the incarnation contract",
+        )
+    else:
+        raise AssertionError("non-UUID Hands incarnation was accepted")
+    runtime_namespace["GREENHOUSE_ATS_HANDS_INCARNATION_ID"] = (
+        "00000000-0000-4000-8000-000000000010"
+    )
+    try:
+        greenhouse_runtime()
+    except RuntimeError as exc:
+        require(
+            str(exc) == "TAEY_GREENHOUSE_ATS_TIMEOUT_SECS must be 30-900",
+            "canonical Hands UUID did not pass the incarnation contract",
+        )
+    else:
+        raise AssertionError("runtime fixture unexpectedly passed its timeout sentinel")
+    runtime_namespace.update({
+        "GREENHOUSE_ATS_TIMEOUT_SECS": 180,
+        "GREENHOUSE_ATS_FIREFOX_PID": "1",
+        "GREENHOUSE_ATS_PYTHON": "/usr/bin/python3",
+        "GREENHOUSE_ATS_RECEIPT_ROOT": "/tmp",
+        "GREENHOUSE_ATS_AT_SPI_BUS_FILE": "/tmp/missing-at-spi-bus",
+        "Path": Path,
+        "os": os,
+    })
+    try:
+        greenhouse_runtime()
+    except RuntimeError as exc:
+        require(
+            str(exc)
+            == "TAEY_GREENHOUSE_ATS_HANDS_ROOT does not contain the Greenhouse runner",
+            "unset dedicated Hands root did not fail before shared-checkout access",
+        )
+    else:
+        raise AssertionError("unset dedicated Greenhouse Hands root was accepted")
     action_source = source_function("_do_greenhouse_ats_ui")
     for token in (
         '"--transaction-fd"',
@@ -479,6 +539,7 @@ def main() -> int:
         'pass_fds=(action_fd,)',
         '"ATS_ONE_ACTION_RECEIPT_ROOT"',
         '"ATS_PRESENCE_INCARNATION_ID"',
+        'uuid.UUID(hex=str(context["process_generation"]))',
         '"side_effect_uncertain"',
         '"next_mutation_authorized": False',
     ):
@@ -520,11 +581,12 @@ def main() -> int:
         "GREENHOUSE_ATS_HANDS_COMMIT": REQUIRED_HANDS_COMMIT,
         "GREENHOUSE_ATS_FIREFOX_PID": "12345",
         "GREENHOUSE_ATS_LEASE_SECRET": "5" * 64,
-        "GREENHOUSE_ATS_HANDS_INCARNATION_ID": "hands-1",
+        "GREENHOUSE_ATS_HANDS_INCARNATION_ID": "00000000-0000-4000-8000-000000000010",
         "canonical_json_bytes": canonical_bytes,
         "hashlib": hashlib,
         "os": os,
         "re": re,
+        "uuid": uuid,
     }
     close_pending = load_function("_close_greenhouse_ats_pending", action_namespace)
     samples_prove = load_function("_greenhouse_ats_samples_prove", action_namespace)
@@ -671,6 +733,18 @@ def main() -> int:
         def execute_held_inode(*args: object, **kwargs: object) -> SimpleNamespace:
             inherited = kwargs.get("pass_fds")
             require(inherited == (held_fd,), "subprocess did not inherit exactly the held fd")
+            child_env = kwargs.get("env")
+            require(
+                isinstance(child_env, dict)
+                and child_env.get("ATS_PRESENCE_INCARNATION_ID")
+                == "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                "Presence process generation was not preserved as a canonical UUID",
+            )
+            require(
+                child_env.get("ATS_HANDS_INCARNATION_ID")
+                == "00000000-0000-4000-8000-000000000010",
+                "Hands incarnation was not forwarded as its canonical UUID",
+            )
             require(
                 os.pread(held_fd, 4 * 1024 * 1024, 0) == original_raw,
                 "operate did not retain the observe-time inode bytes",
