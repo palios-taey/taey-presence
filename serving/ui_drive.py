@@ -1506,6 +1506,174 @@ def _linkedin_unit1_operate(
     }
 
 
+def _linkedin_unit1_prepare_compile(
+    args: argparse.Namespace,
+    deps: SimpleNamespace,
+) -> dict[str, Any]:
+    if deps.platform != "linkedin":
+        raise UiDriveError("LinkedIn Unit 1 preparation requires the LinkedIn display")
+    value = _linkedin_unit1_envelope(
+        args,
+        frozenset({"preparation", "receipts"}),
+    )
+    preparation = value["preparation"]
+    receipts = value["receipts"]
+    if not isinstance(preparation, dict) or not isinstance(receipts, list):
+        raise UiDriveError("LinkedIn Unit 1 preparation input is invalid")
+    try:
+        from consultation_v2.platforms.linkedin.unit1_prepare import (
+            PREPARATION_ACTION_CARD_SCHEMA,
+            PREPARATION_RESULT_SCHEMA,
+            compile_preparation_step,
+        )
+
+        snapshot = _revenue_snapshot(deps)
+        result = compile_preparation_step(
+            snapshot,
+            _snapshot_revision(snapshot, scope="base"),
+            preparation,
+            receipts,
+        )
+    except Exception as exc:
+        raise UiDriveError(f"LinkedIn Unit 1 preparation compile failed: {exc}") from exc
+    if result.get("schema") == PREPARATION_ACTION_CARD_SCHEMA:
+        return {
+            "schema": "taey_linkedin_unit1_preparation_compiled_step_v1",
+            "kind": "action_card",
+            "card": result,
+            "runtime_card": _linkedin_unit1_runtime_card(deps, snapshot, result),
+        }
+    if result.get("schema") == PREPARATION_RESULT_SCHEMA:
+        return {
+            "schema": "taey_linkedin_unit1_preparation_compiled_step_v1",
+            "kind": "private_input",
+            "result": result,
+        }
+    raise UiDriveError("LinkedIn Unit 1 preparation compiler returned an unknown result")
+
+
+def _linkedin_unit1_prepare_operate(
+    args: argparse.Namespace,
+    deps: SimpleNamespace,
+) -> dict[str, Any]:
+    if deps.platform != "linkedin":
+        raise UiDriveError("LinkedIn Unit 1 preparation requires the LinkedIn display")
+    value = _linkedin_unit1_envelope(
+        args,
+        frozenset({"preparation", "receipts", "card", "runtime_card"}),
+    )
+    preparation = value["preparation"]
+    receipts = value["receipts"]
+    stored_card = value["card"]
+    stored_runtime_card = value["runtime_card"]
+    if (
+        not isinstance(preparation, dict)
+        or not isinstance(receipts, list)
+        or not isinstance(stored_card, dict)
+        or not isinstance(stored_runtime_card, dict)
+    ):
+        raise UiDriveError("LinkedIn Unit 1 preparation operation input is invalid")
+    try:
+        from consultation_v2.platforms.linkedin.unit1_prepare import (
+            PREPARATION_ACTION_CARD_SCHEMA,
+            accept_preparation_step,
+            compile_preparation_step,
+        )
+
+        snapshot = _revenue_snapshot(deps)
+        fresh_card = compile_preparation_step(
+            snapshot,
+            _snapshot_revision(snapshot, scope="base"),
+            preparation,
+            receipts,
+        )
+    except Exception as exc:
+        raise UiDriveError(f"LinkedIn Unit 1 preparation recompile failed: {exc}") from exc
+    if fresh_card.get("schema") != PREPARATION_ACTION_CARD_SCHEMA:
+        raise UiDriveError("LinkedIn Unit 1 preparation is no longer one action card")
+    if fresh_card != stored_card:
+        raise UiDriveError("LinkedIn Unit 1 preparation card changed before operation")
+    fresh_runtime_card = _linkedin_unit1_runtime_card(deps, snapshot, fresh_card)
+    if fresh_runtime_card != stored_runtime_card:
+        raise UiDriveError("LinkedIn Unit 1 preparation runtime operation changed before operation")
+    method = str(fresh_card.get("method") or "")
+    subcommand = {
+        "activate": "ui-activate",
+        "mapped_pointer_activate": "ui-activate",
+        "scroll_into_view": "ui-scroll-into-view",
+    }.get(method)
+    if subcommand is None:
+        raise UiDriveError(
+            f"LinkedIn Unit 1 preparation method {method!r} is not a preparation primitive"
+        )
+    command = [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        subcommand,
+        "--display",
+        deps.display,
+        "--ref",
+        str(fresh_runtime_card["ref"]),
+        "--operation-card-sha256",
+        str(fresh_runtime_card["card_sha256"]),
+    ]
+    try:
+        import subprocess
+
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            timeout=90,
+            env=dict(os.environ),
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise UiDriveError("LinkedIn Unit 1 preparation operation timed out") from exc
+    stdout = (completed.stdout or b"").decode("utf-8", errors="replace").strip()
+    try:
+        payload = json.loads(stdout)
+    except ValueError as exc:
+        raise UiDriveError(
+            "LinkedIn Unit 1 preparation primitive returned invalid JSON"
+        ) from exc
+    result = payload.get("result") if isinstance(payload, dict) else None
+    if (
+        completed.returncode != 0
+        or not isinstance(payload, dict)
+        or payload.get("ok") is not True
+        or payload.get("display") != deps.display
+        or payload.get("platform") != "linkedin"
+        or not isinstance(result, dict)
+    ):
+        detail = payload.get("error") if isinstance(payload, dict) else None
+        raise UiDriveError(
+            f"LinkedIn Unit 1 preparation primitive failed: {detail or 'unknown error'}"
+        )
+    observation = result.get("post_action_observation")
+    barrier = observation.get("barrier") if isinstance(observation, dict) else None
+    previous_receipt_sha256 = (
+        receipts[-1].get("receipt_sha256")
+        if receipts and isinstance(receipts[-1], dict)
+        else None
+    )
+    try:
+        receipt = accept_preparation_step(
+            fresh_card,
+            barrier,
+            previous_receipt_sha256,
+        )
+    except Exception as exc:
+        raise UiDriveError(
+            f"LinkedIn Unit 1 preparation receipt acceptance failed: {exc}"
+        ) from exc
+    return {
+        "schema": "taey_linkedin_unit1_preparation_operated_step_v1",
+        "card_sha256": fresh_card["card_sha256"],
+        "phase": fresh_card["phase"],
+        "receipt": receipt,
+        "operation_evidence_sha256": canonical_sha256(result),
+    }
+
+
 def _resolve_revenue_target(
     args: argparse.Namespace,
     deps: SimpleNamespace,
@@ -2635,6 +2803,14 @@ def _parser() -> argparse.ArgumentParser:
     _add_display(unit1_operate)
     unit1_operate.add_argument("--input-sha256", required=True)
 
+    unit1_prepare_compile = commands.add_parser("linkedin-unit1-prepare-compile")
+    _add_display(unit1_prepare_compile)
+    unit1_prepare_compile.add_argument("--input-sha256", required=True)
+
+    unit1_prepare_operate = commands.add_parser("linkedin-unit1-prepare-operate")
+    _add_display(unit1_prepare_operate)
+    unit1_prepare_operate.add_argument("--input-sha256", required=True)
+
     revenue_activate = commands.add_parser("ui-activate")
     _add_display(revenue_activate)
     _add_target(revenue_activate)
@@ -2959,6 +3135,10 @@ def _dispatch(args: argparse.Namespace, deps: SimpleNamespace) -> Any:
         return _linkedin_unit1_compile(args, deps)
     if args.action == "linkedin-unit1-operate":
         return _linkedin_unit1_operate(args, deps)
+    if args.action == "linkedin-unit1-prepare-compile":
+        return _linkedin_unit1_prepare_compile(args, deps)
+    if args.action == "linkedin-unit1-prepare-operate":
+        return _linkedin_unit1_prepare_operate(args, deps)
     lease_receipt = None
     if args.action in _LOCK_ACTION_OPS:
         lease = _lease_context()
