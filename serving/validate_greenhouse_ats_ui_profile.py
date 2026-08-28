@@ -179,6 +179,7 @@ def success_result(action: dict) -> SimpleNamespace:
             }
         ],
         "complete_form_sha256": "5" * 64,
+        "required_controls_complete": False,
         "revision": revision,
     }
     surface_capsule = {
@@ -200,6 +201,7 @@ def success_result(action: dict) -> SimpleNamespace:
         ],
         "route_grammar": "hosted_job",
         "complete_form_sha256": "5" * 64,
+        "required_controls_complete": False,
     }
     payload = {
         "schema": "ats_greenhouse_one_action_result_v1",
@@ -587,6 +589,36 @@ def main() -> int:
             full_surface=capsule_fixture["surface"],
         ),
         "applicant value digest was accepted in the bounded capsule",
+    )
+    missing_completion = dict(capsule_fixture["surface_capsule"])
+    missing_completion.pop("required_controls_complete")
+    require(
+        not surface_capsule_proves(
+            missing_completion,
+            application_identity_sha256="1" * 64,
+            full_surface=capsule_fixture["surface"],
+        ),
+        "missing required-control completion evidence was accepted",
+    )
+    non_boolean_completion = dict(capsule_fixture["surface_capsule"])
+    non_boolean_completion["required_controls_complete"] = 0
+    require(
+        not surface_capsule_proves(
+            non_boolean_completion,
+            application_identity_sha256="1" * 64,
+            full_surface=capsule_fixture["surface"],
+        ),
+        "non-boolean required-control completion evidence was accepted",
+    )
+    mismatched_completion = dict(capsule_fixture["surface_capsule"])
+    mismatched_completion["required_controls_complete"] = True
+    require(
+        not surface_capsule_proves(
+            mismatched_completion,
+            application_identity_sha256="1" * 64,
+            full_surface=capsule_fixture["surface"],
+        ),
+        "required-control completion evidence diverged from the full surface",
     )
     for forbidden_field in (
         "human_review_required",
