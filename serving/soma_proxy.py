@@ -9444,6 +9444,138 @@ async def _run_while_downstream_connected(request: Request, operation, turn: Tur
                     pass
 
 
+def _greenhouse_ats_direct_display(payload: object) -> str:
+    if not isinstance(payload, dict) or set(payload) != {"display"}:
+        raise HTTPException(
+            status_code=400,
+            detail="request body must contain exactly display",
+        )
+    display = payload.get("display")
+    if (
+        not isinstance(display, str)
+        or display != display.strip()
+        or re.fullmatch(r":[0-9]+", display) is None
+    ):
+        raise HTTPException(status_code=400, detail="display must match :<number>")
+    return display
+
+
+def _greenhouse_ats_direct_result(
+    raw_result: object,
+    *,
+    display: str,
+    action: str,
+) -> dict:
+    try:
+        payload = json.loads(raw_result) if isinstance(raw_result, str) else None
+    except (TypeError, ValueError):
+        payload = None
+    if (
+        not isinstance(payload, dict)
+        or set(payload)
+        != {"ok", "display", "action", "greenhouse_ats_sequence"}
+        or payload.get("display") != display
+        or payload.get("action") != action
+        or not isinstance(payload.get("greenhouse_ats_sequence"), dict)
+    ):
+        raise HTTPException(
+            status_code=502,
+            detail=f"Greenhouse ATS {action} returned a non-contract tool result",
+        )
+    return payload
+
+
+async def _run_greenhouse_ats_direct_one_action(
+    turn: TurnContext,
+    display: str,
+) -> dict:
+    observed_raw = await execute_tool_call_async(
+        "greenhouse_ats_ui",
+        {"display": display, "action": "observe"},
+        tool_call_id=f"direct:{turn.turn_id}:observe",
+        round_num=1,
+    )
+    observed = _greenhouse_ats_direct_result(
+        observed_raw,
+        display=display,
+        action="observe",
+    )
+    if observed["ok"] is not True:
+        return observed
+    observed_sequence = observed["greenhouse_ats_sequence"]
+    card_sha256 = observed_sequence.get("card_sha256")
+    allowed_next = observed_sequence.get("allowed_next")
+    if (
+        observed_sequence.get("state") != "ready_for_one_action"
+        or not isinstance(card_sha256, str)
+        or re.fullmatch(r"[0-9a-f]{64}", card_sha256) is None
+        or allowed_next
+        != {"action": "operate", "card_sha256": card_sha256}
+    ):
+        raise HTTPException(
+            status_code=502,
+            detail="Greenhouse ATS observe returned no exact opaque card",
+        )
+    operated_raw = await execute_tool_call_async(
+        "greenhouse_ats_ui",
+        {
+            "display": display,
+            "action": "operate",
+            "card_sha256": card_sha256,
+        },
+        tool_call_id=f"direct:{turn.turn_id}:operate",
+        round_num=2,
+    )
+    return _greenhouse_ats_direct_result(
+        operated_raw,
+        display=display,
+        action="operate",
+    )
+
+
+@app.post("/v1/greenhouse-ats/one-action")
+async def greenhouse_ats_one_action(request: Request):
+    raw_body = await request.json()
+    display = _greenhouse_ats_direct_display(raw_body)
+    turn = _turn_context(request, {})
+    if turn.tool_profile != _GREENHOUSE_ATS_UI_TOOL_PROFILE:
+        raise HTTPException(
+            status_code=403,
+            detail="X-Taey-Tool-Profile must be greenhouse-ats-ui",
+        )
+    turn_payload = _turn_payload(turn)
+    turn_payload["_greenhouse_ats_ui_sequence"] = {
+        "pending": None,
+        "terminal": None,
+    }
+    turn_payload["_tool_profile_state"] = {"terminal": None}
+    context_token = _request_context.set(turn_payload)
+    started = False
+    try:
+        try:
+            open_turns = _start_turn(turn)
+        except LivenessUnavailable as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        started = open_turns >= 0
+        result = await _run_while_downstream_connected(
+            request,
+            _run_greenhouse_ats_direct_one_action(turn, display),
+            turn,
+        )
+        if started:
+            await _end_turn(turn, "greenhouse_one_action_complete")
+        return JSONResponse(content=result, headers=_turn_headers(turn))
+    except BaseException:
+        if started:
+            await _end_turn(turn, "greenhouse_one_action_error")
+        raise
+    finally:
+        _close_greenhouse_ats_pending(
+            turn_payload.get("_greenhouse_ats_ui_sequence")
+        )
+        _request_context.reset(context_token)
+
+
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request):
     raw_body = await request.json()
