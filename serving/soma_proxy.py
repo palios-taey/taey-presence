@@ -5551,6 +5551,12 @@ def _greenhouse_ats_surface_capsule_proves(
         return False
     surface_kind = capsule["surface"]
     if surface_kind in {"form", "options"}:
+        origin = capsule.get("origin") if surface_kind == "options" else None
+        country_options = (
+            isinstance(origin, dict)
+            and origin.get("name") == "Country"
+            and origin.get("role") == "combo box"
+        )
         expected_keys = common_keys | {"controls"}
         expected_keys |= (
             {
@@ -5579,6 +5585,7 @@ def _greenhouse_ats_surface_capsule_proves(
             "submit",
         }
         refs: list[str] = []
+        semantic_tokens: list[str] = []
         for control in controls:
             base_keys = {"ref", "name", "role", "operations"}
             optional_keys = {
@@ -5588,6 +5595,8 @@ def _greenhouse_ats_surface_capsule_proves(
                 "boundary",
                 "combo_safety",
             }
+            if country_options:
+                optional_keys.add("semantic_token")
             if (
                 not isinstance(control, dict)
                 or not base_keys.issubset(control)
@@ -5616,6 +5625,13 @@ def _greenhouse_ats_surface_capsule_proves(
                     )
                 )
                 or ("boundary" in control and control["boundary"] != "submit")
+                or (
+                    country_options
+                    and (
+                        not isinstance(control.get("semantic_token"), str)
+                        or not 1 <= len(control["semantic_token"]) <= 4096
+                    )
+                )
             ):
                 return False
             safety = control.get("combo_safety")
@@ -5646,7 +5662,13 @@ def _greenhouse_ats_surface_capsule_proves(
             ):
                 return False
             refs.append(control["ref"])
+            if country_options:
+                semantic_tokens.append(control["semantic_token"])
         if len(refs) != len(set(refs)):
+            return False
+        if country_options and (
+            not semantic_tokens or len(semantic_tokens) != len(set(semantic_tokens))
+        ):
             return False
         if surface_kind == "form":
             return (
@@ -5665,7 +5687,6 @@ def _greenhouse_ats_surface_capsule_proves(
                 )
                 is not None
             )
-        origin = capsule.get("origin")
         return (
             isinstance(origin, dict)
             and set(origin)
