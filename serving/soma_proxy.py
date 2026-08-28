@@ -6466,6 +6466,15 @@ def _publish_linkedin_unit1_private_bundle(bundle: dict) -> str:
     return hashlib.sha256(body).hexdigest()
 
 
+def _linkedin_unit1_prepare_transport_action(action: str) -> str:
+    try:
+        return {"observe": "compile", "operate": "operate"}[action]
+    except KeyError as exc:
+        raise RuntimeError(
+            "private LinkedIn Unit 1 preparation decisions cannot invoke UI transport"
+        ) from exc
+
+
 def _do_linkedin_unit1_prepare(arguments: dict) -> str:
     import json as _json
     import subprocess
@@ -6685,6 +6694,10 @@ def _do_linkedin_unit1_prepare(arguments: dict) -> str:
                 "operate requires an observation from an earlier model round"
             )
 
+    try:
+        transport_action = _linkedin_unit1_prepare_transport_action(action)
+    except RuntimeError as exc:
+        return terminal_refusal(str(exc))
     envelope = (
         {"preparation": preparation, "receipts": sequence["receipts"]}
         if action == "observe"
@@ -6708,7 +6721,7 @@ def _do_linkedin_unit1_prepare(arguments: dict) -> str:
     command = [
         UI_DRIVE_PYTHON,
         UI_DRIVE_SCRIPT,
-        f"linkedin-unit1-prepare-{action}",
+        f"linkedin-unit1-prepare-{transport_action}",
         "--display",
         display,
         "--input-sha256",

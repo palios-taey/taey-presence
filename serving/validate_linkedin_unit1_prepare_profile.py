@@ -252,6 +252,52 @@ def main() -> int:
         and "_publish_linkedin_unit1_private_bundle(" in handler_source,
         "publisher does not terminalize exactly after publication",
     )
+    transport_source = source_function(
+        proxy, "_linkedin_unit1_prepare_transport_action"
+    )
+    transport_namespace: dict[str, object] = {}
+    exec(transport_source, transport_namespace)
+    transport_action = transport_namespace[
+        "_linkedin_unit1_prepare_transport_action"
+    ]
+    require(
+        transport_action("observe") == "compile"
+        and transport_action("operate") == "operate",
+        "model actions do not map to the exact production transport domain",
+    )
+    for private_action in ("select", "draft"):
+        expect_refusal(
+            lambda action=private_action: transport_action(action),
+            f"private {private_action} decision entered the UI transport domain",
+        )
+    parser_source = source_function(drive, "_parser")
+    parser_tree = ast.parse(parser_source)
+    prepare_commands = {
+        node.args[0].value
+        for node in ast.walk(parser_tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "add_parser"
+        and node.args
+        and isinstance(node.args[0], ast.Constant)
+        and isinstance(node.args[0].value, str)
+        and node.args[0].value.startswith("linkedin-unit1-prepare-")
+    }
+    require(
+        prepare_commands
+        == {
+            "linkedin-unit1-prepare-compile",
+            "linkedin-unit1-prepare-operate",
+        },
+        "ui_drive preparation command domain drifted",
+    )
+    require(
+        "transport_action = _linkedin_unit1_prepare_transport_action(action)"
+        in handler_source
+        and 'f"linkedin-unit1-prepare-{transport_action}"' in handler_source
+        and 'f"linkedin-unit1-prepare-{action}"' not in handler_source,
+        "production handler bypasses the exact preparation transport mapping",
+    )
     publication_source = source_function(
         proxy, "_publish_linkedin_unit1_private_bundle"
     )
