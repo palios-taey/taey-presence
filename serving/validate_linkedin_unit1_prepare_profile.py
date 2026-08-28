@@ -228,6 +228,12 @@ def main() -> int:
         "human approval language entered the preparation prompt",
     )
     operate_source = source_function(drive, "_linkedin_unit1_prepare_operate")
+    compile_source = source_function(drive, "_linkedin_unit1_prepare_compile")
+    require(
+        '"kind": "phase_receipt"' in compile_source
+        and "PREPARATION_RECEIPT_SCHEMA" in compile_source,
+        "fresh exact route proof is not carried through the compile transport",
+    )
     for token in (
         "accept_preparation_step(",
         "_revenue_snapshot(deps)",
@@ -251,6 +257,13 @@ def main() -> int:
         'sequence["published"] = published' in handler_source
         and "_publish_linkedin_unit1_private_bundle(" in handler_source,
         "publisher does not terminalize exactly after publication",
+    )
+    require(
+        'result["kind"] == "phase_receipt"' in handler_source
+        and 'sequence["receipts"].append(receipt)' in handler_source
+        and '"next_mutation_authorized": False' in handler_source
+        and '"allowed_next": {"action": "observe"}' in handler_source,
+        "route proof does not preserve the receipt and fresh-observe boundary",
     )
     transport_source = source_function(
         proxy, "_linkedin_unit1_prepare_transport_action"
@@ -350,6 +363,65 @@ def main() -> int:
             == hashlib.sha256(publisher.canonical_json_bytes(frozen_bootstrap)).hexdigest(),
             "bootstrap digest is not exact",
         )
+        if soma is not None:
+            transaction_sha256 = publisher.preparation_transaction_sha256(
+                loaded["preparation"]
+            )
+            route_receipt = {
+                "schema": "linkedin_unit1_preparation_receipt_v1",
+                "transaction_sha256": transaction_sha256,
+                "sequence": 1,
+                "phase": "notifications_navigation",
+                "previous_receipt_sha256": None,
+                "card_sha256": "1" * 64,
+                "snapshot_revision": "2" * 64,
+                "element_sha256": "3" * 64,
+                "method": "observe",
+                "effect_class": "read_only",
+                "postcondition_sha256": "4" * 64,
+                "postcondition_passed": True,
+                "fresh_observation_required": True,
+                "next_step_authorized": True,
+            }
+            route_receipt["receipt_sha256"] = publisher.canonical_sha256(
+                route_receipt
+            )
+            route_result = {
+                "schema": "taey_linkedin_unit1_preparation_compiled_step_v1",
+                "kind": "phase_receipt",
+                "receipt": route_receipt,
+            }
+            require(
+                soma._linkedin_unit1_prepare_route_proof(
+                    route_result,
+                    transaction_sha256,
+                    [],
+                )
+                == route_receipt,
+                "exact route proof was not admitted",
+            )
+            expect_refusal(
+                lambda: soma._linkedin_unit1_prepare_route_proof(
+                    route_result,
+                    transaction_sha256,
+                    [route_receipt],
+                ),
+                "route proof was admitted after the initial receipt",
+            )
+            mutation_receipt = dict(route_receipt)
+            mutation_receipt["method"] = "activate"
+            mutation_receipt["receipt_sha256"] = publisher.canonical_sha256(
+                {key: value for key, value in mutation_receipt.items()
+                 if key != "receipt_sha256"}
+            )
+            expect_refusal(
+                lambda: soma._linkedin_unit1_prepare_route_proof(
+                    {**route_result, "receipt": mutation_receipt},
+                    transaction_sha256,
+                    [],
+                ),
+                "a mutation receipt was admitted as read-only route proof",
+            )
         selection_input = {
             "schema": "linkedin_unit1_private_selection_input_v1",
             "policy_sha256": loaded["preparation"]["policy_sha256"],

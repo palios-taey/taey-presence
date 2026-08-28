@@ -6483,6 +6483,66 @@ def _linkedin_unit1_prepare_transport_action(action: str) -> str:
         ) from exc
 
 
+def _linkedin_unit1_prepare_route_proof(
+    result: dict,
+    transaction_sha256: str,
+    receipts: list,
+) -> dict:
+    if set(result) != {"schema", "kind", "receipt"}:
+        raise RuntimeError("LinkedIn Unit 1 preparation route proof result is invalid")
+    receipt = result.get("receipt")
+    if not isinstance(receipt, dict):
+        raise RuntimeError("LinkedIn Unit 1 preparation route proof receipt is missing")
+    expected_receipt_fields = {
+        "schema",
+        "transaction_sha256",
+        "sequence",
+        "phase",
+        "previous_receipt_sha256",
+        "card_sha256",
+        "snapshot_revision",
+        "element_sha256",
+        "method",
+        "effect_class",
+        "postcondition_sha256",
+        "postcondition_passed",
+        "fresh_observation_required",
+        "next_step_authorized",
+        "receipt_sha256",
+    }
+    digest = receipt.get("receipt_sha256")
+    payload = dict(receipt)
+    payload.pop("receipt_sha256", None)
+    if (
+        receipts
+        or set(receipt) != expected_receipt_fields
+        or receipt.get("schema") != "linkedin_unit1_preparation_receipt_v1"
+        or receipt.get("transaction_sha256") != transaction_sha256
+        or receipt.get("sequence") != 1
+        or receipt.get("phase") != "notifications_navigation"
+        or receipt.get("previous_receipt_sha256") is not None
+        or receipt.get("method") != "observe"
+        or receipt.get("effect_class") != "read_only"
+        or receipt.get("postcondition_passed") is not True
+        or receipt.get("fresh_observation_required") is not True
+        or receipt.get("next_step_authorized") is not True
+        or any(
+            re.fullmatch(r"[0-9a-f]{64}", str(receipt.get(field) or "")) is None
+            for field in (
+                "card_sha256",
+                "snapshot_revision",
+                "element_sha256",
+                "postcondition_sha256",
+                "receipt_sha256",
+            )
+        )
+        or not isinstance(digest, str)
+        or linkedin_prepare_sha256(payload) != digest
+    ):
+        raise RuntimeError("LinkedIn Unit 1 preparation route proof is not exact")
+    return receipt
+
+
 def _do_linkedin_unit1_prepare(arguments: dict) -> str:
     import json as _json
     import subprocess
@@ -6775,7 +6835,8 @@ def _do_linkedin_unit1_prepare(arguments: dict) -> str:
         if (
             result.get("schema")
             != "taey_linkedin_unit1_preparation_compiled_step_v1"
-            or result.get("kind") not in {"action_card", "private_input"}
+            or result.get("kind")
+            not in {"action_card", "phase_receipt", "private_input"}
         ):
             return terminal_refusal(
                 "LinkedIn Unit 1 preparation compiler result is invalid"
@@ -6817,6 +6878,28 @@ def _do_linkedin_unit1_prepare(arguments: dict) -> str:
                         "action": "operate",
                         "card_sha256": card_sha256,
                     },
+                },
+            })
+        if result["kind"] == "phase_receipt":
+            try:
+                receipt = _linkedin_unit1_prepare_route_proof(
+                    result,
+                    transaction_sha256,
+                    sequence["receipts"],
+                )
+            except RuntimeError as exc:
+                return terminal_refusal(str(exc))
+            sequence["receipts"].append(receipt)
+            return _json.dumps({
+                "ok": True,
+                "display": display,
+                "action": action,
+                "preparation_sequence": {
+                    "state": "observe_required",
+                    "phase": receipt["phase"],
+                    "receipt_sha256": receipt["receipt_sha256"],
+                    "next_mutation_authorized": False,
+                    "allowed_next": {"action": "observe"},
                 },
             })
         if set(result) != {"schema", "kind", "result"} or not isinstance(
