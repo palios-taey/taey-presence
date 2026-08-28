@@ -5403,11 +5403,16 @@ def _greenhouse_ats_runtime() -> dict[str, str | int]:
         raise RuntimeError(
             "TAEY_GREENHOUSE_ATS_HANDS_COMMIT does not match the reviewed fd-only API"
         )
-    if not re.fullmatch(
-        r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}",
-        GREENHOUSE_ATS_HANDS_INCARNATION_ID,
-    ):
-        raise RuntimeError("TAEY_GREENHOUSE_ATS_HANDS_INCARNATION_ID is invalid")
+    try:
+        hands_incarnation_id = str(uuid.UUID(GREENHOUSE_ATS_HANDS_INCARNATION_ID))
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise RuntimeError(
+            "TAEY_GREENHOUSE_ATS_HANDS_INCARNATION_ID must be a lowercase UUID"
+        ) from exc
+    if GREENHOUSE_ATS_HANDS_INCARNATION_ID != hands_incarnation_id:
+        raise RuntimeError(
+            "TAEY_GREENHOUSE_ATS_HANDS_INCARNATION_ID must be a lowercase UUID"
+        )
     if not 30 <= GREENHOUSE_ATS_TIMEOUT_SECS <= 900:
         raise RuntimeError("TAEY_GREENHOUSE_ATS_TIMEOUT_SECS must be 30-900")
     if not GREENHOUSE_ATS_FIREFOX_PID.isdigit() or int(
@@ -5940,7 +5945,9 @@ def _do_greenhouse_ats_ui(arguments: dict) -> str:
         "ATS_ONE_ACTION_LEASE_SECRET": GREENHOUSE_ATS_LEASE_SECRET,
         "ATS_ONE_ACTION_RECEIPT_ROOT": str(runtime["receipt_root"]),
         "ATS_HANDS_COMMIT": GREENHOUSE_ATS_HANDS_COMMIT,
-        "ATS_PRESENCE_INCARNATION_ID": str(context["process_generation"]),
+        "ATS_PRESENCE_INCARNATION_ID": str(
+            uuid.UUID(hex=str(context["process_generation"]))
+        ),
         "ATS_HANDS_INCARNATION_ID": GREENHOUSE_ATS_HANDS_INCARNATION_ID,
     })
     completed = None
