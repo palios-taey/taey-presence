@@ -418,6 +418,8 @@ For other model families, set the parsers your model expects.
 | `TAEY_UI_ACTION_BINDINGS` | *(empty → `ui_action` refused)* | trusted comma-separated platform/display bindings; first qualified form is `linkedin=:N` |
 | `TAEY_UI_DRIVE_PYTHON` | `/home/mira/taeys-env-sys/bin/python` | interpreter for the public one-action Hands adapter; production should set an explicit deployed path |
 | `TAEY_UI_DRIVE_SCRIPT` | deployed `serving/ui_drive.py` | absolute public Presence adapter invoked by `ui_action` |
+| `TAEY_LINKEDIN_UNIT1_PREPARE_PRIVATE_ROOT` | *(empty → `linkedin_unit1_prepare` refused)* | separate owner-controlled nonsymlink `0700` root containing one immutable owned `0400` preparation bootstrap at `transactions/SEAT/CORRELATION.json` |
+| `TAEY_LINKEDIN_UNIT1_PRIVATE_ROOT` | *(empty → `linkedin_unit1` refused)* | separate owner-controlled nonsymlink `0700` root where successful preparation publishes the immutable owned `0400` final bundle for the same seat and correlation |
 | `TAEY_LINKEDIN_JOBS_PYTHON` | *(empty → `linkedin_jobs` refused)* | explicit Python interpreter with the public Hands runtime and AT-SPI dependencies |
 | `TAEY_LINKEDIN_JOBS_PRIVATE_ROOT` | *(empty → `linkedin_jobs` refused)* | owner-controlled nonsymlink `0700` root for the manifest, permanent claim, receipt, and raw sink |
 | `TAEY_LINKEDIN_JOBS_DISPLAYS` | *(empty → `linkedin_jobs` refused)* | comma-separated runtime-authorized LinkedIn displays; `:0` is always refused |
@@ -501,6 +503,54 @@ tool rounds: open once, observe the actual options, select one exact mapped
 option once, then observe the result. A missing mapping, duplicate, failed
 primitive, or failed postcondition terminalizes that attempt. Do not add a
 screen runner or retry path.
+
+### LinkedIn Unit 1: prepare, publish, deliver
+
+This is the sole launch order for a Notifications-first comment. The proxy
+injects `TAEY_LINKEDIN_UNIT1_PREPARE_SYSTEM.md` for the preparation request and
+`TAEY_LINKEDIN_UNIT1_SYSTEM.md` for the delivery request. Before preparation, a
+private parent must write one exact canonical
+`taey_linkedin_unit1_prepare_bootstrap_v1` accepted by
+`linkedin_unit1_prepare_publisher.validate_bootstrap` at
+`TAEY_LINKEDIN_UNIT1_PREPARE_PRIVATE_ROOT/transactions/SEAT/CORRELATION.json`,
+mode `0400`. Account identity and policy values remain private. Both configured
+roots must already exist as owner-controlled nonsymlink directories, mode
+`0700`; `TAEYS_HANDS_ROOT` must name the committed public Hands checkout.
+
+Start preparation with one fresh identity:
+
+```bash
+curl --fail-with-body --silent --show-error \
+  -H 'Content-Type: application/json' \
+  -H 'X-Taey-Seat-Id: taey-revenue-1' \
+  -H 'X-Taey-Event-Id: linkedin-unit1-001' \
+  -H 'X-Taey-Correlation-Id: linkedin-unit1-001' \
+  -H 'X-Taey-Tool-Profile: linkedin-unit1-prepare' \
+  --data-binary '{"model":"SERVED_MODEL_ID","stream":false,"messages":[{"role":"user","content":"Prepare the frozen LinkedIn Unit 1 transaction on display :18. Continue only through the injected profile until final_bundle_published or the first failure."}]}' \
+  http://127.0.0.1:8765/v1/chat/completions
+```
+
+Proceed only when the terminal preparation result is
+`final_bundle_published`. Presence has then written the exact immutable bundle
+to `TAEY_LINKEDIN_UNIT1_PRIVATE_ROOT/transactions/SEAT/CORRELATION.json`.
+Launch delivery as a new proxy turn with the **same** seat, event, and
+correlation identity:
+
+```bash
+curl --fail-with-body --silent --show-error \
+  -H 'Content-Type: application/json' \
+  -H 'X-Taey-Seat-Id: taey-revenue-1' \
+  -H 'X-Taey-Event-Id: linkedin-unit1-001' \
+  -H 'X-Taey-Correlation-Id: linkedin-unit1-001' \
+  -H 'X-Taey-Tool-Profile: linkedin-unit1' \
+  --data-binary '{"model":"SERVED_MODEL_ID","stream":false,"messages":[{"role":"user","content":"Deliver the frozen LinkedIn Unit 1 transaction on display :18. Continue only through the injected profile until terminal_delivery_verified or the first failure."}]}' \
+  http://127.0.0.1:8765/v1/chat/completions
+```
+
+Success is only `terminal_delivery_verified` plus its terminal receipt digest.
+Any other terminal state spends that identity: do not retry it, do not start
+delivery after failed preparation, and do not substitute `revenue-ui` or a
+private runbook.
 
 The `linkedin-jobs` tool profile exposes only `linkedin_jobs`, with one
 runtime-authorized display as its sole argument. Before the request, the caller

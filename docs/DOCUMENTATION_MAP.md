@@ -32,10 +32,12 @@ model roots, and SHAs must not be repeated as current facts without a fresh prod
   `serving/manifests/` are machine-readable deployment or gate inputs.
 - `serving/TAEY_CHAT_UI_SYSTEM.md`, `serving/TAEY_CHAT_UI_SEND_SYSTEM.md`,
   `serving/TAEY_CONSULT_CHAT_SYSTEM.md`,
+  `serving/TAEY_LINKEDIN_UNIT1_PREPARE_SYSTEM.md`,
+  `serving/TAEY_LINKEDIN_UNIT1_SYSTEM.md`,
   `serving/TAEY_LINKEDIN_JOBS_SYSTEM.md`,
   `serving/TAEY_LINKEDIN_JOBS_RESTORE_SYSTEM.md`,
   `serving/TAEY_LINKEDIN_JOB_SEARCH_SYSTEM.md`, and
-  `serving/TAEY_LINKEDIN_ENGAGERS_SYSTEM.md`, and
+  `serving/TAEY_LINKEDIN_ENGAGERS_SYSTEM.md`,
   `serving/TAEY_LINKEDIN_APPLICATION_INTAKE_SYSTEM.md`, and
   `serving/TAEY_LINKEDIN_APPLICATION_CLASSIFICATION_SYSTEM.md` are constrained tool-profile runtime prompts.
 - `serving/council_prompts/` contains supporting-seat role prompts. They are runtime inputs, not status reports.
