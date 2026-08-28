@@ -380,6 +380,9 @@ def main() -> int:
     )
     require(
         "frozen_exclusions = build_exclusions(" in handler_source
+        and '"excluded_candidates": []' in handler_source
+        and '"mechanical_empty_inventory": True' in handler_source
+        and 'not actionable_links' in handler_source
         and '{"action": "select", "alternative_action": "exclude"}'
         in handler_source
         and 'if result["phase"] == "notifications_continuation":' in handler_source
@@ -591,6 +594,35 @@ def main() -> int:
                 if key != "exclusions_sha256"
             }),
             "complete exact exclusions were not frozen",
+        )
+        empty_inventory = json.loads(json.dumps(selection_input))
+        empty_inventory["notification_inventory"]["rows"][0][
+            "actionable"
+        ] = False
+        empty_inventory["notification_inventory"]["actionable_links"] = []
+        empty_inventory["notification_inventory"]["inventory_sha256"] = (
+            publisher.canonical_sha256({
+                key: value
+                for key, value in empty_inventory[
+                    "notification_inventory"
+                ].items()
+                if key != "inventory_sha256"
+            })
+        )
+        automatic_exclusions = publisher.build_exclusions(
+            empty_inventory,
+            {
+                "display": ":18",
+                "action": "exclude",
+                "excluded_candidates": [],
+            },
+            loaded["preparation"],
+        )
+        require(
+            automatic_exclusions["excluded_candidates"] == []
+            and automatic_exclusions["notification_inventory_sha256"]
+            == empty_inventory["notification_inventory"]["inventory_sha256"],
+            "exact empty actionable inventory did not freeze empty exclusions",
         )
         if hands_prepare is not None:
             hands_prepare.validate_preparation_envelope({

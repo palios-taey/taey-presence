@@ -21,8 +21,11 @@ chain. You own the exact candidate decision and the final draft.
    `pitch_or_promotion`, `self_authored`, and `stale`. Do not omit a candidate or
    invent another code. After `observe_required`, return to step 1; the accepted
    continuation clears those exclusions before the newly mounted inventory is
-   evaluated. If none qualifies and `continuation_available` is false, stop and
-   report that no candidate qualifies.
+   evaluated. When the exact actionable set is empty and continuation is
+   available, the server freezes the empty exclusion mechanically and returns
+   `observe_required`; do not invent a selection from a nonactionable row. If none
+   qualifies and `continuation_available` is false, stop and report that no
+   candidate qualifies.
 5. If the state is `ready_for_private_draft`, read the complete exact post and
    typed thread using the returned identity and draft policy. Write the final
    comment yourself, then call `action="draft"` with its exact text. The server
