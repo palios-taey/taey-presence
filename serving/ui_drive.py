@@ -1523,6 +1523,7 @@ def _linkedin_unit1_prepare_compile(
     try:
         from consultation_v2.platforms.linkedin.unit1_prepare import (
             PREPARATION_ACTION_CARD_SCHEMA,
+            PREPARATION_RECEIPT_SCHEMA,
             PREPARATION_RESULT_SCHEMA,
             compile_preparation_step,
         )
@@ -1542,6 +1543,12 @@ def _linkedin_unit1_prepare_compile(
             "kind": "action_card",
             "card": result,
             "runtime_card": _linkedin_unit1_runtime_card(deps, snapshot, result),
+        }
+    if result.get("schema") == PREPARATION_RECEIPT_SCHEMA:
+        return {
+            "schema": "taey_linkedin_unit1_preparation_compiled_step_v1",
+            "kind": "phase_receipt",
+            "receipt": result,
         }
     if result.get("schema") == PREPARATION_RESULT_SCHEMA:
         return {
