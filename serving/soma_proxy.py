@@ -327,6 +327,9 @@ LINKEDIN_UNIT1_PREPARE_PRIVATE_ROOT = os.environ.get(
 GREENHOUSE_ATS_PRIVATE_ROOT = os.environ.get(
     "TAEY_GREENHOUSE_ATS_PRIVATE_ROOT", ""
 ).strip()
+GREENHOUSE_ATS_HANDS_ROOT = os.environ.get(
+    "TAEY_GREENHOUSE_ATS_HANDS_ROOT", ""
+).strip()
 GREENHOUSE_ATS_BINDING = os.environ.get(
     "TAEY_GREENHOUSE_ATS_BINDING", ""
 ).strip()
@@ -5420,7 +5423,7 @@ def _greenhouse_ats_runtime() -> dict[str, str | int]:
     ) <= 0:
         raise RuntimeError("TAEY_GREENHOUSE_ATS_FIREFOX_PID must be positive")
     python_path = Path(GREENHOUSE_ATS_PYTHON)
-    hands_root = Path(TAEYS_HANDS_ROOT)
+    hands_root = Path(GREENHOUSE_ATS_HANDS_ROOT)
     receipt_root = Path(GREENHOUSE_ATS_RECEIPT_ROOT)
     bus_path = Path(GREENHOUSE_ATS_AT_SPI_BUS_FILE)
     runner = hands_root / "scripts" / "run_ats_greenhouse_one_action.py"
@@ -5431,7 +5434,9 @@ def _greenhouse_ats_runtime() -> dict[str, str | int]:
     ):
         raise RuntimeError("TAEY_GREENHOUSE_ATS_PYTHON must be an executable absolute path")
     if not hands_root.is_absolute() or not hands_root.is_dir() or not runner.is_file():
-        raise RuntimeError("TAEYS_HANDS_ROOT does not contain the Greenhouse runner")
+        raise RuntimeError(
+            "TAEY_GREENHOUSE_ATS_HANDS_ROOT does not contain the Greenhouse runner"
+        )
     if not receipt_root.is_absolute() or not receipt_root.is_dir():
         raise RuntimeError("TAEY_GREENHOUSE_ATS_RECEIPT_ROOT is unavailable")
     receipt_metadata = os.lstat(receipt_root)

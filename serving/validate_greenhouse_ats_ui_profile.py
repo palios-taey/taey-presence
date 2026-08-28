@@ -468,18 +468,24 @@ def main() -> int:
     for token in (
         "run_ats_greenhouse_one_action.py",
         "rev-parse",
+        "GREENHOUSE_ATS_HANDS_ROOT",
         "TAEY_GREENHOUSE_ATS_HANDS_COMMIT",
         "TAEY_GREENHOUSE_ATS_AT_SPI_BUS_FILE",
         "uuid.UUID(GREENHOUSE_ATS_HANDS_INCARNATION_ID)",
         "GREENHOUSE_ATS_HANDS_INCARNATION_ID != hands_incarnation_id",
     ):
         require(token in runtime_source, f"runtime lost exact binding {token}")
+    require(
+        "Path(TAEYS_HANDS_ROOT)" not in runtime_source,
+        "Greenhouse still borrows the shared Hands checkout",
+    )
     runtime_namespace = {
         "GREENHOUSE_ATS_BINDING": "greenhouse=:17",
         "GREENHOUSE_ATS_LEASE_SECRET": "5" * 64,
         "GREENHOUSE_ATS_HANDS_COMMIT": REQUIRED_HANDS_COMMIT,
         "GREENHOUSE_ATS_REQUIRED_HANDS_COMMIT": REQUIRED_HANDS_COMMIT,
         "GREENHOUSE_ATS_HANDS_INCARNATION_ID": "hands-greenhouse-prod",
+        "GREENHOUSE_ATS_HANDS_ROOT": "",
         "GREENHOUSE_ATS_TIMEOUT_SECS": 29,
         "re": re,
         "uuid": uuid,
@@ -507,6 +513,25 @@ def main() -> int:
         )
     else:
         raise AssertionError("runtime fixture unexpectedly passed its timeout sentinel")
+    runtime_namespace.update({
+        "GREENHOUSE_ATS_TIMEOUT_SECS": 180,
+        "GREENHOUSE_ATS_FIREFOX_PID": "1",
+        "GREENHOUSE_ATS_PYTHON": "/usr/bin/python3",
+        "GREENHOUSE_ATS_RECEIPT_ROOT": "/tmp",
+        "GREENHOUSE_ATS_AT_SPI_BUS_FILE": "/tmp/missing-at-spi-bus",
+        "Path": Path,
+        "os": os,
+    })
+    try:
+        greenhouse_runtime()
+    except RuntimeError as exc:
+        require(
+            str(exc)
+            == "TAEY_GREENHOUSE_ATS_HANDS_ROOT does not contain the Greenhouse runner",
+            "unset dedicated Hands root did not fail before shared-checkout access",
+        )
+    else:
+        raise AssertionError("unset dedicated Greenhouse Hands root was accepted")
     action_source = source_function("_do_greenhouse_ats_ui")
     for token in (
         '"--transaction-fd"',
