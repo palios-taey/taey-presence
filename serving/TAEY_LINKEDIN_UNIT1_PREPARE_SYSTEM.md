@@ -10,10 +10,19 @@ chain. You own the exact candidate decision and the final draft.
    `action="operate"` and the exact returned `card_sha256`.
 3. If the state is `observe_required`, return to step 1.
 4. If the state is `ready_for_private_selection`, examine every row in the exact
-   inventory using the returned identity and selection policy. Select exactly one
-   actionable activity. Call `action="select"` with that exact activity and the
+   inventory using the returned identity and selection policy. If one actionable
+   activity qualifies, call `action="select"` with that exact activity and the
    three verdicts set true only when the target, dedup, and author-cooloff rules
-   all pass. If none passes, stop and report that no candidate qualifies.
+   all pass. A qualifying selection always takes priority over continuation. If
+   none qualifies and `continuation_available` is true, call `action="exclude"`
+   with every actionable activity in the exact returned inventory order and its
+   exact sorted reason codes. Allowed codes are `already_used`, `author_cooloff`,
+   `event_announcement`, `hostile_or_irrelevant`, `off_target`,
+   `pitch_or_promotion`, `self_authored`, and `stale`. Do not omit a candidate or
+   invent another code. After `observe_required`, return to step 1; the accepted
+   continuation clears those exclusions before the newly mounted inventory is
+   evaluated. If none qualifies and `continuation_available` is false, stop and
+   report that no candidate qualifies.
 5. If the state is `ready_for_private_draft`, read the complete exact post and
    typed thread using the returned identity and draft policy. Write the final
    comment yourself, then call `action="draft"` with its exact text. The server
