@@ -248,6 +248,7 @@ def success_result(action: dict) -> SimpleNamespace:
 
 
 def options_success_result(action: dict) -> SimpleNamespace:
+    action_kind = action["action"]["kind"]
     revision = "a" * 64
     form_revision = "b" * 64
     source_samples = [
@@ -328,17 +329,20 @@ def options_success_result(action: dict) -> SimpleNamespace:
         "transaction_id": action["transaction_id"],
         "action_id": action["action_id"],
         "application_identity_sha256": action["application_identity_sha256"],
-        "action": {"kind": "open_combo"},
+        "action": {"kind": action_kind},
         "environment": {},
         "state": "action_ready",
         "surface": surface,
-        "mutation_count": 1,
+        "mutation_count": 0 if action_kind == "observe_form" else 1,
         "next_mutation_authorized": True,
         "receipt_event_hash": "4" * 64,
-        "source_samples": source_samples,
-        "postcondition_samples": postcondition_samples,
         "surface_capsule": surface_capsule,
     }
+    if action_kind == "observe_form":
+        payload["samples"] = postcondition_samples
+    else:
+        payload["source_samples"] = source_samples
+        payload["postcondition_samples"] = postcondition_samples
     return SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr="")
 
 
@@ -1051,6 +1055,46 @@ def main() -> int:
             pass
         else:
             raise AssertionError("outer cleanup helper leaked the action fd")
+        RequestContext.value = {}
+
+    with tempfile.TemporaryDirectory(
+        prefix="greenhouse-ats-inherited-options-presence-"
+    ) as temp:
+        root = Path(temp)
+        frozen_observe = write_private_transaction(root, "observe_form")
+        resolver_namespace["GREENHOUSE_ATS_PRIVATE_ROOT"] = str(root)
+        action_namespace["_resolve_greenhouse_ats_private_manifest"] = resolve_manifest
+        action_namespace["_greenhouse_ats_runtime"] = lambda: {
+            "display": ":17",
+            "python": "/usr/bin/python3",
+            "runner": "/public/run_ats_greenhouse_one_action.py",
+            "bus": "unix:path=/run/user/1000/at-spi/bus_0",
+            "receipt_root": str(root),
+            "timeout": 180,
+        }
+        active = request_context(1)
+        RequestContext.value = active
+        observed = json.loads(do_action({"display": ":17", "action": "observe"}))
+        active["tool_round"] = 2
+        with patch.object(
+            subprocess,
+            "run",
+            return_value=options_success_result(frozen_observe),
+        ):
+            operated = json.loads(do_action({
+                "display": ":17",
+                "action": "operate",
+                "card_sha256": observed["greenhouse_ats_sequence"]["card_sha256"],
+            }))
+        require(
+            operated["ok"] is True,
+            "inherited Country options observe receipt was refused",
+        )
+        require(
+            operated["greenhouse_ats_sequence"]["surface_capsule"]["surface"]
+            == "options",
+            "inherited Country options surface was not relayed",
+        )
         RequestContext.value = {}
 
     with tempfile.TemporaryDirectory(prefix="greenhouse-ats-options-presence-") as temp:
