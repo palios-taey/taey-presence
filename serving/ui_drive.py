@@ -1520,6 +1520,7 @@ def _linkedin_unit1_prepare_compile(
     receipts = value["receipts"]
     if not isinstance(preparation, dict) or not isinstance(receipts, list):
         raise UiDriveError("LinkedIn Unit 1 preparation input is invalid")
+    initial_observation_barrier: dict[str, Any] | None = None
     try:
         from consultation_v2.platforms.linkedin.unit1_prepare import (
             PREPARATION_ACTION_CARD_SCHEMA,
@@ -1528,7 +1529,70 @@ def _linkedin_unit1_prepare_compile(
             compile_preparation_step,
         )
 
-        snapshot = _revenue_snapshot(deps)
+        if receipts:
+            snapshot = _revenue_snapshot(deps)
+        else:
+            manual = _manual_ui_module(deps.platform)
+            stable_observation = (
+                getattr(manual, "stable_initial_preparation_observation", None)
+                if manual is not None
+                else None
+            )
+            if not callable(stable_observation):
+                raise UiDriveError(
+                    "LinkedIn has no public initial preparation observation barrier"
+                )
+            snapshot, initial_observation_barrier = stable_observation(
+                time.monotonic() + LOCK_TTL_DEFAULT,
+            )
+            barrier_keys = {
+                "result",
+                "compile_authorized",
+                "next_mutation_authorized",
+                "projection",
+                "refresh_policy",
+                "stable_cycles_required",
+                "stable_cycles_observed",
+                "samples",
+            }
+            if (
+                not isinstance(initial_observation_barrier, dict)
+                or set(initial_observation_barrier) != barrier_keys
+                or initial_observation_barrier.get("projection")
+                != "exact_notifications_navigation"
+                or initial_observation_barrier.get("refresh_policy")
+                != "invalidate_reacquire"
+                or initial_observation_barrier.get("stable_cycles_required") != 2
+                or not isinstance(initial_observation_barrier.get("samples"), list)
+            ):
+                raise UiDriveError(
+                    "LinkedIn initial preparation observation barrier is invalid"
+                )
+            if initial_observation_barrier.get("result") == "TIMEOUT":
+                if (
+                    initial_observation_barrier.get("compile_authorized") is not False
+                    or initial_observation_barrier.get("next_mutation_authorized")
+                    is not False
+                ):
+                    raise UiDriveError(
+                        "LinkedIn initial preparation timeout carried authority"
+                    )
+                return {
+                    "schema": "taey_linkedin_unit1_preparation_compiled_step_v1",
+                    "kind": "initial_observation_timeout",
+                    "initial_observation_barrier": initial_observation_barrier,
+                }
+            if (
+                initial_observation_barrier.get("result") != "PASS"
+                or initial_observation_barrier.get("compile_authorized") is not True
+                or initial_observation_barrier.get("next_mutation_authorized")
+                is not False
+                or initial_observation_barrier.get("stable_cycles_observed") != 2
+                or not isinstance(snapshot, Snapshot)
+            ):
+                raise UiDriveError(
+                    "LinkedIn initial preparation observation did not prove compile"
+                )
         result = compile_preparation_step(
             snapshot,
             _snapshot_revision(snapshot, scope="base"),
@@ -1538,12 +1602,19 @@ def _linkedin_unit1_prepare_compile(
     except Exception as exc:
         raise UiDriveError(f"LinkedIn Unit 1 preparation compile failed: {exc}") from exc
     if result.get("schema") == PREPARATION_ACTION_CARD_SCHEMA:
-        return {
+        compiled = {
             "schema": "taey_linkedin_unit1_preparation_compiled_step_v1",
             "kind": "action_card",
             "card": result,
             "runtime_card": _linkedin_unit1_runtime_card(deps, snapshot, result),
         }
+        if initial_observation_barrier is not None:
+            compiled["initial_observation_barrier"] = initial_observation_barrier
+        return compiled
+    if initial_observation_barrier is not None:
+        raise UiDriveError(
+            "LinkedIn initial preparation barrier did not compile one action card"
+        )
     if result.get("schema") == PREPARATION_RECEIPT_SCHEMA:
         return {
             "schema": "taey_linkedin_unit1_preparation_compiled_step_v1",
