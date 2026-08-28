@@ -10138,6 +10138,17 @@ async def _chat_completions_for_turn(
         ]
     else:
         body = inject_preamble(body)
+    if turn.tool_profile == _LINKEDIN_UNIT1_PREPARE_TOOL_PROFILE:
+        chat_template_kwargs = body.get("chat_template_kwargs", {})
+        if not isinstance(chat_template_kwargs, dict):
+            raise HTTPException(
+                status_code=400,
+                detail="chat_template_kwargs must be an object",
+            )
+        body["chat_template_kwargs"] = {
+            **chat_template_kwargs,
+            "enable_thinking": False,
+        }
     is_stream = body.get("stream", False)
 
     # BOUND HERE BECAUSE THE STREAMING CLOSURE READS THEM UNCONDITIONALLY.
