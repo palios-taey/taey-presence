@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ast
+import asyncio
 import hashlib
 import json
 import os
@@ -83,6 +84,13 @@ class RequestContext:
     @classmethod
     def get(cls) -> dict:
         return cls.value
+
+
+class ValidationHTTPException(Exception):
+    def __init__(self, status_code: int, detail: object):
+        super().__init__(str(detail))
+        self.status_code = status_code
+        self.detail = detail
 
 
 def request_context(round_num: int) -> dict:
@@ -272,6 +280,187 @@ def main() -> int:
     require(set(properties) == {"display", "action", "card_sha256"}, "private field exposed")
     forbidden = {"element", "ref", "value", "path", "selector", "approval", "review"}
     require(not forbidden.intersection(properties), "model received a private or approval field")
+
+    direct_namespace = {
+        "HTTPException": ValidationHTTPException,
+        "TurnContext": object,
+        "json": json,
+        "re": re,
+    }
+    direct_display = load_function(
+        "_greenhouse_ats_direct_display", direct_namespace
+    )
+    direct_result = load_function(
+        "_greenhouse_ats_direct_result", direct_namespace
+    )
+    direct_namespace["_greenhouse_ats_direct_result"] = direct_result
+    require(
+        direct_display({"display": ":17"}) == ":17",
+        "exact direct-route display was rejected",
+    )
+    for invalid_body in (
+        {},
+        {"display": ":17", "path": "/private"},
+        {"display": ":17", "human_review_required": True},
+        {"display": ":17", "approval": True},
+        {"display": ":17", "review_queue": []},
+    ):
+        try:
+            direct_display(invalid_body)
+        except ValidationHTTPException as exc:
+            require(exc.status_code == 400, "invalid direct input used the wrong status")
+        else:
+            raise AssertionError("direct route admitted an extra or forbidden request field")
+    card_sha256 = "8" * 64
+    direct_calls: list[tuple[str, dict, str, int]] = []
+    observed_direct = {
+        "ok": True,
+        "display": ":17",
+        "action": "observe",
+        "greenhouse_ats_sequence": {
+            "state": "ready_for_one_action",
+            "card_sha256": card_sha256,
+            "allowed_next": {
+                "action": "operate",
+                "card_sha256": card_sha256,
+            },
+            "next_mutation_authorized": False,
+        },
+    }
+    operated_direct = {
+        "ok": True,
+        "display": ":17",
+        "action": "operate",
+        "greenhouse_ats_sequence": {
+            "state": "action_receipted",
+            "postcondition_proven": True,
+            "receipt_event_hash": "4" * 64,
+            "hands_result_sha256": "5" * 64,
+            "hands_state": "action_ready",
+            "mutation_count": 1,
+            "hands_next_mutation_authorized": True,
+            "next_mutation_authorized": False,
+            "surface_capsule": {
+                "schema": "ats_greenhouse_next_action_surface_v1",
+            },
+        },
+    }
+
+    async def execute_direct(
+        name: str,
+        arguments: dict,
+        *,
+        tool_call_id: str,
+        round_num: int,
+    ) -> str:
+        direct_calls.append((name, arguments, tool_call_id, round_num))
+        payload = observed_direct if round_num == 1 else operated_direct
+        return json.dumps(payload)
+
+    direct_namespace["execute_tool_call_async"] = execute_direct
+    run_direct = load_function(
+        "_run_greenhouse_ats_direct_one_action", direct_namespace
+    )
+    direct_terminal = asyncio.run(
+        run_direct(SimpleNamespace(turn_id="turn-1"), ":17")
+    )
+    require(
+        direct_terminal == operated_direct,
+        "direct route did not return the raw terminal tool object",
+    )
+    require(
+        direct_calls
+        == [
+            (
+                "greenhouse_ats_ui",
+                {"display": ":17", "action": "observe"},
+                "direct:turn-1:observe",
+                1,
+            ),
+            (
+                "greenhouse_ats_ui",
+                {
+                    "display": ":17",
+                    "action": "operate",
+                    "card_sha256": card_sha256,
+                },
+                "direct:turn-1:operate",
+                2,
+            ),
+        ],
+        "direct route did not execute one exact two-phase frozen action",
+    )
+    direct_calls.clear()
+    refused_direct = {
+        "ok": False,
+        "display": ":17",
+        "action": "observe",
+        "greenhouse_ats_sequence": {
+            "state": "terminal_refusal",
+            "first_failure": {"reason": "exact first mismatch"},
+            "next_mutation_authorized": False,
+        },
+    }
+
+    async def execute_refusal(
+        name: str,
+        arguments: dict,
+        *,
+        tool_call_id: str,
+        round_num: int,
+    ) -> str:
+        direct_calls.append((name, arguments, tool_call_id, round_num))
+        return json.dumps(refused_direct)
+
+    direct_namespace["execute_tool_call_async"] = execute_refusal
+    run_direct_refusal = load_function(
+        "_run_greenhouse_ats_direct_one_action", direct_namespace
+    )
+    require(
+        asyncio.run(
+            run_direct_refusal(SimpleNamespace(turn_id="turn-refused"), ":17")
+        )
+        == refused_direct,
+        "direct route did not return the first terminal refusal unchanged",
+    )
+    require(
+        len(direct_calls) == 1 and direct_calls[0][3] == 1,
+        "direct route retried or operated after the first refusal",
+    )
+    encoded_direct_terminal = json.dumps(direct_terminal, sort_keys=True)
+    require(
+        all(
+            field not in encoded_direct_terminal
+            for field in ("human_review_required", "approval", "review_queue")
+        ),
+        "direct terminal object added a human gate",
+    )
+
+    direct_route = source_function("greenhouse_ats_one_action")
+    for token in (
+        "_greenhouse_ats_direct_display(raw_body)",
+        "_turn_context(request, {})",
+        "turn.tool_profile != _GREENHOUSE_ATS_UI_TOOL_PROFILE",
+        "_start_turn(turn)",
+        "_run_while_downstream_connected(",
+        "_run_greenhouse_ats_direct_one_action(turn, display)",
+        'await _end_turn(turn, "greenhouse_one_action_complete")',
+        "except BaseException:",
+        'await _end_turn(turn, "greenhouse_one_action_error")',
+        "_close_greenhouse_ats_pending(",
+        "_request_context.reset(context_token)",
+        "JSONResponse(content=result, headers=_turn_headers(turn))",
+    ):
+        require(token in direct_route, f"direct route lost lifecycle token {token}")
+    for forbidden_token in ("_http", "messages", "model", "human_review", "approval"):
+        require(
+            forbidden_token not in direct_route,
+            f"direct route entered forbidden path {forbidden_token}",
+        )
+    require(
+        SOURCE.count('@app.post("/v1/greenhouse-ats/one-action")') == 1,
+        "direct one-action route is missing or duplicated",
+    )
 
     runtime_source = source_function("_greenhouse_ats_runtime")
     for token in (
@@ -642,6 +831,10 @@ def main() -> int:
     prompt = (SERVING_ROOT / "TAEY_GREENHOUSE_ATS_UI_SYSTEM.md").read_text(encoding="utf-8")
     require("Never choose or supply" in prompt, "prompt exposed private choice")
     require("Never retry" in prompt, "prompt lost first-error containment")
+    require(
+        "same exact display and the exact returned `card_sha256`" in prompt,
+        "operate prompt no longer carries the bound display",
+    )
     require("review" not in prompt.lower() and "approval" not in prompt.lower(), "prompt added a human gate")
     require(
         "_close_greenhouse_ats_pending" in source_function("chat_completions"),
