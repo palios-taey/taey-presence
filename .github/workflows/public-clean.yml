@@ -17,6 +17,8 @@ jobs:
           fetch-depth: 0   # the history scan needs every commit, not a shallow clone
       - name: Prove drive_chat server-side canonical ref binding
         run: python3 serving/validate_drive_chat_server_ref_binding.py
+      - name: Prove Grok model-selector post-action barrier
+        run: python3 serving/validate_grok_model_selector_post_action.py
       - name: Prove LinkedIn Unit 1 isolated one-action profile
         run: python3 serving/validate_linkedin_unit1_profile.py
       - name: Prove autonomous LinkedIn Unit 1 preparation profile

@@ -7,5 +7,6 @@ Rules:
 - Do not reorder, skip, or substitute a listed call.
 - Supply only the readable element key written in the card. It must identify the one canonical target from the immediately preceding fresh observation: either an exact singleton or the exact YAML-selected item. Never supply or transcribe an opaque ref; Presence binds the element to that observation's canonical ref server-side.
 - Validate each listed postcondition before continuing.
+- A successful Grok `operate element=model_selector` receipt includes its YAML-owned no-clear post-action barrier. It proves all four exact model options for two consecutive reads and proves the Grok Bot interstitial absent. Never repeat the selector operation; perform the card's next explicit observation.
 - At the first missing element, refusal, failed postcondition, or unexpected state, return the first-mismatch stop report and stop.
 - Stop when the card's own terminal condition is met.

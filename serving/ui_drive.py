@@ -2146,6 +2146,211 @@ def _scroll_to_bottom_action(
     }
 
 
+def _grok_model_selector_post_action_policy(
+    row: dict[str, Any],
+    deps: SimpleNamespace,
+) -> dict[str, Any] | None:
+    if deps.platform != "grok" or row.get("element") != "model_selector":
+        return None
+
+    cfg = load_platform_yaml("grok")
+    workflow = cfg.get("workflow") or {}
+    policy = workflow.get("model_selector_post_action")
+    if not isinstance(policy, dict) or set(policy) != {
+        "trigger",
+        "scope",
+        "refresh_policy",
+        "exact_singletons",
+        "required_states",
+        "absent",
+        "stable_cycles",
+        "interval_ms",
+        "timeout_ms",
+    }:
+        raise UiDriveError("Grok model-selector post-action policy is not exact")
+
+    model_menu = (
+        ((((workflow.get("selection") or {}).get("menus") or {}).get("model")))
+        or {}
+    )
+    operate = model_menu.get("operate") or {}
+    options = model_menu.get("options") or {}
+    exact_singletons = policy.get("exact_singletons")
+    required_states = policy.get("required_states")
+    absent = policy.get("absent")
+    option_elements = {
+        str(option.get("element") or "")
+        for option in options.values()
+        if isinstance(option, dict)
+    }
+    if (
+        operate
+        != {
+            "trigger": "model_selector",
+            "scope": "app_root_snapshot",
+            "open_method": "mapped_pointer_activate",
+        }
+        or policy.get("trigger") != operate["trigger"]
+        or policy.get("scope") != operate["scope"]
+        or policy.get("refresh_policy") != "live_reacquire_no_clear"
+        or not isinstance(exact_singletons, list)
+        or not exact_singletons
+        or not all(
+            isinstance(element, str) and element and element == element.strip()
+            for element in exact_singletons
+        )
+        or len(exact_singletons) != len(set(exact_singletons))
+        or set(exact_singletons) != option_elements
+        or required_states != ["showing", "focusable", "enabled"]
+        or not isinstance(absent, list)
+        or not all(
+            isinstance(element, str) and element and element == element.strip()
+            for element in absent
+        )
+        or absent != ["grok_bot_dialog", "grok_bot_dismiss", "grok_bot_get"]
+    ):
+        raise UiDriveError("Grok model-selector post-action authority drifted")
+
+    element_map = ((cfg.get("tree") or {}).get("element_map") or {})
+    for element in exact_singletons:
+        spec = element_map.get(element) or {}
+        if (
+            spec.get("role") != "menu item"
+            or spec.get("scope") != "app_root_snapshot"
+            or not isinstance(spec.get("name"), str)
+            or not spec["name"]
+        ):
+            raise UiDriveError(
+                f"Grok model-selector post-action element {element!r} drifted"
+            )
+    if any(element not in element_map for element in absent):
+        raise UiDriveError("Grok model-selector blocker authority drifted")
+
+    for field in ("stable_cycles", "interval_ms", "timeout_ms"):
+        value = policy.get(field)
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise UiDriveError(
+                f"Grok model-selector post-action {field} must be a positive integer"
+            )
+    if policy["stable_cycles"] < 2:
+        raise UiDriveError(
+            "Grok model-selector post-action requires at least two stable samples"
+        )
+    return policy
+
+
+def _grok_model_selector_post_action_observation(
+    runtime: ConsultationRuntime,
+    row: dict[str, Any],
+    deps: SimpleNamespace,
+) -> tuple[Snapshot, dict[str, Any]] | None:
+    policy = _grok_model_selector_post_action_policy(row, deps)
+    if policy is None:
+        return None
+
+    exact_singletons = list(policy["exact_singletons"])
+    required_states = set(policy["required_states"])
+    absent = list(policy["absent"])
+    required_cycles = int(policy["stable_cycles"])
+    interval = float(policy["interval_ms"]) / 1000.0
+    started = time.monotonic()
+    deadline = started + (float(policy["timeout_ms"]) / 1000.0)
+    stable_cycles = 0
+    last_projection_sha256: str | None = None
+    samples: list[dict[str, Any]] = []
+
+    while True:
+        snapshot = runtime.app_root_snapshot()
+        if snapshot.platform != deps.platform:
+            raise UiDriveError(
+                "Grok model-selector post-action returned the wrong platform"
+            )
+        match_counts = {
+            element: len(snapshot.mapped.get(element) or [])
+            for element in exact_singletons
+        }
+        absent_counts = {
+            element: len(snapshot.mapped.get(element) or [])
+            for element in absent
+        }
+        projection = {
+            element: [
+                {
+                    "name": item.name,
+                    "role": item.role,
+                    "states": sorted(set(item.states)),
+                }
+                for item in (snapshot.mapped.get(element) or [])
+            ]
+            for element in exact_singletons
+        }
+        states_match = all(
+            match_counts[element] == 1
+            and required_states.issubset(
+                set((snapshot.mapped.get(element) or [])[0].states)
+            )
+            for element in exact_singletons
+        )
+        blockers_absent = all(count == 0 for count in absent_counts.values())
+        matched = states_match and blockers_absent
+        projection_sha256 = hashlib.sha256(
+            json.dumps(
+                projection,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        if matched and projection_sha256 == last_projection_sha256:
+            stable_cycles += 1
+        elif matched:
+            stable_cycles = 1
+        else:
+            stable_cycles = 0
+        last_projection_sha256 = projection_sha256 if matched else None
+        samples.append(
+            {
+                "sample": len(samples) + 1,
+                "elapsed_ms": round((time.monotonic() - started) * 1000),
+                "snapshot_revision": _snapshot_revision(
+                    snapshot,
+                    scope="app_root_snapshot",
+                ),
+                "current_url": snapshot.url,
+                "match_counts": match_counts,
+                "absent_counts": absent_counts,
+                "projection_sha256": projection_sha256,
+                "matched": matched,
+            }
+        )
+        receipt = {
+            "schema": "taey_grok_model_selector_post_action_v1",
+            "platform": "grok",
+            "display": deps.display,
+            "element": "model_selector",
+            "scope": policy["scope"],
+            "refresh_policy": policy["refresh_policy"],
+            "exact_singletons": list(exact_singletons),
+            "absent": absent,
+            "stable_cycles_required": required_cycles,
+            "stable_cycles_observed": stable_cycles,
+            "samples": samples,
+            "result": "PASS" if stable_cycles >= required_cycles else "WAIT",
+            "next_mutation_authorized": stable_cycles >= required_cycles,
+            "observe_required_before_next_mutation": True,
+        }
+        if stable_cycles >= required_cycles:
+            return snapshot, receipt
+        if time.monotonic() >= deadline:
+            receipt["result"] = "TIMEOUT"
+            receipt["next_mutation_authorized"] = False
+            raise UiDriveError(
+                "Grok model-selector post-action observation timed out: "
+                + json.dumps(receipt, ensure_ascii=False, sort_keys=True)
+            )
+        time.sleep(interval)
+
+
 def _mapped_pointer_activate_operation(
     row: dict[str, Any],
     declared: dict[str, Any],
@@ -2188,7 +2393,12 @@ def _mapped_pointer_activate_operation(
             f"{row['element']} mapped_pointer_activate failed: "
             + json.dumps(evidence, ensure_ascii=False, sort_keys=True)
         )
-    return {
+    post_action = _grok_model_selector_post_action_observation(
+        runtime,
+        row,
+        deps,
+    )
+    result = {
         "performed": True,
         "performed_primitive": "mapped_pointer_activate",
         "performed_operation": "mapped_pointer_activate",
@@ -2203,6 +2413,22 @@ def _mapped_pointer_activate_operation(
             "ref": row["ref"],
         },
     }
+    if post_action is not None:
+        post_snapshot, barrier = post_action
+        result.update(
+            {
+                "post_action_observation": {
+                    "snapshot_revision": _snapshot_revision(
+                        post_snapshot,
+                        scope="app_root_snapshot",
+                    ),
+                    "barrier": barrier,
+                },
+                "next_mutation_authorized": True,
+                "observe_required_before_next_mutation": True,
+            }
+        )
+    return result
 
 
 def _revenue_scroll_into_view(
