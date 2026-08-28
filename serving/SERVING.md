@@ -526,9 +526,22 @@ curl --fail-with-body --silent --show-error \
   -H 'X-Taey-Event-Id: linkedin-unit1-001' \
   -H 'X-Taey-Correlation-Id: linkedin-unit1-001' \
   -H 'X-Taey-Tool-Profile: linkedin-unit1-prepare' \
-  --data-binary '{"model":"SERVED_MODEL_ID","stream":false,"messages":[{"role":"user","content":"Prepare the frozen LinkedIn Unit 1 transaction on display :18. Continue only through the injected profile until final_bundle_published or the first failure."}]}' \
+  --data-binary '{"model":"SERVED_MODEL_ID","stream":false,"chat_template_kwargs":{"enable_thinking":false},"messages":[{"role":"user","content":"Prepare the frozen LinkedIn Unit 1 transaction on display :18. Continue only through the injected profile until final_bundle_published or the first failure."}]}' \
   http://127.0.0.1:8765/v1/chat/completions
 ```
+
+Presence enforces `chat_template_kwargs.enable_thinking=false` on every upstream
+generation round in this preparation profile, even when a caller requests `true`.
+The measured production finding in [THROUGHPUT_FINDINGS.md](THROUGHPUT_FINDINGS.md)
+shows that leaving the flag absent made comparable routine output take 10.8 times
+longer. This is a profile-local inference policy; it does not change `full`,
+`revenue-ui`, or any other profile.
+
+Because preparation also selects a candidate and writes a draft, promotion requires
+one fresh **preparation-only** production comparison before delivery: verify the
+selected activity or exact exclusion codes, the draft gate, the published bundle,
+and the terminal receipt against the thinking-enabled baseline. Do not launch the
+`linkedin-unit1` delivery profile or post a comment during that comparison.
 
 Proceed only when the terminal preparation result is
 `final_bundle_published`. Presence has then written the exact immutable bundle
