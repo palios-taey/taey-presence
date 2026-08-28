@@ -17,6 +17,8 @@ jobs:
           fetch-depth: 0   # the history scan needs every commit, not a shallow clone
       - name: Prove drive_chat server-side canonical ref binding
         run: python3 serving/validate_drive_chat_server_ref_binding.py
+      - name: Prove LinkedIn Unit 1 isolated one-action profile
+        run: python3 serving/validate_linkedin_unit1_profile.py
       - name: Install gitleaks
         # The gate exits 2 (INDETERMINATE) rather than passing if this is missing, so a broken
         # install surfaces as "could not determine" instead of a false clean bill.

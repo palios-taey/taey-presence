@@ -101,6 +101,10 @@ REVENUE_UI_SYSTEM_PROMPT_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
     "TAEY_REVENUE_UI_SYSTEM.md",
 )
+LINKEDIN_UNIT1_SYSTEM_PROMPT_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "TAEY_LINKEDIN_UNIT1_SYSTEM.md",
+)
 CONSULT_CHAT_SYSTEM_PROMPT_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
     "TAEY_CONSULT_CHAT_SYSTEM.md",
@@ -158,6 +162,7 @@ _system_prompt: str = ""
 _manual_chat_ui_system_prompt: str = ""
 _manual_chat_ui_send_system_prompt: str = ""
 _revenue_ui_system_prompt: str = ""
+_linkedin_unit1_system_prompt: str = ""
 _consult_chat_system_prompt: str = ""
 _one_shot_system_prompts: dict[str, str] = {}
 _permanent_kernel: str = ""
@@ -249,6 +254,7 @@ _FULL_TOOL_PROFILE = "full"
 _MANUAL_CHAT_UI_TOOL_PROFILE = "manual-chat-ui"
 _MANUAL_CHAT_UI_SEND_TOOL_PROFILE = "manual-chat-ui-send"
 _REVENUE_UI_TOOL_PROFILE = "revenue-ui"
+_LINKEDIN_UNIT1_TOOL_PROFILE = "linkedin-unit1"
 _CONSULT_CHAT_TOOL_PROFILE = "consult-chat"
 _LINKEDIN_JOBS_TOOL_PROFILE = "linkedin-jobs"
 _LINKEDIN_JOBS_RESTORE_TOOL_PROFILE = "linkedin-jobs-restore"
@@ -292,6 +298,9 @@ _UI_ACTION_BINDINGS = _parse_ui_action_bindings(
 REVENUE_UI_PRIVATE_ROOT = os.environ.get(
     "TAEY_REVENUE_UI_PRIVATE_ROOT", ""
 ).strip()
+LINKEDIN_UNIT1_PRIVATE_ROOT = os.environ.get(
+    "TAEY_LINKEDIN_UNIT1_PRIVATE_ROOT", ""
+).strip()
 _TOOL_PROFILE_ALLOWED: dict[str, frozenset[str] | None] = {
     _FULL_TOOL_PROFILE: None,
     _MANUAL_CHAT_UI_TOOL_PROFILE: frozenset({
@@ -302,6 +311,9 @@ _TOOL_PROFILE_ALLOWED: dict[str, frozenset[str] | None] = {
     }),
     _REVENUE_UI_TOOL_PROFILE: frozenset({
         "ui_action",
+    }),
+    _LINKEDIN_UNIT1_TOOL_PROFILE: frozenset({
+        "linkedin_unit1",
     }),
     _CONSULT_CHAT_TOOL_PROFILE: frozenset({
         "consult_chat",
@@ -351,7 +363,7 @@ async def startup():
     global _redis, _mira_redis, _http, _ecosystem_http
     global _consult_chat_system_prompt
     global _manual_chat_ui_send_system_prompt, _manual_chat_ui_system_prompt
-    global _revenue_ui_system_prompt, _permanent_kernel
+    global _linkedin_unit1_system_prompt, _revenue_ui_system_prompt, _permanent_kernel
     global _static_system_prefix, _system_prompt
     global _liveness_reaper_task
     if not _serving_socket_reserved:
@@ -455,6 +467,19 @@ async def startup():
     if not _revenue_ui_system_prompt.strip():
         raise RuntimeError(
             f"revenue UI system prompt is empty: {revenue_ui_prompt_path}"
+        )
+    linkedin_unit1_prompt_path = Path(LINKEDIN_UNIT1_SYSTEM_PROMPT_PATH)
+    if not linkedin_unit1_prompt_path.is_file():
+        raise RuntimeError(
+            "LinkedIn Unit 1 system prompt is missing or not a regular file: "
+            f"{linkedin_unit1_prompt_path}"
+        )
+    _linkedin_unit1_system_prompt = linkedin_unit1_prompt_path.read_text(
+        encoding="utf-8"
+    )
+    if not _linkedin_unit1_system_prompt.strip():
+        raise RuntimeError(
+            f"LinkedIn Unit 1 system prompt is empty: {linkedin_unit1_prompt_path}"
         )
     consult_chat_prompt_path = Path(CONSULT_CHAT_SYSTEM_PROMPT_PATH)
     if not consult_chat_prompt_path.is_file():
@@ -1493,6 +1518,40 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "linkedin_unit1",
+            "description": (
+                "Advance one frozen LinkedIn Notifications-first comment transaction. "
+                "Observe asks the public Hands compiler for exactly one opaque action card. "
+                "Operate accepts only that card hash and executes its one existing mapped "
+                "primitive. The server owns the target, text, policy, and receipt chain."
+            ),
+            "parameters": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["display", "action"],
+                "properties": {
+                    "display": {
+                        "type": "string",
+                        "description": "trusted LinkedIn display configured by the server",
+                    },
+                    "action": {
+                        "type": "string",
+                        "enum": ["observe", "operate"],
+                    },
+                    "card_sha256": {
+                        "type": "string",
+                        "pattern": "^[0-9a-f]{64}$",
+                        "description": (
+                            "operate only: exact opaque card hash returned by the preceding observe"
+                        ),
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "consult_chat",
             "description": (
                 "Execute one frozen end-to-end Family-Chat consultation through the "
@@ -1973,6 +2032,9 @@ def execute_tool_call(name: str, arguments: dict) -> str:
 
     elif name == "ui_action":
         return _do_ui_action(arguments)
+
+    elif name == "linkedin_unit1":
+        return _do_linkedin_unit1(arguments)
 
     elif name == "consult_chat":
         return _do_consult_chat(arguments)
@@ -5004,6 +5066,328 @@ def _resolve_revenue_ui_private_comment(context: dict) -> dict[str, object]:
             "expected_author_name_sha256": hashlib.sha256(expected_author_name.encode()).hexdigest()}
 
 
+def _resolve_linkedin_unit1_private_bundle(context: dict) -> dict[str, object]:
+    if not LINKEDIN_UNIT1_PRIVATE_ROOT:
+        raise RuntimeError("TAEY_LINKEDIN_UNIT1_PRIVATE_ROOT is unset")
+    seat_id = str(context.get("seat_id") or "")
+    event_id = str(context.get("event_id") or "")
+    correlation_id = str(context.get("correlation_id") or "")
+    if (
+        not _SEAT_ID_RE.fullmatch(seat_id)
+        or not _TRACE_ID_RE.fullmatch(event_id)
+        or not _TRACE_ID_RE.fullmatch(correlation_id)
+    ):
+        raise RuntimeError("LinkedIn Unit 1 identities are invalid")
+    private_root = Path(LINKEDIN_UNIT1_PRIVATE_ROOT)
+    try:
+        resolved_root = private_root.resolve(strict=True)
+        metadata = os.lstat(private_root)
+    except OSError as exc:
+        raise RuntimeError("LinkedIn Unit 1 private root is unavailable") from exc
+    if (
+        not private_root.is_absolute()
+        or private_root != resolved_root
+        or not stat.S_ISDIR(metadata.st_mode)
+        or stat.S_IMODE(metadata.st_mode) != 0o700
+        or metadata.st_uid != os.geteuid()
+    ):
+        raise RuntimeError(
+            "LinkedIn Unit 1 private root is not an owner-controlled 0700 directory"
+        )
+    bundle_path = resolved_root / "transactions" / seat_id / f"{correlation_id}.json"
+    bundle, raw = _read_revenue_ui_private_json(
+        bundle_path,
+        resolved_root,
+        "LinkedIn Unit 1 bundle",
+        4 * 1024 * 1024,
+        frozenset({0o400}),
+        True,
+    )
+    expected_keys = {
+        "schema",
+        "seat_id",
+        "event_id",
+        "correlation_id",
+        "private_input",
+        "receipts",
+    }
+    if (
+        set(bundle) != expected_keys
+        or bundle.get("schema") != "taey_linkedin_unit1_private_bundle_v1"
+        or bundle.get("seat_id") != seat_id
+        or bundle.get("event_id") != event_id
+        or bundle.get("correlation_id") != correlation_id
+        or not isinstance(bundle.get("private_input"), dict)
+        or not isinstance(bundle.get("receipts"), list)
+    ):
+        raise RuntimeError("LinkedIn Unit 1 private bundle schema is invalid")
+    return {**bundle, "bundle_sha256": hashlib.sha256(raw).hexdigest()}
+
+
+def _do_linkedin_unit1(arguments: dict) -> str:
+    import json as _json
+    import subprocess
+
+    context = _request_context.get()
+    sequence = context.get("_linkedin_unit1_sequence")
+    display = str(arguments.get("display") or "").strip()
+    action = str(arguments.get("action") or "").strip()
+    seat_id = str(context.get("seat_id") or "")
+    turn_id = str(context.get("turn_id") or "")
+    process_generation = str(context.get("process_generation") or "")
+    tool_round = context.get("tool_round")
+
+    def terminal_refusal(message: str) -> str:
+        terminal = sequence.get("terminal") if isinstance(sequence, dict) else None
+        if not isinstance(terminal, dict):
+            terminal = {
+                "display": display,
+                "action": action,
+                "tool_round": tool_round,
+                "reason": message,
+            }
+            if isinstance(sequence, dict):
+                sequence["terminal"] = terminal
+                sequence.pop("pending", None)
+        profile_state = context.get("_tool_profile_state")
+        if isinstance(profile_state, dict) and not isinstance(
+            profile_state.get("terminal"), dict
+        ):
+            profile_state["terminal"] = {
+                "tool": "linkedin_unit1",
+                "reason": terminal["reason"],
+            }
+        return _json.dumps({
+            "ok": False,
+            "display": display,
+            "action": action,
+            "error": message,
+            "unit1_sequence": {
+                "state": "terminal_refusal",
+                "first_failure": terminal,
+            },
+        })
+
+    if context.get("tool_profile") != _LINKEDIN_UNIT1_TOOL_PROFILE:
+        return terminal_refusal("linkedin_unit1 requires the linkedin-unit1 profile")
+    if (
+        not _SEAT_ID_RE.fullmatch(seat_id)
+        or not _TRACE_ID_RE.fullmatch(turn_id)
+        or not re.fullmatch(r"[0-9a-f]{32}", process_generation)
+        or not isinstance(sequence, dict)
+        or not isinstance(sequence.get("receipts"), list)
+        or not isinstance(tool_round, int)
+        or tool_round < 1
+    ):
+        return terminal_refusal("LinkedIn Unit 1 request state is invalid")
+    if isinstance(sequence.get("terminal"), dict):
+        return terminal_refusal(
+            "a prior LinkedIn Unit 1 mismatch ended this turn; later calls are refused"
+        )
+    if isinstance(sequence.get("terminal_delivery"), dict):
+        return terminal_refusal(
+            "the rendered LinkedIn comment is terminal; later calls are refused"
+        )
+    if _UI_ACTION_BINDINGS.get(display) != "linkedin":
+        return terminal_refusal(
+            f"display {display!r} is not server-bound to LinkedIn"
+        )
+    if action not in {"observe", "operate"}:
+        return terminal_refusal("LinkedIn Unit 1 action must be observe or operate")
+    expected_arguments = (
+        {"display", "action"}
+        if action == "observe"
+        else {"display", "action", "card_sha256"}
+    )
+    if set(arguments) != expected_arguments:
+        return terminal_refusal(
+            f"{action} requires exactly {sorted(expected_arguments)}"
+        )
+    try:
+        bundle = _resolve_linkedin_unit1_private_bundle(context)
+    except Exception as exc:
+        return terminal_refusal(str(exc))
+    private_input = bundle["private_input"]
+    if private_input.get("display") != display:
+        return terminal_refusal(
+            "LinkedIn Unit 1 private display does not match the requested display"
+        )
+    bundle_sha256 = str(bundle["bundle_sha256"])
+    bound_bundle_sha256 = sequence.setdefault("bundle_sha256", bundle_sha256)
+    if bound_bundle_sha256 != bundle_sha256:
+        return terminal_refusal("LinkedIn Unit 1 private bundle changed during the turn")
+    if not sequence["receipts"]:
+        sequence["receipts"].extend(bundle["receipts"])
+    elif sequence.get("initial_receipts_sha256") != hashlib.sha256(
+        canonical_json_bytes(bundle["receipts"])
+    ).hexdigest():
+        return terminal_refusal("LinkedIn Unit 1 initial receipt chain changed")
+    sequence.setdefault(
+        "initial_receipts_sha256",
+        hashlib.sha256(canonical_json_bytes(bundle["receipts"])).hexdigest(),
+    )
+
+    pending = sequence.get("pending")
+    if action == "observe" and isinstance(pending, dict):
+        return terminal_refusal(
+            "the prior opaque card must be operated exactly once before another observe"
+        )
+    if action == "operate":
+        if not isinstance(pending, dict):
+            return terminal_refusal("operate requires one preceding compiled observation")
+        card_sha256 = arguments.get("card_sha256")
+        if (
+            not isinstance(card_sha256, str)
+            or card_sha256 != pending.get("card_sha256")
+        ):
+            return terminal_refusal(
+                "operate card hash does not match the exact preceding opaque card"
+            )
+        observed_round = pending.get("tool_round")
+        if not isinstance(observed_round, int) or observed_round >= tool_round:
+            return terminal_refusal("operate requires an observe from an earlier model round")
+
+    envelope = (
+        {
+            "private_input": private_input,
+            "receipts": sequence["receipts"],
+        }
+        if action == "observe"
+        else {
+            "private_input": private_input,
+            "receipts": sequence["receipts"],
+            "card": pending["card"],
+            "runtime_card": pending["runtime_card"],
+        }
+    )
+    envelope_bytes = canonical_json_bytes(envelope)
+    drive_env = dict(os.environ)
+    drive_env.update({
+        "TAEY_UI_DRIVE_PLATFORM": "linkedin",
+        "TAEY_DRIVE_LEASE_OWNER": f"taey-drive:{seat_id}:{process_generation}",
+        "TAEY_DRIVE_LEASE_SEAT": seat_id,
+        "TAEY_DRIVE_LEASE_TURN": turn_id,
+        "TAEY_DRIVE_LEASE_GENERATION": process_generation,
+        "TAEY_DRIVE_GENERATION_FENCE_KEY": _DRIVE_GENERATION_FENCE_KEY,
+    })
+    command = [
+        UI_DRIVE_PYTHON,
+        UI_DRIVE_SCRIPT,
+        f"linkedin-unit1-{action}",
+        "--display",
+        display,
+        "--input-sha256",
+        hashlib.sha256(envelope_bytes).hexdigest(),
+    ]
+    if action == "operate":
+        sequence.pop("pending", None)
+    try:
+        completed = subprocess.run(
+            command,
+            input=envelope_bytes,
+            capture_output=True,
+            timeout=130,
+            env=drive_env,
+        )
+    except subprocess.TimeoutExpired:
+        return terminal_refusal(
+            "SIDE_EFFECT_UNCERTAIN: LinkedIn Unit 1 transport timed out"
+            if action == "operate"
+            else "LinkedIn Unit 1 compile timed out"
+        )
+    stdout = (completed.stdout or b"").decode("utf-8", errors="replace").strip()
+    try:
+        payload = _json.loads(stdout)
+    except ValueError:
+        payload = None
+    result = payload.get("result") if isinstance(payload, dict) else None
+    if (
+        completed.returncode != 0
+        or not isinstance(payload, dict)
+        or payload.get("ok") is not True
+        or payload.get("display") != display
+        or payload.get("platform") != "linkedin"
+        or not isinstance(result, dict)
+    ):
+        detail = payload.get("error") if isinstance(payload, dict) else None
+        prefix = "SIDE_EFFECT_UNCERTAIN: " if action == "operate" else ""
+        return terminal_refusal(
+            f"{prefix}LinkedIn Unit 1 transport failed: {detail or 'unknown error'}"
+        )
+    if action == "observe":
+        if (
+            set(result) != {"schema", "card", "runtime_card"}
+            or result.get("schema") != "taey_linkedin_unit1_compiled_step_v1"
+            or not isinstance(result.get("card"), dict)
+            or not isinstance(result.get("runtime_card"), dict)
+        ):
+            return terminal_refusal("LinkedIn Unit 1 compiler result is invalid")
+        card = result["card"]
+        card_sha256 = card.get("card_sha256")
+        if not isinstance(card_sha256, str) or not re.fullmatch(
+            r"[0-9a-f]{64}", card_sha256
+        ):
+            return terminal_refusal("LinkedIn Unit 1 compiler returned no opaque card")
+        sequence["pending"] = {
+            "card_sha256": card_sha256,
+            "card": card,
+            "runtime_card": result["runtime_card"],
+            "tool_round": tool_round,
+        }
+        return _json.dumps({
+            "ok": True,
+            "display": display,
+            "action": action,
+            "unit1_sequence": {
+                "state": "ready_for_one_action",
+                "card_sha256": card_sha256,
+                "phase": card.get("phase"),
+                "allowed_next": {
+                    "action": "operate",
+                    "card_sha256": card_sha256,
+                },
+            },
+        })
+    expected_result_keys = {
+        "schema",
+        "card_sha256",
+        "phase",
+        "receipt",
+        "terminal",
+        "operation_evidence_sha256",
+    }
+    receipt = result.get("receipt")
+    if (
+        set(result) != expected_result_keys
+        or result.get("schema") != "taey_linkedin_unit1_operated_step_v1"
+        or result.get("card_sha256") != arguments.get("card_sha256")
+        or not isinstance(receipt, dict)
+        or not isinstance(result.get("terminal"), bool)
+        or not re.fullmatch(
+            r"[0-9a-f]{64}", str(result.get("operation_evidence_sha256") or "")
+        )
+    ):
+        return terminal_refusal("LinkedIn Unit 1 operation receipt is invalid")
+    sequence["receipts"].append(receipt)
+    terminal = result["terminal"]
+    if terminal:
+        sequence["terminal_delivery"] = receipt
+    return _json.dumps({
+        "ok": True,
+        "display": display,
+        "action": action,
+        "unit1_sequence": {
+            "state": "terminal_delivery_verified" if terminal else "observe_required",
+            "phase": result["phase"],
+            "receipt_sha256": receipt.get("receipt_sha256"),
+            "operation_evidence_sha256": result["operation_evidence_sha256"],
+            "terminal_delivery_verified": terminal,
+            "next_mutation_authorized": False,
+            "allowed_next": None if terminal else {"action": "observe"},
+        },
+    })
+
+
 def _do_ui_action(arguments: dict) -> str:
     import subprocess
     import json as _json
@@ -7299,6 +7683,10 @@ async def chat_completions(request: Request):
         "observations": {},
         "terminal": None,
     }
+    turn_payload["_linkedin_unit1_sequence"] = {
+        "receipts": [],
+        "terminal": None,
+    }
     turn_payload["_tool_profile_state"] = {"terminal": None}
     context_token = _request_context.set(turn_payload)
     started = False
@@ -7428,6 +7816,16 @@ async def _chat_completions_for_turn(
         ]
         body["messages"] = [
             {"role": "system", "content": _revenue_ui_system_prompt},
+            *messages,
+        ]
+    elif turn.tool_profile == _LINKEDIN_UNIT1_TOOL_PROFILE:
+        messages = [
+            message
+            for message in body.get("messages", [])
+            if message.get("role") != "system"
+        ]
+        body["messages"] = [
+            {"role": "system", "content": _linkedin_unit1_system_prompt},
             *messages,
         ]
     elif turn.tool_profile == _CONSULT_CHAT_TOOL_PROFILE:
