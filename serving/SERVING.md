@@ -533,6 +533,11 @@ curl --fail-with-body --silent --show-error \
 Proceed only when the terminal preparation result is
 `final_bundle_published`. Presence has then written the exact immutable bundle
 to `TAEY_LINKEDIN_UNIT1_PRIVATE_ROOT/transactions/SEAT/CORRELATION.json`.
+Each mounted Notifications inventory is classified before any continuation:
+one qualifying `select` decision outranks Show more; otherwise `exclude` must
+bind closed reason codes for every exact actionable activity before one
+continuation card can compile. A verified continuation clears those exclusions,
+so the newly mounted inventory cannot inherit a prior decision.
 Launch delivery as a new proxy turn with the **same** seat, event, and
 correlation identity:
 

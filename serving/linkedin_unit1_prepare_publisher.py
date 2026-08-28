@@ -11,7 +11,18 @@ FINAL_BUNDLE_SCHEMA = "taey_linkedin_unit1_private_bundle_v1"
 PREPARATION_ENVELOPE_SCHEMA = "linkedin_unit1_preparation_envelope_v1"
 DRAFT_GATE_SCHEMA = "taey_linkedin_unit1_draft_gate_receipt_v1"
 NOTIFICATION_INVENTORY_SCHEMA = "linkedin_notification_inventory_v1"
+NOTIFICATION_EXCLUSIONS_SCHEMA = "linkedin_notification_inventory_exclusions_v1"
 SELECTED_SOURCE_SCHEMA = "linkedin_selected_post_thread_source_v1"
+EXCLUSION_REASON_CODES = frozenset({
+    "already_used",
+    "author_cooloff",
+    "event_announcement",
+    "hostile_or_irrelevant",
+    "off_target",
+    "pitch_or_promotion",
+    "self_authored",
+    "stale",
+})
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _PUBLIC_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
@@ -158,6 +169,83 @@ def build_selection(
     }
     selection["selection_sha256"] = canonical_sha256(selection)
     return selection, dict(inventory)
+
+
+def build_exclusions(
+    selection_input: Mapping[str, Any], arguments: Mapping[str, Any],
+    preparation: Mapping[str, Any],
+) -> dict[str, Any]:
+    if set(arguments) != {"action", "display", "excluded_candidates"}:
+        raise LinkedInUnit1PreparePublisherError(
+            "exclusion decision fields are incomplete or unknown"
+        )
+    inventory = selection_input.get("notification_inventory")
+    rows = arguments["excluded_candidates"]
+    if (
+        selection_input.get("schema")
+        != "linkedin_unit1_private_selection_input_v1"
+        or selection_input.get("continuation_available") is not True
+        or selection_input.get("policy_sha256") != preparation["policy_sha256"]
+        or selection_input.get("transaction_sha256")
+        != preparation_transaction_sha256(preparation)
+        or not isinstance(inventory, Mapping)
+        or not isinstance(inventory.get("actionable_links"), list)
+        or not _SHA256.fullmatch(str(inventory.get("inventory_sha256") or ""))
+        or not isinstance(rows, list)
+    ):
+        raise LinkedInUnit1PreparePublisherError("exclusion input is invalid")
+    expected_activities: list[str] = []
+    for link in inventory["actionable_links"]:
+        activity = link.get("activity") if isinstance(link, Mapping) else None
+        if (
+            not isinstance(activity, str)
+            or _ACTIVITY.fullmatch(activity) is None
+            or activity in expected_activities
+        ):
+            raise LinkedInUnit1PreparePublisherError(
+                "exact actionable inventory activities are invalid"
+            )
+        expected_activities.append(activity)
+    excluded_candidates: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, Mapping) or set(row) != {"activity", "reason_codes"}:
+            raise LinkedInUnit1PreparePublisherError(
+                "excluded candidate fields are incomplete or unknown"
+            )
+        activity = row["activity"]
+        reason_codes = row["reason_codes"]
+        if (
+            not isinstance(activity, str)
+            or _ACTIVITY.fullmatch(activity) is None
+            or not isinstance(reason_codes, list)
+            or not reason_codes
+            or reason_codes != sorted(set(reason_codes))
+            or any(
+                not isinstance(reason, str)
+                or reason not in EXCLUSION_REASON_CODES
+                for reason in reason_codes
+            )
+        ):
+            raise LinkedInUnit1PreparePublisherError(
+                "excluded candidate evidence is invalid"
+            )
+        excluded_candidates.append({
+            "activity": activity,
+            "reason_codes": list(reason_codes),
+        })
+    if [row["activity"] for row in excluded_candidates] != expected_activities:
+        raise LinkedInUnit1PreparePublisherError(
+            "exclusions do not cover the exact actionable inventory"
+        )
+    decision = {
+        "schema": NOTIFICATION_EXCLUSIONS_SCHEMA,
+        "notification_inventory_sha256": inventory["inventory_sha256"],
+        "policy_sha256": preparation["policy_sha256"],
+        "transaction_sha256": preparation_transaction_sha256(preparation),
+        "excluded_candidates": excluded_candidates,
+    }
+    decision["exclusions_sha256"] = canonical_sha256(decision)
+    return decision
 
 
 def build_final_bundle(

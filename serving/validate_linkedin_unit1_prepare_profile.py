@@ -168,12 +168,16 @@ def main() -> int:
     parser.add_argument("--hands-root")
     args = parser.parse_args()
     hands_unit1 = None
+    hands_prepare = None
     soma = None
     if args.hands_root:
         hands_root = Path(args.hands_root).resolve(strict=True)
         sys.path.insert(0, str(hands_root))
         hands_unit1 = importlib.import_module(
             "consultation_v2.platforms.linkedin.unit1"
+        )
+        hands_prepare = importlib.import_module(
+            "consultation_v2.platforms.linkedin.unit1_prepare"
         )
         soma = importlib.import_module("soma_proxy")
 
@@ -210,8 +214,20 @@ def main() -> int:
     )
     require(
         tool["parameters"]["properties"]["action"]["enum"]
-        == ["observe", "operate", "select", "draft"],
+        == ["observe", "operate", "select", "exclude", "draft"],
         "preparation action grammar drifted",
+    )
+    exclusion_schema = tool["parameters"]["properties"]["excluded_candidates"]
+    require(
+        exclusion_schema["type"] == "array"
+        and exclusion_schema["items"]["additionalProperties"] is False
+        and exclusion_schema["items"]["required"]
+        == ["activity", "reason_codes"]
+        and exclusion_schema["items"]["properties"]["reason_codes"]["items"][
+            "enum"
+        ]
+        == sorted(publisher.EXCLUSION_REASON_CODES),
+        "private exclusion evidence grammar drifted",
     )
     for forbidden in ("selector", "coordinate", "url", "path", "element"):
         require(
@@ -222,6 +238,12 @@ def main() -> int:
     require(
         "there is no human review or approval step" in lowered_prompt,
         "autonomous no-human-approval boundary is missing",
+    )
+    require(
+        'action="exclude"' in prompt
+        and "continuation_available" in prompt
+        and "qualifying selection always takes priority" in lowered_prompt,
+        "candidate-first continuation instructions are incomplete",
     )
     require(
         "review before" not in lowered_prompt and "await approval" not in lowered_prompt,
@@ -300,6 +322,15 @@ def main() -> int:
         and '"allowed_next": {"action": "observe"}' in handler_source,
         "route proof does not preserve the receipt and fresh-observe boundary",
     )
+    require(
+        "frozen_exclusions = build_exclusions(" in handler_source
+        and '{"action": "select", "alternative_action": "exclude"}'
+        in handler_source
+        and 'if result["phase"] == "notifications_continuation":' in handler_source
+        and 'sequence.pop("selection", None)' in handler_source
+        and 'sequence.pop("inventory", None)' in handler_source,
+        "accepted continuation does not clear its exact private exclusions",
+    )
     transport_source = source_function(
         proxy, "_linkedin_unit1_prepare_transport_action"
     )
@@ -313,7 +344,7 @@ def main() -> int:
         and transport_action("operate") == "operate",
         "model actions do not map to the exact production transport domain",
     )
-    for private_action in ("select", "draft"):
+    for private_action in ("select", "exclude", "draft"):
         expect_refusal(
             lambda action=private_action: transport_action(action),
             f"private {private_action} decision entered the UI transport domain",
@@ -464,6 +495,7 @@ def main() -> int:
                 loaded["preparation"]
             ),
             "notification_inventory": inventory(),
+            "continuation_available": True,
         }
         selection_arguments = {
             "display": ":18",
@@ -477,6 +509,83 @@ def main() -> int:
             selection_input,
             selection_arguments,
             loaded["preparation"],
+        )
+        exclusion_arguments = {
+            "display": ":18",
+            "action": "exclude",
+            "excluded_candidates": [{
+                "activity": "123456789",
+                "reason_codes": ["off_target"],
+            }],
+        }
+        frozen_exclusions = publisher.build_exclusions(
+            selection_input,
+            exclusion_arguments,
+            loaded["preparation"],
+        )
+        require(
+            frozen_exclusions["schema"]
+            == publisher.NOTIFICATION_EXCLUSIONS_SCHEMA
+            and frozen_exclusions["notification_inventory_sha256"]
+            == exact_inventory["inventory_sha256"]
+            and frozen_exclusions["exclusions_sha256"]
+            == publisher.canonical_sha256({
+                key: value
+                for key, value in frozen_exclusions.items()
+                if key != "exclusions_sha256"
+            }),
+            "complete exact exclusions were not frozen",
+        )
+        if hands_prepare is not None:
+            hands_prepare.validate_preparation_envelope({
+                **loaded["preparation"],
+                "selection": frozen_exclusions,
+            })
+        partial_exclusions = {
+            **exclusion_arguments,
+            "excluded_candidates": [],
+        }
+        expect_refusal(
+            lambda: publisher.build_exclusions(
+                selection_input,
+                partial_exclusions,
+                loaded["preparation"],
+            ),
+            "partial exclusion evidence was admitted",
+        )
+        duplicate_exclusions = {
+            **exclusion_arguments,
+            "excluded_candidates": [
+                *exclusion_arguments["excluded_candidates"],
+                *exclusion_arguments["excluded_candidates"],
+            ],
+        }
+        expect_refusal(
+            lambda: publisher.build_exclusions(
+                selection_input,
+                duplicate_exclusions,
+                loaded["preparation"],
+            ),
+            "duplicate exclusion evidence was admitted",
+        )
+        unknown_reason = json.loads(json.dumps(exclusion_arguments))
+        unknown_reason["excluded_candidates"][0]["reason_codes"] = ["unknown"]
+        expect_refusal(
+            lambda: publisher.build_exclusions(
+                selection_input,
+                unknown_reason,
+                loaded["preparation"],
+            ),
+            "unknown exclusion reason was admitted",
+        )
+        no_continuation = {**selection_input, "continuation_available": False}
+        expect_refusal(
+            lambda: publisher.build_exclusions(
+                no_continuation,
+                exclusion_arguments,
+                loaded["preparation"],
+            ),
+            "exclusions authorized an absent continuation",
         )
         selected_source = source(frozen_selection)
         draft_input = {

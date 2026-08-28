@@ -37,6 +37,8 @@ from revenue_ui_contract import (
 )
 from linkedin_unit1_prepare_publisher import (
     LinkedInUnit1PreparePublisherError,
+    NOTIFICATION_EXCLUSIONS_SCHEMA,
+    build_exclusions,
     build_final_bundle,
     build_selection,
     canonical_sha256 as linkedin_prepare_sha256,
@@ -1655,7 +1657,8 @@ TOOLS = [
                 "transaction. Observe compiles either one opaque UI card, the full exact "
                 "notification inventory, or the complete selected post/thread source. "
                 "Operate executes one compiled card. Select freezes Taey's exact candidate "
-                "and qualifying verdicts. Draft applies the automatic mechanical gate and "
+                "and qualifying verdicts. Exclude freezes complete exact evidence that no "
+                "mounted actionable candidate qualifies. Draft applies the mechanical gate and "
                 "publishes one owner-only bundle for the existing linkedin-unit1 executor. "
                 "There is no human approval state and this tool cannot paste or submit."
             ),
@@ -1670,7 +1673,7 @@ TOOLS = [
                     },
                     "action": {
                         "type": "string",
-                        "enum": ["observe", "operate", "select", "draft"],
+                        "enum": ["observe", "operate", "select", "exclude", "draft"],
                     },
                     "card_sha256": {
                         "type": "string",
@@ -1693,6 +1696,42 @@ TOOLS = [
                     "author_cooloff_passed": {
                         "type": "boolean",
                         "description": "select only: Taey's author-cooloff verdict",
+                    },
+                    "excluded_candidates": {
+                        "type": "array",
+                        "description": (
+                            "exclude only: exact inventory-ordered evidence for every "
+                            "mounted actionable candidate"
+                        ),
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": ["activity", "reason_codes"],
+                            "properties": {
+                                "activity": {
+                                    "type": "string",
+                                    "pattern": "^[0-9]+$",
+                                },
+                                "reason_codes": {
+                                    "type": "array",
+                                    "minItems": 1,
+                                    "uniqueItems": True,
+                                    "items": {
+                                        "type": "string",
+                                        "enum": [
+                                            "already_used",
+                                            "author_cooloff",
+                                            "event_announcement",
+                                            "hostile_or_irrelevant",
+                                            "off_target",
+                                            "pitch_or_promotion",
+                                            "self_authored",
+                                            "stale",
+                                        ],
+                                    },
+                                },
+                            },
+                        },
                     },
                     "text": {
                         "type": "string",
@@ -6758,6 +6797,7 @@ def _do_linkedin_unit1_prepare(arguments: dict) -> str:
             "dedup_passed",
             "author_cooloff_passed",
         },
+        "exclude": {"display", "action", "excluded_candidates"},
         "draft": {"display", "action", "text"},
     }.get(action)
     if expected_arguments is None or set(arguments) != expected_arguments:
@@ -6790,10 +6830,10 @@ def _do_linkedin_unit1_prepare(arguments: dict) -> str:
     transaction_sha256 = preparation_transaction_sha256(preparation)
 
     readiness = sequence.get("readiness")
-    if action in {"select", "draft"}:
+    if action in {"select", "exclude", "draft"}:
         required_state = (
             "ready_for_private_selection"
-            if action == "select"
+            if action in {"select", "exclude"}
             else "ready_for_private_draft"
         )
         if (
@@ -6825,6 +6865,31 @@ def _do_linkedin_unit1_prepare(arguments: dict) -> str:
                 "preparation_sequence": {
                     "state": "observe_required",
                     "selection_sha256": frozen_selection["selection_sha256"],
+                    "next_mutation_authorized": False,
+                    "allowed_next": {"action": "observe"},
+                },
+            })
+        if action == "exclude":
+            try:
+                frozen_exclusions = build_exclusions(
+                    readiness["input"],
+                    arguments,
+                    preparation,
+                )
+            except LinkedInUnit1PreparePublisherError as exc:
+                return terminal_refusal(str(exc))
+            sequence["selection"] = frozen_exclusions
+            sequence.pop("inventory", None)
+            sequence.pop("readiness", None)
+            return _json.dumps({
+                "ok": True,
+                "display": display,
+                "action": action,
+                "preparation_sequence": {
+                    "state": "observe_required",
+                    "exclusions_sha256": frozen_exclusions[
+                        "exclusions_sha256"
+                    ],
                     "next_mutation_authorized": False,
                     "allowed_next": {"action": "observe"},
                 },
@@ -7118,11 +7183,16 @@ def _do_linkedin_unit1_prepare(arguments: dict) -> str:
                 "decision_context": decision_context,
                 "result_sha256": readiness_digest,
                 "next_mutation_authorized": False,
-                "allowed_next": {
-                    "action": (
-                        "select" if state == "ready_for_private_selection" else "draft"
-                    ),
-                },
+                "allowed_next": (
+                    {"action": "select", "alternative_action": "exclude"}
+                    if state == "ready_for_private_selection"
+                    and readiness_result["input"].get(
+                        "continuation_available"
+                    ) is True
+                    else {"action": "select"}
+                    if state == "ready_for_private_selection"
+                    else {"action": "draft"}
+                ),
             },
         })
     expected_result_keys = {
@@ -7139,6 +7209,7 @@ def _do_linkedin_unit1_prepare(arguments: dict) -> str:
         != "taey_linkedin_unit1_preparation_operated_step_v1"
         or result.get("card_sha256") != arguments.get("card_sha256")
         or not isinstance(receipt, dict)
+        or receipt.get("phase") != result.get("phase")
         or not re.fullmatch(
             r"[0-9a-f]{64}", str(result.get("operation_evidence_sha256") or "")
         )
@@ -7146,6 +7217,16 @@ def _do_linkedin_unit1_prepare(arguments: dict) -> str:
         return terminal_refusal(
             "LinkedIn Unit 1 preparation operation receipt is invalid"
         )
+    if result["phase"] == "notifications_continuation":
+        if (
+            not isinstance(selection, dict)
+            or selection.get("schema") != NOTIFICATION_EXCLUSIONS_SCHEMA
+        ):
+            return terminal_refusal(
+                "verified continuation lacks its exact private exclusions"
+            )
+        sequence.pop("selection", None)
+        sequence.pop("inventory", None)
     sequence["receipts"].append(receipt)
     return _json.dumps({
         "ok": True,
