@@ -247,6 +247,101 @@ def success_result(action: dict) -> SimpleNamespace:
     return SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr="")
 
 
+def options_success_result(action: dict) -> SimpleNamespace:
+    revision = "a" * 64
+    form_revision = "b" * 64
+    source_samples = [
+        {
+            "sample": sample,
+            "elapsed_ms": sample * 100,
+            "revision": form_revision,
+            "postcondition_matched": True,
+            "refresh_policy": "invalidate_reacquire",
+        }
+        for sample in (1, 2)
+    ]
+    postcondition_samples = [
+        {
+            "sample": sample,
+            "elapsed_ms": sample * 100,
+            "revision": revision,
+            "postcondition_matched": True,
+            "refresh_policy": "live_reacquire_no_clear",
+        }
+        for sample in (1, 2)
+    ]
+    origin = {
+        "combo_ref": "r_" + ("c" * 32),
+        "name": "Country",
+        "role": "combo box",
+        "form_revision": form_revision,
+        "match_count": 1,
+    }
+    controls = [
+        {
+            "ref": "r_" + (character * 32),
+            "name": rendered_name,
+            "role": "list item",
+            "states": ["showing", "visible", "enabled"],
+            "operations": ["select_option"],
+            "semantic_token": semantic_token,
+        }
+        for character, rendered_name, semantic_token in (
+            ("d", "Canada +1", "Canada"),
+            ("e", "United States +1", "United States"),
+        )
+    ]
+    surface = {
+        "schema": "ats_greenhouse_action_surface_v1",
+        "surface": "options",
+        "provider": "greenhouse",
+        "application_identity_sha256": action["application_identity_sha256"],
+        "origin": origin,
+        "container": {"match_count": 1},
+        "controls": controls,
+        "revision": revision,
+    }
+    surface_capsule = {
+        "schema": "ats_greenhouse_next_action_surface_v1",
+        "provider": "greenhouse",
+        "application_identity_sha256": action["application_identity_sha256"],
+        "surface": "options",
+        "revision": revision,
+        "source_surface_sha256": hashlib.sha256(canonical_bytes(surface)).hexdigest(),
+        "origin": origin,
+        "controls": [
+            {
+                "ref": control["ref"],
+                "name": control["name"],
+                "role": control["role"],
+                "operations": control["operations"],
+                "semantic_token": control["semantic_token"],
+            }
+            for control in controls
+        ],
+    }
+    payload = {
+        "schema": "ats_greenhouse_one_action_result_v1",
+        "ok": True,
+        "provider": "greenhouse",
+        "display": ":17",
+        "transaction_id": action["transaction_id"],
+        "action_id": action["action_id"],
+        "application_identity_sha256": action["application_identity_sha256"],
+        "action": {"kind": "open_combo"},
+        "environment": {},
+        "state": "action_ready",
+        "surface": surface,
+        "mutation_count": 1,
+        "next_mutation_authorized": True,
+        "receipt_event_hash": "4" * 64,
+        "source_samples": source_samples,
+        "postcondition_samples": postcondition_samples,
+        "surface_capsule": surface_capsule,
+    }
+    return SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr="")
+
+
 def main() -> int:
     profile = ast.literal_eval(assignment("_GREENHOUSE_ATS_UI_TOOL_PROFILE"))
     require(profile == "greenhouse-ats-ui", "Greenhouse profile name drifted")
@@ -682,6 +777,104 @@ def main() -> int:
         ),
         "required-control completion evidence diverged from the full surface",
     )
+    options_action = {
+        "transaction_id": "00000000-0000-4000-8000-000000000000",
+        "action_id": "00000000-0000-4000-8000-000000000001",
+        "application_identity_sha256": "1" * 64,
+        "action": {"kind": "open_combo"},
+    }
+    options_fixture = json.loads(options_success_result(options_action).stdout)
+    options_capsule = options_fixture["surface_capsule"]
+    options_surface = options_fixture["surface"]
+    require(
+        surface_capsule_proves(
+            options_capsule,
+            application_identity_sha256="1" * 64,
+            full_surface=options_surface,
+        ),
+        "exact Country option semantic tokens were rejected",
+    )
+    missing_token = json.loads(json.dumps(options_capsule))
+    missing_token["controls"][0].pop("semantic_token")
+    require(
+        not surface_capsule_proves(
+            missing_token,
+            application_identity_sha256="1" * 64,
+            full_surface=options_surface,
+        ),
+        "a Country option without a semantic token was accepted",
+    )
+    empty_token = json.loads(json.dumps(options_capsule))
+    empty_token["controls"][0]["semantic_token"] = ""
+    require(
+        not surface_capsule_proves(
+            empty_token,
+            application_identity_sha256="1" * 64,
+            full_surface=options_surface,
+        ),
+        "an empty Country option semantic token was accepted",
+    )
+    duplicate_token = json.loads(json.dumps(options_capsule))
+    duplicate_token["controls"][1]["semantic_token"] = duplicate_token["controls"][0][
+        "semantic_token"
+    ]
+    require(
+        not surface_capsule_proves(
+            duplicate_token,
+            application_identity_sha256="1" * 64,
+            full_surface=options_surface,
+        ),
+        "duplicate Country option semantic tokens were accepted",
+    )
+    non_country_token = json.loads(json.dumps(options_capsule))
+    non_country_token["origin"]["name"] = "Referral source"
+    require(
+        not surface_capsule_proves(
+            non_country_token,
+            application_identity_sha256="1" * 64,
+            full_surface=options_surface,
+        ),
+        "a non-Country origin admitted semantic tokens",
+    )
+    non_country_surface = json.loads(json.dumps(options_surface))
+    non_country_surface["origin"]["name"] = "Referral source"
+    for control in non_country_surface["controls"]:
+        control.pop("semantic_token")
+    non_country_capsule = json.loads(json.dumps(options_capsule))
+    non_country_capsule["origin"]["name"] = "Referral source"
+    for control in non_country_capsule["controls"]:
+        control.pop("semantic_token")
+    non_country_capsule["source_surface_sha256"] = hashlib.sha256(
+        canonical_bytes(non_country_surface)
+    ).hexdigest()
+    require(
+        surface_capsule_proves(
+            non_country_capsule,
+            application_identity_sha256="1" * 64,
+            full_surface=non_country_surface,
+        ),
+        "a non-Country origin without semantic tokens was rejected",
+    )
+    wrong_role_token = json.loads(json.dumps(options_capsule))
+    wrong_role_token["origin"]["role"] = "combobox"
+    require(
+        not surface_capsule_proves(
+            wrong_role_token,
+            application_identity_sha256="1" * 64,
+            full_surface=options_surface,
+        ),
+        "a non-exact Country origin role admitted semantic tokens",
+    )
+    form_token = json.loads(json.dumps(capsule_fixture["surface_capsule"]))
+    form_token["controls"][0]["semantic_token"] = "Applicant"
+    require(
+        not surface_capsule_proves(
+            form_token,
+            application_identity_sha256="1" * 64,
+            full_surface=capsule_fixture["surface"],
+        ),
+        "a form surface admitted semantic_token",
+    )
     for forbidden_field in (
         "human_review_required",
         "approval",
@@ -858,6 +1051,47 @@ def main() -> int:
             pass
         else:
             raise AssertionError("outer cleanup helper leaked the action fd")
+        RequestContext.value = {}
+
+    with tempfile.TemporaryDirectory(prefix="greenhouse-ats-options-presence-") as temp:
+        root = Path(temp)
+        frozen_options = write_private_transaction(root, "open_combo")
+        resolver_namespace["GREENHOUSE_ATS_PRIVATE_ROOT"] = str(root)
+        action_namespace["_resolve_greenhouse_ats_private_manifest"] = resolve_manifest
+        action_namespace["_greenhouse_ats_runtime"] = lambda: {
+            "display": ":17",
+            "python": "/usr/bin/python3",
+            "runner": "/public/run_ats_greenhouse_one_action.py",
+            "bus": "unix:path=/run/user/1000/at-spi/bus_0",
+            "receipt_root": str(root),
+            "timeout": 180,
+        }
+        active = request_context(1)
+        RequestContext.value = active
+        observed = json.loads(do_action({"display": ":17", "action": "observe"}))
+        active["tool_round"] = 2
+        with patch.object(
+            subprocess,
+            "run",
+            return_value=options_success_result(frozen_options),
+        ):
+            operated = json.loads(do_action({
+                "display": ":17",
+                "action": "operate",
+                "card_sha256": observed["greenhouse_ats_sequence"]["card_sha256"],
+            }))
+        require(operated["ok"] is True, "Country options receipt was refused")
+        relayed_capsule = operated["greenhouse_ats_sequence"]["surface_capsule"]
+        require(
+            relayed_capsule
+            == json.loads(options_success_result(frozen_options).stdout)["surface_capsule"],
+            "Presence changed the exact validated Country options capsule",
+        )
+        require(
+            [control["semantic_token"] for control in relayed_capsule["controls"]]
+            == ["Canada", "United States"],
+            "Presence did not relay the exact Country semantic tokens",
+        )
         RequestContext.value = {}
 
     with tempfile.TemporaryDirectory(prefix="greenhouse-ats-submit-presence-") as temp:
