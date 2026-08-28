@@ -117,6 +117,10 @@ LINKEDIN_UNIT1_PREPARE_SYSTEM_PROMPT_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
     "TAEY_LINKEDIN_UNIT1_PREPARE_SYSTEM.md",
 )
+GREENHOUSE_ATS_UI_SYSTEM_PROMPT_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "TAEY_GREENHOUSE_ATS_UI_SYSTEM.md",
+)
 CONSULT_CHAT_SYSTEM_PROMPT_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
     "TAEY_CONSULT_CHAT_SYSTEM.md",
@@ -176,6 +180,7 @@ _manual_chat_ui_send_system_prompt: str = ""
 _revenue_ui_system_prompt: str = ""
 _linkedin_unit1_system_prompt: str = ""
 _linkedin_unit1_prepare_system_prompt: str = ""
+_greenhouse_ats_ui_system_prompt: str = ""
 _consult_chat_system_prompt: str = ""
 _one_shot_system_prompts: dict[str, str] = {}
 _permanent_kernel: str = ""
@@ -269,6 +274,7 @@ _MANUAL_CHAT_UI_SEND_TOOL_PROFILE = "manual-chat-ui-send"
 _REVENUE_UI_TOOL_PROFILE = "revenue-ui"
 _LINKEDIN_UNIT1_TOOL_PROFILE = "linkedin-unit1"
 _LINKEDIN_UNIT1_PREPARE_TOOL_PROFILE = "linkedin-unit1-prepare"
+_GREENHOUSE_ATS_UI_TOOL_PROFILE = "greenhouse-ats-ui"
 _CONSULT_CHAT_TOOL_PROFILE = "consult-chat"
 _LINKEDIN_JOBS_TOOL_PROFILE = "linkedin-jobs"
 _LINKEDIN_JOBS_RESTORE_TOOL_PROFILE = "linkedin-jobs-restore"
@@ -318,6 +324,39 @@ LINKEDIN_UNIT1_PRIVATE_ROOT = os.environ.get(
 LINKEDIN_UNIT1_PREPARE_PRIVATE_ROOT = os.environ.get(
     "TAEY_LINKEDIN_UNIT1_PREPARE_PRIVATE_ROOT", ""
 ).strip()
+GREENHOUSE_ATS_PRIVATE_ROOT = os.environ.get(
+    "TAEY_GREENHOUSE_ATS_PRIVATE_ROOT", ""
+).strip()
+GREENHOUSE_ATS_BINDING = os.environ.get(
+    "TAEY_GREENHOUSE_ATS_BINDING", ""
+).strip()
+GREENHOUSE_ATS_PYTHON = os.environ.get(
+    "TAEY_GREENHOUSE_ATS_PYTHON", ""
+).strip()
+GREENHOUSE_ATS_AT_SPI_BUS_FILE = os.environ.get(
+    "TAEY_GREENHOUSE_ATS_AT_SPI_BUS_FILE", ""
+).strip()
+GREENHOUSE_ATS_FIREFOX_PID = os.environ.get(
+    "TAEY_GREENHOUSE_ATS_FIREFOX_PID", ""
+).strip()
+GREENHOUSE_ATS_RECEIPT_ROOT = os.environ.get(
+    "TAEY_GREENHOUSE_ATS_RECEIPT_ROOT", ""
+).strip()
+GREENHOUSE_ATS_LEASE_SECRET = os.environ.get(
+    "TAEY_GREENHOUSE_ATS_LEASE_SECRET", ""
+).strip()
+GREENHOUSE_ATS_HANDS_COMMIT = os.environ.get(
+    "TAEY_GREENHOUSE_ATS_HANDS_COMMIT", ""
+).strip()
+GREENHOUSE_ATS_REQUIRED_HANDS_COMMIT = (
+    "fb3d1270aba4c6a335769a348a69461b87a7595f"
+)
+GREENHOUSE_ATS_HANDS_INCARNATION_ID = os.environ.get(
+    "TAEY_GREENHOUSE_ATS_HANDS_INCARNATION_ID", ""
+).strip()
+GREENHOUSE_ATS_TIMEOUT_SECS = int(
+    os.environ.get("TAEY_GREENHOUSE_ATS_TIMEOUT_SECS", "180")
+)
 _TOOL_PROFILE_ALLOWED: dict[str, frozenset[str] | None] = {
     _FULL_TOOL_PROFILE: None,
     _MANUAL_CHAT_UI_TOOL_PROFILE: frozenset({
@@ -334,6 +373,9 @@ _TOOL_PROFILE_ALLOWED: dict[str, frozenset[str] | None] = {
     }),
     _LINKEDIN_UNIT1_PREPARE_TOOL_PROFILE: frozenset({
         "linkedin_unit1_prepare",
+    }),
+    _GREENHOUSE_ATS_UI_TOOL_PROFILE: frozenset({
+        "greenhouse_ats_ui",
     }),
     _CONSULT_CHAT_TOOL_PROFILE: frozenset({
         "consult_chat",
@@ -384,6 +426,7 @@ async def startup():
     global _consult_chat_system_prompt
     global _manual_chat_ui_send_system_prompt, _manual_chat_ui_system_prompt
     global _linkedin_unit1_prepare_system_prompt, _linkedin_unit1_system_prompt
+    global _greenhouse_ats_ui_system_prompt
     global _revenue_ui_system_prompt, _permanent_kernel
     global _static_system_prefix, _system_prompt
     global _liveness_reaper_task
@@ -517,6 +560,20 @@ async def startup():
         raise RuntimeError(
             "LinkedIn Unit 1 preparation system prompt is empty: "
             f"{linkedin_unit1_prepare_prompt_path}"
+        )
+    greenhouse_ats_prompt_path = Path(GREENHOUSE_ATS_UI_SYSTEM_PROMPT_PATH)
+    if not greenhouse_ats_prompt_path.is_file():
+        raise RuntimeError(
+            "Greenhouse ATS UI system prompt is missing or not a regular file: "
+            f"{greenhouse_ats_prompt_path}"
+        )
+    _greenhouse_ats_ui_system_prompt = greenhouse_ats_prompt_path.read_text(
+        encoding="utf-8"
+    )
+    if not _greenhouse_ats_ui_system_prompt.strip():
+        raise RuntimeError(
+            "Greenhouse ATS UI system prompt is empty: "
+            f"{greenhouse_ats_prompt_path}"
         )
     consult_chat_prompt_path = Path(CONSULT_CHAT_SYSTEM_PROMPT_PATH)
     if not consult_chat_prompt_path.is_file():
@@ -1647,6 +1704,40 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "greenhouse_ats_ui",
+            "description": (
+                "Execute exactly one server-frozen Greenhouse ATS action. Observe returns "
+                "only an opaque card hash. Operate accepts only that hash and delegates "
+                "one action to the public Hands runner. The server owns all values, paths, "
+                "targets, action kinds, and receipt lineage."
+            ),
+            "parameters": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["display", "action"],
+                "properties": {
+                    "display": {
+                        "type": "string",
+                        "description": "trusted Greenhouse display configured by the server",
+                    },
+                    "action": {
+                        "type": "string",
+                        "enum": ["observe", "operate"],
+                    },
+                    "card_sha256": {
+                        "type": "string",
+                        "pattern": "^[0-9a-f]{64}$",
+                        "description": (
+                            "operate only: exact opaque card hash returned by the preceding observe"
+                        ),
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "consult_chat",
             "description": (
                 "Execute one frozen end-to-end Family-Chat consultation through the "
@@ -2133,6 +2224,9 @@ def execute_tool_call(name: str, arguments: dict) -> str:
 
     elif name == "linkedin_unit1_prepare":
         return _do_linkedin_unit1_prepare(arguments)
+
+    elif name == "greenhouse_ats_ui":
+        return _do_greenhouse_ats_ui(arguments)
 
     elif name == "consult_chat":
         return _do_consult_chat(arguments)
@@ -5068,6 +5162,1072 @@ def _read_revenue_ui_private_json(
     if not isinstance(value, dict):
         raise RuntimeError(f"revenue comment {label} is not a JSON object")
     return value, raw
+
+
+def _resolve_greenhouse_ats_private_manifest(context: dict) -> dict[str, object]:
+    if not GREENHOUSE_ATS_PRIVATE_ROOT:
+        raise RuntimeError("TAEY_GREENHOUSE_ATS_PRIVATE_ROOT is unset")
+    seat_id = str(context.get("seat_id") or "")
+    event_id = str(context.get("event_id") or "")
+    correlation_id = str(context.get("correlation_id") or "")
+    if (
+        not _SEAT_ID_RE.fullmatch(seat_id)
+        or not _TRACE_ID_RE.fullmatch(event_id)
+        or not _TRACE_ID_RE.fullmatch(correlation_id)
+    ):
+        raise RuntimeError("Greenhouse ATS transaction identities are invalid")
+    private_root = Path(GREENHOUSE_ATS_PRIVATE_ROOT)
+    try:
+        resolved_root = private_root.resolve(strict=True)
+        metadata = os.lstat(private_root)
+    except OSError as exc:
+        raise RuntimeError("Greenhouse ATS private root is unavailable") from exc
+    if (
+        not private_root.is_absolute()
+        or private_root != resolved_root
+        or not stat.S_ISDIR(metadata.st_mode)
+        or stat.S_IMODE(metadata.st_mode) != 0o700
+        or metadata.st_uid != os.geteuid()
+    ):
+        raise RuntimeError(
+            "Greenhouse ATS private root is not an owner-controlled 0700 directory"
+        )
+    manifest_path = resolved_root / "transactions" / seat_id / f"{correlation_id}.json"
+    try:
+        manifest, manifest_raw = _read_revenue_ui_private_json(
+            manifest_path,
+            resolved_root,
+            "Greenhouse ATS manifest",
+            1024 * 1024,
+            frozenset({0o400}),
+            True,
+        )
+    except RuntimeError as exc:
+        raise RuntimeError("Greenhouse ATS manifest failed private-file validation") from exc
+    manifest_keys = {
+        "schema",
+        "seat_id",
+        "event_id",
+        "correlation_id",
+        "platform",
+        "display",
+        "hands_commit",
+        "frozen_action_path",
+        "frozen_action_sha256",
+    }
+    if set(manifest) != manifest_keys:
+        raise RuntimeError("Greenhouse ATS manifest has an invalid exact schema")
+    expected = {
+        "schema": "taey_greenhouse_ats_private_manifest_v1",
+        "seat_id": seat_id,
+        "event_id": event_id,
+        "correlation_id": correlation_id,
+        "platform": "greenhouse",
+    }
+    if any(manifest.get(key) != value for key, value in expected.items()):
+        raise RuntimeError("Greenhouse ATS manifest does not match its active identity")
+    display = manifest.get("display")
+    hands_commit = manifest.get("hands_commit")
+    action_path_value = manifest.get("frozen_action_path")
+    action_sha256 = manifest.get("frozen_action_sha256")
+    if (
+        not isinstance(display, str)
+        or not re.fullmatch(r":[1-9][0-9]{0,2}", display)
+        or not isinstance(hands_commit, str)
+        or not re.fullmatch(r"[0-9a-f]{40}", hands_commit)
+        or not isinstance(action_path_value, str)
+        or not action_path_value
+        or not isinstance(action_sha256, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", action_sha256)
+    ):
+        raise RuntimeError("Greenhouse ATS manifest bindings are invalid")
+    action_path = Path(action_path_value)
+    action_fd: int | None = None
+    try:
+        action, action_raw, action_fd = _open_greenhouse_ats_frozen_action(
+            action_path,
+            resolved_root,
+        )
+        if hashlib.sha256(action_raw).hexdigest() != action_sha256:
+            raise RuntimeError("Greenhouse ATS frozen action digest does not match its manifest")
+        action_keys = {
+            "schema",
+            "provider",
+            "transaction_id",
+            "action_id",
+            "application_identity_sha256",
+            "expected_prior_event_hash",
+            "action",
+        }
+        if set(action) != action_keys:
+            raise RuntimeError("Greenhouse ATS frozen action has an invalid exact envelope")
+        if action.get("schema") != "ats_greenhouse_frozen_action_v1" or action.get(
+            "provider"
+        ) != "greenhouse":
+            raise RuntimeError("Greenhouse ATS frozen action provider is invalid")
+        for field in ("transaction_id", "action_id"):
+            value = action.get(field)
+            try:
+                canonical = str(uuid.UUID(str(value)))
+            except ValueError as exc:
+                raise RuntimeError(f"Greenhouse ATS {field} is invalid") from exc
+            if value != canonical:
+                raise RuntimeError(f"Greenhouse ATS {field} is not canonical")
+        if not re.fullmatch(
+            r"[0-9a-f]{64}", str(action.get("application_identity_sha256") or "")
+        ):
+            raise RuntimeError("Greenhouse ATS application identity is invalid")
+        prior = action.get("expected_prior_event_hash")
+        if prior is not None and not re.fullmatch(r"[0-9a-f]{64}", str(prior)):
+            raise RuntimeError("Greenhouse ATS prior receipt identity is invalid")
+        frozen_action = action.get("action")
+        allowed_kinds = {
+            "observe_form",
+            "focus",
+            "fill",
+            "scroll_combo",
+            "open_combo",
+            "select_option",
+            "activate_choice",
+            "open_upload",
+            "chooser_location",
+            "chooser_select_all",
+            "chooser_type_path",
+            "chooser_confirm",
+            "submit",
+        }
+        if (
+            not isinstance(frozen_action, dict)
+            or frozen_action.get("kind") not in allowed_kinds
+        ):
+            raise RuntimeError("Greenhouse ATS action kind is not public-runner-owned")
+        return {
+            "manifest": manifest,
+            "manifest_sha256": hashlib.sha256(manifest_raw).hexdigest(),
+            "action": action,
+            "action_sha256": action_sha256,
+            "action_fd": action_fd,
+        }
+    except Exception:
+        if action_fd is not None:
+            os.close(action_fd)
+        raise
+
+
+def _open_greenhouse_ats_frozen_action(
+    path: Path,
+    root: Path,
+) -> tuple[dict, bytes, int]:
+    try:
+        parent = path.parent.resolve(strict=True)
+        parent_metadata = os.lstat(path.parent)
+    except OSError as exc:
+        raise RuntimeError("Greenhouse ATS frozen action parent is unavailable") from exc
+    if (
+        not path.is_absolute()
+        or root not in parent.parents
+        or not stat.S_ISDIR(parent_metadata.st_mode)
+        or stat.S_IMODE(parent_metadata.st_mode) != 0o700
+        or parent_metadata.st_uid != os.geteuid()
+    ):
+        raise RuntimeError("Greenhouse ATS frozen action parent is not owner-controlled")
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        before = os.fstat(descriptor)
+        linked = os.lstat(path)
+        signature = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or stat.S_IMODE(before.st_mode) != 0o400
+            or before.st_uid != os.geteuid()
+            or not 0 < before.st_size <= 4 * 1024 * 1024
+            or stat.S_ISLNK(linked.st_mode)
+            or (linked.st_dev, linked.st_ino) != (before.st_dev, before.st_ino)
+        ):
+            raise RuntimeError("Greenhouse ATS frozen action is not one immutable private inode")
+        chunks: list[bytes] = []
+        offset = 0
+        while offset < before.st_size:
+            chunk = os.pread(
+                descriptor,
+                min(1024 * 1024, before.st_size - offset),
+                offset,
+            )
+            if not chunk:
+                raise RuntimeError("Greenhouse ATS frozen action read did not advance")
+            chunks.append(chunk)
+            offset += len(chunk)
+        raw = b"".join(chunks)
+        after = os.fstat(descriptor)
+        if (
+            len(raw) != before.st_size
+            or signature != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+        ):
+            raise RuntimeError("Greenhouse ATS frozen action changed while read")
+        def exact(pairs: list[tuple[str, object]]) -> dict[str, object]:
+            if len(pairs) != len({key for key, _ in pairs}):
+                raise ValueError("duplicate Greenhouse ATS frozen action key")
+            return dict(pairs)
+        value = json.loads(raw.decode(), object_pairs_hook=exact)
+        if not isinstance(value, dict):
+            raise ValueError("frozen action is not an object")
+        return value, raw, descriptor
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        if descriptor is not None:
+            os.close(descriptor)
+        raise RuntimeError("Greenhouse ATS frozen action failed fd validation") from exc
+    except Exception:
+        if descriptor is not None:
+            os.close(descriptor)
+        raise
+
+
+def _greenhouse_ats_runtime() -> dict[str, str | int]:
+    import subprocess
+
+    platform, separator, display = GREENHOUSE_ATS_BINDING.partition("=")
+    if (
+        separator != "="
+        or platform != "greenhouse"
+        or not re.fullmatch(r":[1-9][0-9]{0,2}", display)
+    ):
+        raise RuntimeError(
+            "TAEY_GREENHOUSE_ATS_BINDING must have exact greenhouse=:N form"
+        )
+    if not re.fullmatch(r"[0-9a-f]{64}", GREENHOUSE_ATS_LEASE_SECRET):
+        raise RuntimeError("TAEY_GREENHOUSE_ATS_LEASE_SECRET must be 64 lowercase hex")
+    if not re.fullmatch(r"[0-9a-f]{40}", GREENHOUSE_ATS_HANDS_COMMIT):
+        raise RuntimeError("TAEY_GREENHOUSE_ATS_HANDS_COMMIT must be one exact Git SHA")
+    if GREENHOUSE_ATS_HANDS_COMMIT != GREENHOUSE_ATS_REQUIRED_HANDS_COMMIT:
+        raise RuntimeError(
+            "TAEY_GREENHOUSE_ATS_HANDS_COMMIT does not match the reviewed fd-only API"
+        )
+    if not re.fullmatch(
+        r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}",
+        GREENHOUSE_ATS_HANDS_INCARNATION_ID,
+    ):
+        raise RuntimeError("TAEY_GREENHOUSE_ATS_HANDS_INCARNATION_ID is invalid")
+    if not 30 <= GREENHOUSE_ATS_TIMEOUT_SECS <= 900:
+        raise RuntimeError("TAEY_GREENHOUSE_ATS_TIMEOUT_SECS must be 30-900")
+    if not GREENHOUSE_ATS_FIREFOX_PID.isdigit() or int(
+        GREENHOUSE_ATS_FIREFOX_PID
+    ) <= 0:
+        raise RuntimeError("TAEY_GREENHOUSE_ATS_FIREFOX_PID must be positive")
+    python_path = Path(GREENHOUSE_ATS_PYTHON)
+    hands_root = Path(TAEYS_HANDS_ROOT)
+    receipt_root = Path(GREENHOUSE_ATS_RECEIPT_ROOT)
+    bus_path = Path(GREENHOUSE_ATS_AT_SPI_BUS_FILE)
+    runner = hands_root / "scripts" / "run_ats_greenhouse_one_action.py"
+    if (
+        not python_path.is_absolute()
+        or not python_path.is_file()
+        or not os.access(python_path, os.X_OK)
+    ):
+        raise RuntimeError("TAEY_GREENHOUSE_ATS_PYTHON must be an executable absolute path")
+    if not hands_root.is_absolute() or not hands_root.is_dir() or not runner.is_file():
+        raise RuntimeError("TAEYS_HANDS_ROOT does not contain the Greenhouse runner")
+    if not receipt_root.is_absolute() or not receipt_root.is_dir():
+        raise RuntimeError("TAEY_GREENHOUSE_ATS_RECEIPT_ROOT is unavailable")
+    receipt_metadata = os.lstat(receipt_root)
+    if (
+        stat.S_IMODE(receipt_metadata.st_mode) != 0o700
+        or receipt_metadata.st_uid != os.geteuid()
+        or not stat.S_ISDIR(receipt_metadata.st_mode)
+    ):
+        raise RuntimeError(
+            "TAEY_GREENHOUSE_ATS_RECEIPT_ROOT must be owner-controlled mode 0700"
+        )
+    if not bus_path.is_absolute() or not bus_path.is_file() or bus_path.is_symlink():
+        raise RuntimeError("TAEY_GREENHOUSE_ATS_AT_SPI_BUS_FILE is unavailable")
+    bus = bus_path.read_text(encoding="utf-8").strip()
+    if not bus or "\n" in bus or "\x00" in bus:
+        raise RuntimeError("TAEY_GREENHOUSE_ATS_AT_SPI_BUS_FILE is invalid")
+    try:
+        deployed = subprocess.run(
+            ["git", "-C", str(hands_root), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=True,
+        ).stdout.strip()
+        dirty = subprocess.run(
+            ["git", "-C", str(hands_root), "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=True,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError("public Hands commit cannot be verified") from exc
+    if deployed != GREENHOUSE_ATS_HANDS_COMMIT:
+        raise RuntimeError("public Hands checkout does not match its frozen commit")
+    if dirty:
+        raise RuntimeError("public Hands checkout is dirty; frozen execution refused")
+    return {
+        "display": display,
+        "python": str(python_path),
+        "runner": str(runner),
+        "bus": bus,
+        "receipt_root": str(receipt_root),
+        "timeout": GREENHOUSE_ATS_TIMEOUT_SECS,
+    }
+
+
+def _greenhouse_ats_samples_prove(
+    samples: object,
+    *,
+    refresh_policy: str,
+) -> bool:
+    if not isinstance(samples, list) or len(samples) < 2:
+        return False
+    previous_elapsed = -1
+    for index, sample in enumerate(samples, start=1):
+        if (
+            not isinstance(sample, dict)
+            or set(sample)
+            != {
+                "sample",
+                "elapsed_ms",
+                "revision",
+                "postcondition_matched",
+                "refresh_policy",
+            }
+            or sample.get("sample") != index
+            or isinstance(sample.get("elapsed_ms"), bool)
+            or not isinstance(sample.get("elapsed_ms"), int)
+            or sample["elapsed_ms"] < previous_elapsed
+            or not re.fullmatch(r"[0-9a-f]{64}", str(sample.get("revision") or ""))
+            or not isinstance(sample.get("postcondition_matched"), bool)
+            or sample.get("refresh_policy") != refresh_policy
+        ):
+            return False
+        previous_elapsed = sample["elapsed_ms"]
+    stable = samples[-2:]
+    return (
+        all(sample["postcondition_matched"] is True for sample in stable)
+        and stable[0]["revision"] == stable[1]["revision"]
+    )
+
+
+def _greenhouse_ats_surface_capsule_proves(
+    capsule: object,
+    *,
+    application_identity_sha256: str,
+    full_surface: object,
+) -> bool:
+    sha256_pattern = r"[0-9a-f]{64}"
+    ref_pattern = r"(?:r_[0-9a-f]{32}|nd1_[0-9a-f]{64})"
+    common_keys = {
+        "schema",
+        "provider",
+        "application_identity_sha256",
+        "surface",
+        "revision",
+        "source_surface_sha256",
+    }
+    if (
+        not isinstance(capsule, dict)
+        or not isinstance(full_surface, dict)
+        or capsule.get("schema") != "ats_greenhouse_next_action_surface_v1"
+        or capsule.get("provider") != "greenhouse"
+        or capsule.get("application_identity_sha256") != application_identity_sha256
+        or capsule.get("surface") not in {"form", "options", "native_dialog"}
+        or not re.fullmatch(sha256_pattern, str(capsule.get("revision") or ""))
+        or capsule.get("revision") != full_surface.get("revision")
+        or capsule.get("source_surface_sha256")
+        != hashlib.sha256(canonical_json_bytes(full_surface)).hexdigest()
+    ):
+        return False
+    surface_kind = capsule["surface"]
+    if surface_kind in {"form", "options"}:
+        expected_keys = common_keys | {"controls"}
+        expected_keys |= (
+            {"route_grammar", "complete_form_sha256"}
+            if surface_kind == "form"
+            else {"origin"}
+        )
+        controls = capsule.get("controls")
+        if (
+            set(capsule) != expected_keys
+            or not isinstance(controls, list)
+            or len(controls) > 512
+        ):
+            return False
+        allowed_operations = {
+            "focus",
+            "fill",
+            "scroll_combo",
+            "open_combo",
+            "select_option",
+            "activate_choice",
+            "open_upload",
+            "submit",
+        }
+        refs: list[str] = []
+        for control in controls:
+            base_keys = {"ref", "name", "role", "operations"}
+            optional_keys = {
+                "is_empty",
+                "has_semantic_value",
+                "artifact_slot",
+                "boundary",
+                "combo_safety",
+            }
+            if (
+                not isinstance(control, dict)
+                or not base_keys.issubset(control)
+                or not set(control).issubset(base_keys | optional_keys)
+                or not re.fullmatch(ref_pattern, str(control.get("ref") or ""))
+                or not isinstance(control.get("name"), str)
+                or len(control["name"]) > 4096
+                or not isinstance(control.get("role"), str)
+                or not 1 <= len(control["role"]) <= 128
+                or not isinstance(control.get("operations"), list)
+                or any(
+                    not isinstance(operation, str)
+                    for operation in control["operations"]
+                )
+                or len(control["operations"]) != len(set(control["operations"]))
+                or not set(control["operations"]).issubset(allowed_operations)
+                or any(
+                    key in control and not isinstance(control[key], bool)
+                    for key in ("is_empty", "has_semantic_value")
+                )
+                or (
+                    "artifact_slot" in control
+                    and not re.fullmatch(
+                        r"[a-z][a-z0-9_]{0,63}",
+                        str(control["artifact_slot"]),
+                    )
+                )
+                or ("boundary" in control and control["boundary"] != "submit")
+            ):
+                return False
+            safety = control.get("combo_safety")
+            if safety is not None and (
+                not isinstance(safety, dict)
+                or set(safety) != {"geometry", "refusal", "scroll_frontier"}
+                or safety.get("geometry")
+                not in {"contained_by_active_document", "refused"}
+                or not isinstance(safety.get("scroll_frontier"), bool)
+                or (
+                    safety["geometry"] == "contained_by_active_document"
+                    and (
+                        safety.get("refusal") is not None
+                        or safety["scroll_frontier"] is not False
+                    )
+                )
+                or (
+                    safety["geometry"] == "refused"
+                    and (
+                        safety.get("refusal")
+                        not in {
+                            "combo_rect_invalid",
+                            "combo_rect_outside_document_rect",
+                        }
+                        or safety["scroll_frontier"] is not True
+                    )
+                )
+            ):
+                return False
+            refs.append(control["ref"])
+        if len(refs) != len(set(refs)):
+            return False
+        if surface_kind == "form":
+            return (
+                re.fullmatch(
+                    r"[a-z][a-z0-9_]{0,63}",
+                    str(capsule.get("route_grammar") or ""),
+                )
+                is not None
+                and re.fullmatch(
+                    sha256_pattern,
+                    str(capsule.get("complete_form_sha256") or ""),
+                )
+                is not None
+            )
+        origin = capsule.get("origin")
+        return (
+            isinstance(origin, dict)
+            and set(origin)
+            == {"combo_ref", "name", "role", "form_revision", "match_count"}
+            and re.fullmatch(ref_pattern, str(origin.get("combo_ref") or ""))
+            is not None
+            and isinstance(origin.get("name"), str)
+            and len(origin["name"]) <= 4096
+            and isinstance(origin.get("role"), str)
+            and 1 <= len(origin["role"]) <= 128
+            and re.fullmatch(
+                sha256_pattern,
+                str(origin.get("form_revision") or ""),
+            )
+            is not None
+            and origin.get("match_count") == 1
+        )
+    if set(capsule) != common_keys | {"mapped"}:
+        return False
+    mapped = capsule.get("mapped")
+    if not isinstance(mapped, dict) or not mapped or len(mapped) > 64:
+        return False
+    for key, elements in mapped.items():
+        if (
+            not isinstance(key, str)
+            or not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", key)
+            or not isinstance(elements, list)
+            or len(elements) > 8
+        ):
+            return False
+        for element in elements:
+            if (
+                not isinstance(element, dict)
+                or set(element) != {"key", "ref", "role", "states"}
+                or element.get("key") != key
+                or not re.fullmatch(ref_pattern, str(element.get("ref") or ""))
+                or not isinstance(element.get("role"), str)
+                or not 1 <= len(element["role"]) <= 128
+                or not isinstance(element.get("states"), list)
+                or any(
+                    not isinstance(state, str) or not 1 <= len(state) <= 64
+                    for state in element["states"]
+                )
+                or len(element["states"]) != len(set(element["states"]))
+            ):
+                return False
+    return True
+
+
+def _greenhouse_ats_confirmation_proves(
+    confirmation: object,
+    *,
+    application_identity_sha256: str,
+    full_surface: object,
+    samples: object,
+    receipt_event_hash: str,
+) -> bool:
+    expected_keys = {
+        "schema",
+        "provider",
+        "application_identity_sha256",
+        "route_id",
+        "route_sha256",
+        "anchor_sha256",
+        "stable_surface_revision",
+        "stable_sample_count",
+        "observation_samples_sha256",
+        "receipt_sha256",
+    }
+    if (
+        not isinstance(confirmation, dict)
+        or set(confirmation) != expected_keys
+        or confirmation.get("schema")
+        != "ats_greenhouse_employer_confirmation_v1"
+        or confirmation.get("provider") != "greenhouse"
+        or confirmation.get("application_identity_sha256")
+        != application_identity_sha256
+        or confirmation.get("route_id") != "hosted_confirmation"
+        or not isinstance(full_surface, dict)
+        or full_surface.get("route_grammar") != "hosted_confirmation"
+        or not isinstance(samples, list)
+        or len(samples) < 2
+    ):
+        return False
+    sha_fields = {
+        "route_sha256",
+        "anchor_sha256",
+        "stable_surface_revision",
+        "observation_samples_sha256",
+        "receipt_sha256",
+    }
+    if any(
+        re.fullmatch(r"[0-9a-f]{64}", str(confirmation.get(field) or "")) is None
+        for field in sha_fields
+    ):
+        return False
+    stable_revision = confirmation["stable_surface_revision"]
+    stable_count = 0
+    for sample in reversed(samples):
+        if (
+            not isinstance(sample, dict)
+            or sample.get("postcondition_matched") is not True
+            or sample.get("revision") != stable_revision
+        ):
+            break
+        stable_count += 1
+    return (
+        confirmation.get("stable_sample_count") == stable_count
+        and 2 <= stable_count <= 64
+        and stable_revision == full_surface.get("revision")
+        and confirmation.get("observation_samples_sha256")
+        == hashlib.sha256(canonical_json_bytes(samples)).hexdigest()
+        and confirmation.get("receipt_sha256") == receipt_event_hash
+    )
+
+
+def _close_greenhouse_ats_pending(sequence: object) -> None:
+    if not isinstance(sequence, dict):
+        return
+    pending = sequence.pop("pending", None)
+    descriptor = pending.get("action_fd") if isinstance(pending, dict) else None
+    if isinstance(descriptor, int) and not isinstance(descriptor, bool):
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+
+
+def _do_greenhouse_ats_ui(arguments: dict) -> str:
+    import json as _json
+    import subprocess
+
+    context = _request_context.get()
+    sequence = context.get("_greenhouse_ats_ui_sequence")
+    display = str(arguments.get("display") or "").strip()
+    action = str(arguments.get("action") or "").strip()
+    tool_round = context.get("tool_round")
+
+    def terminal_refusal(message: str, state: str = "terminal_refusal") -> str:
+        terminal = sequence.get("terminal") if isinstance(sequence, dict) else None
+        if not isinstance(terminal, dict):
+            terminal = {
+                "display": display,
+                "action": action,
+                "tool_round": tool_round,
+                "reason": message,
+                "state": state,
+            }
+            if isinstance(sequence, dict):
+                sequence["terminal"] = terminal
+        _close_greenhouse_ats_pending(sequence)
+        profile_state = context.get("_tool_profile_state")
+        if isinstance(profile_state, dict) and not isinstance(
+            profile_state.get("terminal"), dict
+        ):
+            profile_state["terminal"] = {
+                "tool": "greenhouse_ats_ui",
+                "reason": terminal["reason"],
+            }
+        return _json.dumps({
+            "ok": False,
+            "display": display,
+            "action": action,
+            "greenhouse_ats_sequence": {
+                "state": state,
+                "first_failure": terminal,
+                "next_mutation_authorized": False,
+            },
+        })
+
+    if context.get("tool_profile") != _GREENHOUSE_ATS_UI_TOOL_PROFILE:
+        return terminal_refusal(
+            "greenhouse_ats_ui requires the greenhouse-ats-ui profile"
+        )
+    if (
+        not isinstance(sequence, dict)
+        or not isinstance(tool_round, int)
+        or tool_round < 1
+        or not _SEAT_ID_RE.fullmatch(str(context.get("seat_id") or ""))
+        or not _TRACE_ID_RE.fullmatch(str(context.get("turn_id") or ""))
+        or not re.fullmatch(
+            r"[0-9a-f]{32}", str(context.get("process_generation") or "")
+        )
+    ):
+        return terminal_refusal("Greenhouse ATS request state is invalid")
+    if isinstance(sequence.get("terminal"), dict):
+        return terminal_refusal(
+            "a prior Greenhouse ATS result ended this turn; later calls are refused"
+        )
+    if action not in {"observe", "operate"}:
+        return terminal_refusal("Greenhouse ATS action must be observe or operate")
+    expected_arguments = (
+        {"display", "action"}
+        if action == "observe"
+        else {"display", "action", "card_sha256"}
+    )
+    if set(arguments) != expected_arguments:
+        return terminal_refusal(f"{action} requires exactly {sorted(expected_arguments)}")
+    pending = sequence.get("pending")
+    if action == "observe":
+        if isinstance(pending, dict):
+            return terminal_refusal(
+                "the prior opaque card must be operated exactly once before another observe"
+            )
+        try:
+            runtime = _greenhouse_ats_runtime()
+            frozen = _resolve_greenhouse_ats_private_manifest(context)
+        except Exception as exc:
+            return terminal_refusal(str(exc))
+        manifest = frozen["manifest"]
+        sequence["pending"] = {"action_fd": frozen["action_fd"]}
+        if runtime["display"] != display or manifest.get("display") != display:
+            return terminal_refusal(
+                "display is not server-bound to this Greenhouse transaction"
+            )
+        if manifest.get("hands_commit") != GREENHOUSE_ATS_HANDS_COMMIT:
+            return terminal_refusal(
+                "Greenhouse ATS manifest Hands commit does not match runtime"
+            )
+        card_payload = {
+            "schema": "taey_greenhouse_ats_opaque_card_v1",
+            "seat_id": context["seat_id"],
+            "event_id": context["event_id"],
+            "correlation_id": context["correlation_id"],
+            "display": display,
+            "manifest_sha256": frozen["manifest_sha256"],
+            "action_sha256": frozen["action_sha256"],
+            "hands_commit": manifest["hands_commit"],
+        }
+        card_sha256 = hashlib.sha256(canonical_json_bytes(card_payload)).hexdigest()
+        sequence["pending"].update({
+            "card_sha256": card_sha256,
+            "manifest_sha256": frozen["manifest_sha256"],
+            "action_sha256": frozen["action_sha256"],
+            "manifest": manifest,
+            "action": frozen["action"],
+            "tool_round": tool_round,
+        })
+        return _json.dumps({
+            "ok": True,
+            "display": display,
+            "action": action,
+            "greenhouse_ats_sequence": {
+                "state": "ready_for_one_action",
+                "card_sha256": card_sha256,
+                "allowed_next": {"action": "operate", "card_sha256": card_sha256},
+                "next_mutation_authorized": False,
+            },
+        })
+    if not isinstance(pending, dict):
+        return terminal_refusal("operate requires one preceding opaque card")
+    if arguments.get("card_sha256") != pending.get("card_sha256"):
+        return terminal_refusal("operate card hash does not match the preceding opaque card")
+    if pending.get("tool_round") >= tool_round:
+        return terminal_refusal("operate requires an observe from an earlier model round")
+    manifest = pending.get("manifest")
+    frozen_action = pending.get("action")
+    action_fd = pending.get("action_fd")
+    if (
+        not isinstance(manifest, dict)
+        or not isinstance(frozen_action, dict)
+        or not isinstance(action_fd, int)
+        or isinstance(action_fd, bool)
+        or not re.fullmatch(r"[0-9a-f]{64}", str(pending.get("action_sha256") or ""))
+    ):
+        return terminal_refusal("Greenhouse ATS pending action ownership is invalid")
+    try:
+        runtime = _greenhouse_ats_runtime()
+    except Exception as exc:
+        return terminal_refusal(str(exc))
+    if runtime["display"] != display or manifest.get("display") != display:
+        return terminal_refusal("display is not server-bound to this Greenhouse transaction")
+    if manifest.get("hands_commit") != GREENHOUSE_ATS_HANDS_COMMIT:
+        return terminal_refusal("Greenhouse ATS manifest Hands commit does not match runtime")
+    owned_pending = sequence.pop("pending")
+    action_kind = frozen_action["action"]["kind"]
+    drive_env = dict(os.environ)
+    drive_env.update({
+        "DISPLAY": display,
+        "AT_SPI_BUS_ADDRESS": str(runtime["bus"]),
+        "ATS_FIREFOX_PID": GREENHOUSE_ATS_FIREFOX_PID,
+        "ATS_ONE_ACTION_LEASE_SECRET": GREENHOUSE_ATS_LEASE_SECRET,
+        "ATS_ONE_ACTION_RECEIPT_ROOT": str(runtime["receipt_root"]),
+        "ATS_HANDS_COMMIT": GREENHOUSE_ATS_HANDS_COMMIT,
+        "ATS_PRESENCE_INCARNATION_ID": str(context["process_generation"]),
+        "ATS_HANDS_INCARNATION_ID": GREENHOUSE_ATS_HANDS_INCARNATION_ID,
+    })
+    completed = None
+    launch_error: tuple[str, str] | None = None
+    try:
+        try:
+            completed = subprocess.run(
+                [
+                    str(runtime["python"]),
+                    str(runtime["runner"]),
+                    "--transaction-fd",
+                    str(action_fd),
+                    "--expected-transaction-sha256",
+                    str(owned_pending["action_sha256"]),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=int(runtime["timeout"]),
+                env=drive_env,
+                pass_fds=(action_fd,),
+            )
+        except subprocess.TimeoutExpired:
+            launch_error = (
+                "Greenhouse ATS Hands action timed out",
+                "terminal_refusal"
+                if action_kind == "observe_form"
+                else "side_effect_uncertain",
+            )
+        except Exception as exc:
+            launch_error = (
+                f"Greenhouse ATS Hands runner failed before a result: {type(exc).__name__}",
+                "terminal_refusal"
+                if action_kind == "observe_form"
+                else "side_effect_uncertain",
+            )
+    finally:
+        try:
+            os.close(action_fd)
+        except OSError:
+            if launch_error is None:
+                launch_error = (
+                    "Greenhouse ATS action descriptor close failed",
+                    "side_effect_uncertain",
+                )
+    if launch_error is not None:
+        return terminal_refusal(
+            launch_error[0],
+            launch_error[1],
+        )
+    assert completed is not None
+    output = (completed.stdout or "").strip()
+    try:
+        result = _json.loads(output)
+    except ValueError:
+        result = None
+    if not isinstance(result, dict):
+        return terminal_refusal(
+            "Greenhouse ATS Hands runner returned a non-contract result",
+            "terminal_refusal" if action_kind == "observe_form" else "side_effect_uncertain",
+        )
+    result_sha256 = hashlib.sha256(canonical_json_bytes(result)).hexdigest()
+    if result.get("schema") == "ats_greenhouse_one_action_refusal_v1":
+        if (
+            set(result)
+            != {
+                "schema",
+                "ok",
+                "state",
+                "stop_code",
+                "stop_reason",
+                "next_mutation_authorized",
+            }
+            or completed.returncode == 0
+            or result.get("ok") is not False
+            or result.get("state") != "refused_before_receipt_binding"
+            or result.get("stop_code")
+            not in {
+                "exact_postcondition_failure",
+                "unmapped_ui_or_question",
+                "missing_truthful_applicant_data",
+                "policy_or_authority_boundary",
+                "side_effect_uncertainty",
+            }
+            or not isinstance(result.get("stop_reason"), str)
+            or not result.get("stop_reason")
+            or result.get("next_mutation_authorized") is not False
+        ):
+            return terminal_refusal("Greenhouse ATS refusal result is malformed")
+        return terminal_refusal(
+            f"Greenhouse ATS Hands refused the frozen action: {result.get('stop_code')}",
+        )
+    identity_matches = (
+        result.get("schema") == "ats_greenhouse_one_action_result_v1"
+        and result.get("provider") == "greenhouse"
+        and result.get("display") == display
+        and result.get("transaction_id") == frozen_action["transaction_id"]
+        and result.get("action_id") == frozen_action["action_id"]
+        and result.get("application_identity_sha256")
+        == frozen_action["application_identity_sha256"]
+        and re.fullmatch(r"[0-9a-f]{64}", str(result.get("receipt_event_hash") or ""))
+    )
+    if not identity_matches:
+        return terminal_refusal(
+            "Greenhouse ATS Hands receipt identity is invalid",
+            "terminal_refusal" if action_kind == "observe_form" else "side_effect_uncertain",
+        )
+    if result.get("ok") is not True or completed.returncode != 0:
+        state = result.get("state")
+        if (
+            set(result)
+            != {
+                "schema",
+                "ok",
+                "provider",
+                "display",
+                "transaction_id",
+                "action_id",
+                "application_identity_sha256",
+                "action",
+                "environment",
+                "state",
+                "stop_code",
+                "stop_reason",
+                "mutation_started",
+                "next_mutation_authorized",
+                "receipt_event_hash",
+            }
+            or result.get("ok") is not False
+            or state not in {"terminal_halt", "side_effect_uncertain"}
+            or result.get("stop_code")
+            not in {
+                "exact_postcondition_failure",
+                "unmapped_ui_or_question",
+                "missing_truthful_applicant_data",
+                "policy_or_authority_boundary",
+                "side_effect_uncertainty",
+            }
+            or not isinstance(result.get("stop_reason"), str)
+            or not result.get("stop_reason")
+            or not isinstance(result.get("mutation_started"), bool)
+            or (state == "side_effect_uncertain")
+            is not result.get("mutation_started")
+            or result.get("next_mutation_authorized") is not False
+        ):
+            return terminal_refusal("Greenhouse ATS terminal receipt is malformed")
+        return terminal_refusal(
+            f"Greenhouse ATS Hands terminal receipt: {result.get('stop_code')}",
+            str(state),
+        )
+    expected_mutations = 0 if action_kind == "observe_form" else 1
+    expected_state = (
+        "employer_confirmation_proven" if action_kind == "submit" else "action_ready"
+    )
+    common_success_keys = {
+        "schema",
+        "ok",
+        "provider",
+        "display",
+        "transaction_id",
+        "action_id",
+        "application_identity_sha256",
+        "action",
+        "environment",
+        "state",
+        "surface",
+        "mutation_count",
+        "next_mutation_authorized",
+        "receipt_event_hash",
+    }
+    observe_success = action_kind == "observe_form"
+    if observe_success:
+        expected_success_keys = common_success_keys | {"samples", "surface_capsule"}
+    elif action_kind == "submit":
+        expected_success_keys = common_success_keys | {
+            "source_samples",
+            "postcondition_samples",
+            "employer_confirmation",
+        }
+    else:
+        expected_success_keys = common_success_keys | {
+            "source_samples",
+            "postcondition_samples",
+            "surface_capsule",
+        }
+    postcondition_policy = (
+        "live_reacquire_no_clear"
+        if action_kind == "open_combo"
+        else "native_invalidate_reacquire"
+        if action_kind in {
+            "open_upload",
+            "chooser_location",
+            "chooser_select_all",
+            "chooser_type_path",
+        }
+        else "invalidate_reacquire"
+    )
+    source_policy = (
+        "live_reacquire_no_clear"
+        if action_kind == "select_option"
+        else "native_invalidate_reacquire"
+        if action_kind.startswith("chooser_")
+        else "invalidate_reacquire"
+    )
+    if (
+        set(result) != expected_success_keys
+        or result.get("state") != expected_state
+        or not isinstance(result.get("action"), dict)
+        or result["action"].get("kind") != action_kind
+        or not isinstance(result.get("environment"), dict)
+        or result.get("mutation_count") != expected_mutations
+        or not isinstance(result.get("surface"), dict)
+        or (
+            observe_success
+            and not _greenhouse_ats_samples_prove(
+                result.get("samples"),
+                refresh_policy="invalidate_reacquire",
+            )
+        )
+        or (
+            not observe_success
+            and not _greenhouse_ats_samples_prove(
+                result.get("source_samples"),
+                refresh_policy=source_policy,
+            )
+        )
+        or (
+            not observe_success
+            and not _greenhouse_ats_samples_prove(
+                result.get("postcondition_samples"),
+                refresh_policy=postcondition_policy,
+            )
+        )
+        or (
+            action_kind != "submit"
+            and not _greenhouse_ats_surface_capsule_proves(
+                result.get("surface_capsule"),
+                application_identity_sha256=frozen_action[
+                    "application_identity_sha256"
+                ],
+                full_surface=result.get("surface"),
+            )
+        )
+        or (
+            action_kind == "submit"
+            and not _greenhouse_ats_confirmation_proves(
+                result.get("employer_confirmation"),
+                application_identity_sha256=frozen_action[
+                    "application_identity_sha256"
+                ],
+                full_surface=result.get("surface"),
+                samples=result.get("postcondition_samples"),
+                receipt_event_hash=result["receipt_event_hash"],
+            )
+        )
+        or result.get("next_mutation_authorized") is not (action_kind != "submit")
+    ):
+        return terminal_refusal("Greenhouse ATS exact postcondition receipt is malformed")
+    sequence["terminal"] = {
+        "display": display,
+        "action": action,
+        "tool_round": tool_round,
+        "reason": "one frozen Greenhouse ATS action was receipted",
+        "state": "action_receipted",
+    }
+    profile_state = context.get("_tool_profile_state")
+    if isinstance(profile_state, dict):
+        profile_state["terminal"] = {
+            "tool": "greenhouse_ats_ui",
+            "reason": "the one frozen Greenhouse ATS action has been spent",
+        }
+    bounded_evidence = (
+        {"employer_confirmation": result["employer_confirmation"]}
+        if action_kind == "submit"
+        else {"surface_capsule": result["surface_capsule"]}
+    )
+    return _json.dumps({
+        "ok": True,
+        "display": display,
+        "action": action,
+        "greenhouse_ats_sequence": {
+            "state": (
+                "terminal_employer_confirmation"
+                if action_kind == "submit"
+                else "action_receipted"
+            ),
+            "postcondition_proven": True,
+            "receipt_event_hash": result["receipt_event_hash"],
+            "hands_result_sha256": result_sha256,
+            "hands_state": result["state"],
+            "mutation_count": result["mutation_count"],
+            "hands_next_mutation_authorized": result["next_mutation_authorized"],
+            "next_mutation_authorized": False,
+            **bounded_evidence,
+        },
+    })
 
 
 def _resolve_revenue_ui_private_comment(context: dict) -> dict[str, object]:
@@ -8297,6 +9457,10 @@ async def chat_completions(request: Request):
         "receipts": [],
         "terminal": None,
     }
+    turn_payload["_greenhouse_ats_ui_sequence"] = {
+        "pending": None,
+        "terminal": None,
+    }
     turn_payload["_tool_profile_state"] = {"terminal": None}
     context_token = _request_context.set(turn_payload)
     started = False
@@ -8319,6 +9483,9 @@ async def chat_completions(request: Request):
             await _end_turn(turn, "handler_error")
         raise
     finally:
+        _close_greenhouse_ats_pending(
+            turn_payload.get("_greenhouse_ats_ui_sequence")
+        )
         _request_context.reset(context_token)
 
 
@@ -8449,6 +9616,16 @@ async def _chat_completions_for_turn(
                 "role": "system",
                 "content": _linkedin_unit1_prepare_system_prompt,
             },
+            *messages,
+        ]
+    elif turn.tool_profile == _GREENHOUSE_ATS_UI_TOOL_PROFILE:
+        messages = [
+            message
+            for message in body.get("messages", [])
+            if message.get("role") != "system"
+        ]
+        body["messages"] = [
+            {"role": "system", "content": _greenhouse_ats_ui_system_prompt},
             *messages,
         ]
     elif turn.tool_profile == _CONSULT_CHAT_TOOL_PROFILE:
