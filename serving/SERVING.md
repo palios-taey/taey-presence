@@ -551,6 +551,10 @@ one qualifying `select` decision outranks Show more; otherwise `exclude` must
 bind closed reason codes for every exact actionable activity before one
 continuation card can compile. A verified continuation clears those exclusions,
 so the newly mounted inventory cannot inherit a prior decision.
+When the exact actionable set is empty and Show more is present, Presence freezes
+the exact empty exclusions mechanically and returns `observe_required`. Taey is
+not asked to choose among nonactionable raw inventory rows, and no UI mutation is
+performed by that private transition.
 Launch delivery as a new proxy turn with the **same** seat, event, and
 correlation identity:
 

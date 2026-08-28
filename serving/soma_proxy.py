@@ -7159,6 +7159,51 @@ def _do_linkedin_unit1_prepare(arguments: dict) -> str:
             return terminal_refusal(
                 "LinkedIn Unit 1 preparation readiness digest is invalid"
             )
+        if state == "ready_for_private_selection":
+            selection_input = readiness_result["input"]
+            inventory = selection_input.get("notification_inventory")
+            actionable_links = (
+                inventory.get("actionable_links")
+                if isinstance(inventory, dict)
+                else None
+            )
+            if not isinstance(actionable_links, list):
+                return terminal_refusal(
+                    "LinkedIn Unit 1 actionable inventory is invalid"
+                )
+            if (
+                not actionable_links
+                and selection_input.get("continuation_available") is True
+            ):
+                try:
+                    frozen_exclusions = build_exclusions(
+                        selection_input,
+                        {
+                            "display": display,
+                            "action": "exclude",
+                            "excluded_candidates": [],
+                        },
+                        preparation,
+                    )
+                except LinkedInUnit1PreparePublisherError as exc:
+                    return terminal_refusal(str(exc))
+                sequence["selection"] = frozen_exclusions
+                sequence.pop("inventory", None)
+                sequence.pop("readiness", None)
+                return _json.dumps({
+                    "ok": True,
+                    "display": display,
+                    "action": action,
+                    "preparation_sequence": {
+                        "state": "observe_required",
+                        "exclusions_sha256": frozen_exclusions[
+                            "exclusions_sha256"
+                        ],
+                        "mechanical_empty_inventory": True,
+                        "next_mutation_authorized": False,
+                        "allowed_next": {"action": "observe"},
+                    },
+                })
         sequence["readiness"] = {
             "state": state,
             "input": readiness_result["input"],
