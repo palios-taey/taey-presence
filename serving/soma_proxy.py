@@ -6127,6 +6127,16 @@ def _do_greenhouse_ats_ui(arguments: dict) -> str:
     expected_state = (
         "employer_confirmation_proven" if action_kind == "submit" else "action_ready"
     )
+    observe_success = action_kind == "observe_form"
+    observe_policy = (
+        "live_reacquire_no_clear"
+        if (
+            observe_success
+            and isinstance(result.get("surface"), dict)
+            and result["surface"].get("surface") == "options"
+        )
+        else "invalidate_reacquire"
+    )
     common_success_keys = {
         "schema",
         "ok",
@@ -6143,7 +6153,6 @@ def _do_greenhouse_ats_ui(arguments: dict) -> str:
         "next_mutation_authorized",
         "receipt_event_hash",
     }
-    observe_success = action_kind == "observe_form"
     if observe_success:
         expected_success_keys = common_success_keys | {"samples", "surface_capsule"}
     elif action_kind == "submit":
@@ -6189,7 +6198,7 @@ def _do_greenhouse_ats_ui(arguments: dict) -> str:
             observe_success
             and not _greenhouse_ats_samples_prove(
                 result.get("samples"),
-                refresh_policy="invalidate_reacquire",
+                refresh_policy=observe_policy,
             )
         )
         or (
