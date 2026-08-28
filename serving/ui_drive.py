@@ -21,9 +21,11 @@ from typing import Any
 from revenue_ui_contract import (
     DECLARED_EFFECTS,
     SEMANTIC_OUTWARD,
+    canonical_json_bytes,
     canonical_sha256,
     operation_card,
     parse_semantic_input,
+    semantic_input,
     semantic_receipt,
 )
 
@@ -1246,6 +1248,264 @@ def _observe_revenue(
     }
 
 
+def _linkedin_unit1_envelope(
+    args: argparse.Namespace,
+    expected_keys: frozenset[str],
+) -> dict[str, Any]:
+    raw = sys.stdin.buffer.read(4 * 1024 * 1024 + 1)
+    if not raw or len(raw) > 4 * 1024 * 1024:
+        raise UiDriveError("LinkedIn Unit 1 input must contain 1-4194304 bytes")
+    if hashlib.sha256(raw).hexdigest() != str(args.input_sha256 or ""):
+        raise UiDriveError("LinkedIn Unit 1 input digest is not exact")
+
+    def exact(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        if len(pairs) != len({key for key, _value in pairs}):
+            raise ValueError("duplicate LinkedIn Unit 1 input key")
+        return dict(pairs)
+
+    try:
+        value = json.loads(raw.decode("utf-8"), object_pairs_hook=exact)
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise UiDriveError("LinkedIn Unit 1 input is not exact UTF-8 JSON") from exc
+    if not isinstance(value, dict) or frozenset(value) != expected_keys:
+        raise UiDriveError("LinkedIn Unit 1 input fields are incomplete or unknown")
+    return value
+
+
+def _linkedin_unit1_runtime_card(
+    deps: SimpleNamespace,
+    snapshot: Snapshot,
+    unit1_card: dict[str, Any],
+) -> dict[str, Any]:
+    element = unit1_card.get("element")
+    matches = list(snapshot.mapped.get(element) or [])
+    if len(matches) != 1:
+        raise UiDriveError(
+            f"LinkedIn Unit 1 card element {element!r} matched {len(matches)} targets"
+        )
+    target = matches[0]
+    declared = _revenue_declared_operation(deps.platform, str(element), target)
+    revision = _snapshot_revision(snapshot, scope="base")
+    ref = _encode_ref(
+        display=deps.display,
+        platform=deps.platform,
+        scope="base",
+        revision=revision,
+        element=str(element),
+        current_url=snapshot.url,
+        target_sha256=_target_fingerprint(target, match_count=1),
+    )
+    try:
+        runtime_card = operation_card(
+            element=str(element),
+            ref=ref,
+            declared=declared,
+        )
+    except (TypeError, ValueError) as exc:
+        raise UiDriveError(str(exc)) from exc
+    if (
+        unit1_card.get("snapshot_revision") != revision
+        or runtime_card.get("method") != unit1_card.get("method")
+        or runtime_card.get("effect_class") != unit1_card.get("effect_class")
+    ):
+        raise UiDriveError(
+            "LinkedIn Unit 1 compiler card does not match the fresh runtime operation"
+        )
+    return runtime_card
+
+
+def _linkedin_unit1_compile(
+    args: argparse.Namespace,
+    deps: SimpleNamespace,
+) -> dict[str, Any]:
+    if deps.platform != "linkedin":
+        raise UiDriveError("LinkedIn Unit 1 requires the LinkedIn display")
+    value = _linkedin_unit1_envelope(
+        args,
+        frozenset({"private_input", "receipts"}),
+    )
+    private_input = value["private_input"]
+    receipts = value["receipts"]
+    if not isinstance(private_input, dict) or not isinstance(receipts, list):
+        raise UiDriveError("LinkedIn Unit 1 private input or receipt chain is invalid")
+    try:
+        from consultation_v2.platforms.linkedin.unit1 import compile_unit1_step
+
+        snapshot = _revenue_snapshot(deps)
+        card = compile_unit1_step(
+            snapshot,
+            _snapshot_revision(snapshot, scope="base"),
+            private_input,
+            receipts,
+        )
+    except Exception as exc:
+        raise UiDriveError(f"LinkedIn Unit 1 compile failed: {exc}") from exc
+    runtime_card = _linkedin_unit1_runtime_card(deps, snapshot, card)
+    return {
+        "schema": "taey_linkedin_unit1_compiled_step_v1",
+        "card": card,
+        "runtime_card": runtime_card,
+    }
+
+
+def _linkedin_unit1_operate(
+    args: argparse.Namespace,
+    deps: SimpleNamespace,
+) -> dict[str, Any]:
+    if deps.platform != "linkedin":
+        raise UiDriveError("LinkedIn Unit 1 requires the LinkedIn display")
+    value = _linkedin_unit1_envelope(
+        args,
+        frozenset({"private_input", "receipts", "card", "runtime_card"}),
+    )
+    private_input = value["private_input"]
+    receipts = value["receipts"]
+    stored_card = value["card"]
+    stored_runtime_card = value["runtime_card"]
+    if (
+        not isinstance(private_input, dict)
+        or not isinstance(receipts, list)
+        or not isinstance(stored_card, dict)
+        or not isinstance(stored_runtime_card, dict)
+    ):
+        raise UiDriveError("LinkedIn Unit 1 operate input is invalid")
+    try:
+        from consultation_v2.platforms.linkedin.unit1 import (
+            accept_unit1_step,
+            compile_unit1_step,
+        )
+
+        snapshot = _revenue_snapshot(deps)
+        fresh_card = compile_unit1_step(
+            snapshot,
+            _snapshot_revision(snapshot, scope="base"),
+            private_input,
+            receipts,
+        )
+    except Exception as exc:
+        raise UiDriveError(f"LinkedIn Unit 1 recompile failed: {exc}") from exc
+    if fresh_card != stored_card:
+        raise UiDriveError("LinkedIn Unit 1 opaque card changed before operation")
+    fresh_runtime_card = _linkedin_unit1_runtime_card(deps, snapshot, fresh_card)
+    if fresh_runtime_card != stored_runtime_card:
+        raise UiDriveError("LinkedIn Unit 1 runtime operation changed before operation")
+
+    method = str(fresh_card.get("method") or "")
+    subcommand = {
+        "activate": "ui-activate",
+        "mapped_pointer_activate": "ui-activate",
+        "activate_optional_like": "ui-activate",
+        "submit_frozen_comment": "ui-activate",
+        "scroll_into_view": "ui-scroll-into-view",
+        "paste_frozen_text": "ui-paste",
+    }.get(method)
+    if subcommand is None:
+        raise UiDriveError(f"LinkedIn Unit 1 method {method!r} has no existing primitive")
+    command = [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        subcommand,
+        "--display",
+        deps.display,
+        "--ref",
+        str(fresh_runtime_card["ref"]),
+        "--operation-card-sha256",
+        str(fresh_runtime_card["card_sha256"]),
+    ]
+    private_stdin: bytes | None = None
+    if method == "paste_frozen_text":
+        text = private_input.get("text")
+        if not isinstance(text, str):
+            raise UiDriveError("LinkedIn Unit 1 frozen paste text is invalid")
+        private_stdin = text.encode("utf-8")
+        command.extend([
+            "--text-sha256",
+            str(private_input.get("text_sha256") or ""),
+            "--max-text-chars",
+            str(fresh_runtime_card.get("max_text_chars") or ""),
+        ])
+    elif method in SEMANTIC_OUTWARD:
+        manifest = {
+            "transaction_sha256": fresh_card["transaction_sha256"],
+            "display": deps.display,
+            "selected_activity": private_input.get("selected_activity"),
+            "selected_post_body_sha256": private_input.get(
+                "selected_post_body_sha256"
+            ),
+            "like_authorized": private_input.get("like_authorized"),
+            "text": private_input.get("text"),
+            "text_sha256": private_input.get("text_sha256"),
+            "expected_author_name": private_input.get("expected_author_name"),
+        }
+        private_stdin = canonical_json_bytes(
+            semantic_input(manifest, fresh_runtime_card)
+        )
+        command.extend([
+            "--private-semantic-input-sha256",
+            hashlib.sha256(private_stdin).hexdigest(),
+        ])
+    try:
+        import subprocess
+
+        completed = subprocess.run(
+            command,
+            input=private_stdin,
+            capture_output=True,
+            timeout=90,
+            env=dict(os.environ),
+        )
+    except subprocess.TimeoutExpired as exc:
+        prefix = "SIDE_EFFECT_UNCERTAIN: " if method in SEMANTIC_OUTWARD else ""
+        raise UiDriveError(f"{prefix}LinkedIn Unit 1 operation timed out") from exc
+    stdout = (completed.stdout or b"").decode("utf-8", errors="replace").strip()
+    try:
+        payload = json.loads(stdout)
+    except ValueError as exc:
+        raise UiDriveError("LinkedIn Unit 1 primitive returned invalid JSON") from exc
+    result = payload.get("result") if isinstance(payload, dict) else None
+    if (
+        completed.returncode != 0
+        or not isinstance(payload, dict)
+        or payload.get("ok") is not True
+        or payload.get("display") != deps.display
+        or payload.get("platform") != "linkedin"
+        or not isinstance(result, dict)
+    ):
+        detail = payload.get("error") if isinstance(payload, dict) else None
+        prefix = "SIDE_EFFECT_UNCERTAIN: " if method in SEMANTIC_OUTWARD else ""
+        raise UiDriveError(
+            f"{prefix}LinkedIn Unit 1 primitive failed: {detail or 'unknown error'}"
+        )
+    observation = result.get("post_action_observation")
+    barrier = observation.get("barrier") if isinstance(observation, dict) else None
+    previous_receipt_sha256 = (
+        receipts[-1].get("receipt_sha256")
+        if receipts and isinstance(receipts[-1], dict)
+        else None
+    )
+    try:
+        receipt = accept_unit1_step(
+            fresh_card,
+            barrier,
+            previous_receipt_sha256,
+            private_input,
+        )
+    except Exception as exc:
+        prefix = "SIDE_EFFECT_UNCERTAIN: " if method in SEMANTIC_OUTWARD else ""
+        raise UiDriveError(
+            f"{prefix}LinkedIn Unit 1 receipt acceptance failed: {exc}"
+        ) from exc
+    terminal = receipt.get("terminal_delivery_verified") is True
+    return {
+        "schema": "taey_linkedin_unit1_operated_step_v1",
+        "card_sha256": fresh_card["card_sha256"],
+        "phase": fresh_card["phase"],
+        "receipt": receipt,
+        "terminal": terminal,
+        "operation_evidence_sha256": canonical_sha256(result),
+    }
+
+
 def _resolve_revenue_target(
     args: argparse.Namespace,
     deps: SimpleNamespace,
@@ -2367,6 +2627,14 @@ def _parser() -> argparse.ArgumentParser:
     revenue_observe = commands.add_parser("ui-observe")
     _add_display(revenue_observe)
 
+    unit1_compile = commands.add_parser("linkedin-unit1-compile")
+    _add_display(unit1_compile)
+    unit1_compile.add_argument("--input-sha256", required=True)
+
+    unit1_operate = commands.add_parser("linkedin-unit1-operate")
+    _add_display(unit1_operate)
+    unit1_operate.add_argument("--input-sha256", required=True)
+
     revenue_activate = commands.add_parser("ui-activate")
     _add_display(revenue_activate)
     _add_target(revenue_activate)
@@ -2687,6 +2955,10 @@ def _dispatch(args: argparse.Namespace, deps: SimpleNamespace) -> Any:
             LOCK_TTL_DEFAULT,
         )
         return result
+    if args.action == "linkedin-unit1-compile":
+        return _linkedin_unit1_compile(args, deps)
+    if args.action == "linkedin-unit1-operate":
+        return _linkedin_unit1_operate(args, deps)
     lease_receipt = None
     if args.action in _LOCK_ACTION_OPS:
         lease = _lease_context()
