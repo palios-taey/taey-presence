@@ -21,7 +21,7 @@ SERVING_ROOT = REPO_ROOT / "serving"
 SOMA_PROXY = SERVING_ROOT / "soma_proxy.py"
 SOURCE = SOMA_PROXY.read_text(encoding="utf-8")
 TREE = ast.parse(SOURCE, filename=str(SOMA_PROXY))
-REQUIRED_HANDS_COMMIT = "fb3d1270aba4c6a335769a348a69461b87a7595f"
+REQUIRED_HANDS_COMMIT = "043a45e3414c02bb7805d2ddf12eb6ce02ee7889"
 
 
 def require(condition: bool, message: str) -> None:
