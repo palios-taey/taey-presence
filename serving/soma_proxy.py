@@ -5543,7 +5543,11 @@ def _greenhouse_ats_surface_capsule_proves(
     if surface_kind in {"form", "options"}:
         expected_keys = common_keys | {"controls"}
         expected_keys |= (
-            {"route_grammar", "complete_form_sha256"}
+            {
+                "route_grammar",
+                "complete_form_sha256",
+                "required_controls_complete",
+            }
             if surface_kind == "form"
             else {"origin"}
         )
@@ -5636,7 +5640,11 @@ def _greenhouse_ats_surface_capsule_proves(
             return False
         if surface_kind == "form":
             return (
-                re.fullmatch(
+                isinstance(capsule.get("required_controls_complete"), bool)
+                and isinstance(full_surface.get("required_controls_complete"), bool)
+                and capsule["required_controls_complete"]
+                is full_surface["required_controls_complete"]
+                and re.fullmatch(
                     r"[a-z][a-z0-9_]{0,63}",
                     str(capsule.get("route_grammar") or ""),
                 )
