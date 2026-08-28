@@ -8,6 +8,7 @@ import importlib
 import json
 import os
 from pathlib import Path
+import re
 import stat
 import sys
 import tempfile
@@ -309,6 +310,61 @@ def main() -> int:
             'if result["kind"] == "initial_observation_timeout":', 1
         )[1].split('if result["kind"] == "action_card":', 1)[0],
         "initial barrier entered the Hands receipt chain",
+    )
+    handler_tree = ast.parse(handler_source)
+    barrier_functions = [
+        node
+        for node in ast.walk(handler_tree)
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "initial_barrier_exact"
+    ]
+    require(len(barrier_functions) == 1, "initial barrier consumer is not exact")
+    barrier_namespace = {"re": re}
+    exec(
+        compile(
+            ast.fix_missing_locations(
+                ast.Module(body=barrier_functions, type_ignores=[])
+            ),
+            str(proxy),
+            "exec",
+        ),
+        barrier_namespace,
+    )
+    initial_barrier_exact = barrier_namespace["initial_barrier_exact"]
+    timeout_sample = {
+        "sample": 1,
+        "elapsed_ms": 10000,
+        "observed_url": None,
+        "notifications_target_match_count": 0,
+        "augmented_match_count": 0,
+        "declared_method": None,
+        "allowed_now": None,
+        "target_state_digest": None,
+        "exact": False,
+    }
+    timeout_barrier = {
+        "result": "TIMEOUT",
+        "compile_authorized": False,
+        "next_mutation_authorized": False,
+        "projection": "exact_notifications_navigation",
+        "refresh_policy": "invalidate_reacquire",
+        "stable_cycles_required": 2,
+        "stable_cycles_observed": 0,
+        "samples": [timeout_sample],
+    }
+    require(
+        initial_barrier_exact(timeout_barrier, "TIMEOUT"),
+        "a truthful absent-document URL timeout receipt is refused",
+    )
+    require(
+        not initial_barrier_exact(
+            {
+                **timeout_barrier,
+                "samples": [{**timeout_sample, "observed_url": 1}],
+            },
+            "TIMEOUT",
+        ),
+        "a malformed timeout URL is accepted",
     )
     require(
         'sequence["published"] = published' in handler_source

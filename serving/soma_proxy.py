@@ -6713,7 +6713,10 @@ def _do_linkedin_unit1_prepare(arguments: dict) -> str:
                 or isinstance(sample.get("elapsed_ms"), bool)
                 or not isinstance(sample.get("elapsed_ms"), int)
                 or sample["elapsed_ms"] < 0
-                or not isinstance(sample.get("observed_url"), str)
+                or (
+                    sample.get("observed_url") is not None
+                    and not isinstance(sample.get("observed_url"), str)
+                )
                 or isinstance(sample.get("notifications_target_match_count"), bool)
                 or not isinstance(sample.get("notifications_target_match_count"), int)
                 or sample["notifications_target_match_count"] < 0
