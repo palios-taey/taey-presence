@@ -234,6 +234,23 @@ def main() -> int:
         and "PREPARATION_RECEIPT_SCHEMA" in compile_source,
         "fresh exact route proof is not carried through the compile transport",
     )
+    for required in (
+        "if receipts:",
+        'getattr(manual, "stable_initial_preparation_observation", None)',
+        "time.monotonic() + LOCK_TTL_DEFAULT",
+        '"kind": "initial_observation_timeout"',
+        '"initial_observation_barrier": initial_observation_barrier',
+        'initial_observation_barrier.get("compile_authorized") is not True',
+        'initial_observation_barrier.get("next_mutation_authorized")',
+        "result = compile_preparation_step(",
+    ):
+        require(required in compile_source, f"initial barrier wiring lost {required}")
+    require(
+        compile_source.count("_revenue_snapshot(deps)") == 1
+        and compile_source.index("stable_observation(")
+        < compile_source.index("result = compile_preparation_step("),
+        "initial compile does not consume only the barrier-proven snapshot",
+    )
     for token in (
         "accept_preparation_step(",
         "_revenue_snapshot(deps)",
@@ -253,6 +270,24 @@ def main() -> int:
             f"preparation profile can execute forbidden {forbidden}",
         )
     handler_source = source_function(proxy, "_do_linkedin_unit1_prepare")
+    for required in (
+        "def initial_barrier_exact(",
+        'result["kind"] == "initial_observation_timeout"',
+        'initial_barrier_exact(barrier, "TIMEOUT")',
+        'initial_barrier_exact(initial_barrier, "PASS")',
+        'expected_result_keys.add("initial_observation_barrier")',
+        'card.get("phase") != "notifications_navigation"',
+        '{"initial_observation_barrier": initial_barrier}',
+    ):
+        require(required in handler_source, f"initial barrier consumer lost {required}")
+    require(
+        'sequence["receipts"].append(initial' not in handler_source
+        and "_linkedin_unit1_prepare_route_proof(\n                    result"
+        not in handler_source.split(
+            'if result["kind"] == "initial_observation_timeout":', 1
+        )[1].split('if result["kind"] == "action_card":', 1)[0],
+        "initial barrier entered the Hands receipt chain",
+    )
     require(
         'sequence["published"] = published' in handler_source
         and "_publish_linkedin_unit1_private_bundle(" in handler_source,

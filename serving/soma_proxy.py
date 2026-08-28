@@ -6632,6 +6632,95 @@ def _do_linkedin_unit1_prepare(arguments: dict) -> str:
             },
         })
 
+    def initial_barrier_exact(barrier: object, expected_result: str) -> bool:
+        barrier_keys = {
+            "result",
+            "compile_authorized",
+            "next_mutation_authorized",
+            "projection",
+            "refresh_policy",
+            "stable_cycles_required",
+            "stable_cycles_observed",
+            "samples",
+        }
+        sample_keys = {
+            "sample",
+            "elapsed_ms",
+            "observed_url",
+            "notifications_target_match_count",
+            "augmented_match_count",
+            "declared_method",
+            "allowed_now",
+            "target_state_digest",
+            "exact",
+        }
+        if (
+            not isinstance(barrier, dict)
+            or set(barrier) != barrier_keys
+            or barrier.get("result") != expected_result
+            or barrier.get("projection") != "exact_notifications_navigation"
+            or barrier.get("refresh_policy") != "invalidate_reacquire"
+            or barrier.get("stable_cycles_required") != 2
+            or not isinstance(barrier.get("samples"), list)
+            or not barrier["samples"]
+        ):
+            return False
+        samples = barrier["samples"]
+        for index, sample in enumerate(samples, 1):
+            if (
+                not isinstance(sample, dict)
+                or set(sample) != sample_keys
+                or sample.get("sample") != index
+                or isinstance(sample.get("elapsed_ms"), bool)
+                or not isinstance(sample.get("elapsed_ms"), int)
+                or sample["elapsed_ms"] < 0
+                or not isinstance(sample.get("observed_url"), str)
+                or isinstance(sample.get("notifications_target_match_count"), bool)
+                or not isinstance(sample.get("notifications_target_match_count"), int)
+                or sample["notifications_target_match_count"] < 0
+                or isinstance(sample.get("augmented_match_count"), bool)
+                or not isinstance(sample.get("augmented_match_count"), int)
+                or sample["augmented_match_count"] < 0
+                or sample.get("declared_method") not in {None, "activate"}
+                or (
+                    sample.get("allowed_now") is not None
+                    and sample.get("allowed_now") != ["activate"]
+                )
+                or (
+                    sample.get("target_state_digest") is not None
+                    and re.fullmatch(
+                        r"[0-9a-f]{64}",
+                        str(sample.get("target_state_digest")),
+                    )
+                    is None
+                )
+                or not isinstance(sample.get("exact"), bool)
+            ):
+                return False
+        if expected_result == "TIMEOUT":
+            return (
+                barrier.get("compile_authorized") is False
+                and barrier.get("next_mutation_authorized") is False
+                and barrier.get("stable_cycles_observed") in {0, 1}
+            )
+        final_samples = samples[-2:]
+        return (
+            len(final_samples) == 2
+            and barrier.get("compile_authorized") is True
+            and barrier.get("next_mutation_authorized") is False
+            and barrier.get("stable_cycles_observed") == 2
+            and all(
+                sample.get("exact") is True
+                and sample.get("notifications_target_match_count") == 1
+                and sample.get("augmented_match_count") == 1
+                and sample.get("allowed_now") == ["activate"]
+                and isinstance(sample.get("target_state_digest"), str)
+                for sample in final_samples
+            )
+            and final_samples[0]["target_state_digest"]
+            == final_samples[1]["target_state_digest"]
+        )
+
     if context.get("tool_profile") != _LINKEDIN_UNIT1_PREPARE_TOOL_PROFILE:
         return terminal_refusal(
             "linkedin_unit1_prepare requires the linkedin-unit1-prepare profile"
@@ -6878,18 +6967,43 @@ def _do_linkedin_unit1_prepare(arguments: dict) -> str:
             result.get("schema")
             != "taey_linkedin_unit1_preparation_compiled_step_v1"
             or result.get("kind")
-            not in {"action_card", "phase_receipt", "private_input"}
+            not in {
+                "action_card",
+                "phase_receipt",
+                "private_input",
+                "initial_observation_timeout",
+            }
         ):
             return terminal_refusal(
                 "LinkedIn Unit 1 preparation compiler result is invalid"
             )
+        if result["kind"] == "initial_observation_timeout":
+            barrier = result.get("initial_observation_barrier")
+            if (
+                sequence["receipts"]
+                or set(result)
+                != {"schema", "kind", "initial_observation_barrier"}
+                or not initial_barrier_exact(barrier, "TIMEOUT")
+            ):
+                return terminal_refusal(
+                    "LinkedIn initial preparation timeout evidence is invalid"
+                )
+            return terminal_refusal(
+                "LinkedIn initial Notifications observation did not settle; "
+                f"barrier_sha256={linkedin_prepare_sha256(barrier)}"
+            )
         if result["kind"] == "action_card":
-            if set(result) != {"schema", "kind", "card", "runtime_card"}:
+            initial = not sequence["receipts"]
+            expected_result_keys = {"schema", "kind", "card", "runtime_card"}
+            if initial:
+                expected_result_keys.add("initial_observation_barrier")
+            if set(result) != expected_result_keys:
                 return terminal_refusal(
                     "LinkedIn Unit 1 preparation action card result is invalid"
                 )
             card = result.get("card")
             runtime_card = result.get("runtime_card")
+            initial_barrier = result.get("initial_observation_barrier")
             card_sha256 = card.get("card_sha256") if isinstance(card, dict) else None
             if (
                 not isinstance(runtime_card, dict)
@@ -6898,6 +7012,13 @@ def _do_linkedin_unit1_prepare(arguments: dict) -> str:
                 or card.get("transaction_sha256") != transaction_sha256
                 or card.get("method")
                 not in {"activate", "mapped_pointer_activate", "scroll_into_view"}
+                or (
+                    initial
+                    and (
+                        card.get("phase") != "notifications_navigation"
+                        or not initial_barrier_exact(initial_barrier, "PASS")
+                    )
+                )
             ):
                 return terminal_refusal(
                     "LinkedIn Unit 1 preparation compiler returned no exact safe card"
@@ -6916,6 +7037,11 @@ def _do_linkedin_unit1_prepare(arguments: dict) -> str:
                     "state": "ready_for_one_action",
                     "card_sha256": card_sha256,
                     "phase": card.get("phase"),
+                    **(
+                        {"initial_observation_barrier": initial_barrier}
+                        if initial
+                        else {}
+                    ),
                     "allowed_next": {
                         "action": "operate",
                         "card_sha256": card_sha256,
