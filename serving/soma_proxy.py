@@ -1717,9 +1717,18 @@ TOOLS = [
                                 "pattern": "^[0-9]+$",
                                 "description": "exact activity from the returned inventory",
                             },
-                            "target_passed": {"const": True},
-                            "dedup_passed": {"const": True},
-                            "author_cooloff_passed": {"const": True},
+                            "target_passed": {
+                                "type": "boolean",
+                                "const": True,
+                            },
+                            "dedup_passed": {
+                                "type": "boolean",
+                                "const": True,
+                            },
+                            "author_cooloff_passed": {
+                                "type": "boolean",
+                                "const": True,
+                            },
                         },
                     },
                     {
