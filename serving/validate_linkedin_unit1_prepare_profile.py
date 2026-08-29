@@ -126,6 +126,16 @@ def inventory() -> dict:
             "uri_sha256": "3" * 64,
         }],
     }
+    artifact["decision_inventory_sha256"] = publisher.canonical_sha256({
+        "schema": publisher.NOTIFICATION_DECISION_INVENTORY_SCHEMA,
+        "candidates": [{
+            "activity": artifact["actionable_links"][0]["activity"],
+            "notification_text_sha256": artifact["rows"][0][
+                "notification_text_sha256"
+            ],
+            "uri_sha256": artifact["actionable_links"][0]["uri_sha256"],
+        }],
+    })
     artifact["inventory_sha256"] = publisher.canonical_sha256(artifact)
     return artifact
 
@@ -598,6 +608,8 @@ def main() -> int:
         require(
             frozen_exclusions["schema"]
             == publisher.NOTIFICATION_EXCLUSIONS_SCHEMA
+            and frozen_exclusions["decision_inventory_sha256"]
+            == exact_inventory["decision_inventory_sha256"]
             and frozen_exclusions["notification_inventory_sha256"]
             == exact_inventory["inventory_sha256"]
             and frozen_exclusions["exclusions_sha256"]
@@ -613,6 +625,12 @@ def main() -> int:
             "actionable"
         ] = False
         empty_inventory["notification_inventory"]["actionable_links"] = []
+        empty_inventory["notification_inventory"][
+            "decision_inventory_sha256"
+        ] = publisher.canonical_sha256({
+            "schema": publisher.NOTIFICATION_DECISION_INVENTORY_SCHEMA,
+            "candidates": [],
+        })
         empty_inventory["notification_inventory"]["inventory_sha256"] = (
             publisher.canonical_sha256({
                 key: value

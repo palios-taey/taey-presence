@@ -11,6 +11,9 @@ FINAL_BUNDLE_SCHEMA = "taey_linkedin_unit1_private_bundle_v1"
 PREPARATION_ENVELOPE_SCHEMA = "linkedin_unit1_preparation_envelope_v1"
 DRAFT_GATE_SCHEMA = "taey_linkedin_unit1_draft_gate_receipt_v1"
 NOTIFICATION_INVENTORY_SCHEMA = "linkedin_notification_inventory_v1"
+NOTIFICATION_DECISION_INVENTORY_SCHEMA = (
+    "linkedin_notification_decision_inventory_v1"
+)
 NOTIFICATION_EXCLUSIONS_SCHEMA = "linkedin_notification_inventory_exclusions_v1"
 SELECTED_SOURCE_SCHEMA = "linkedin_selected_post_thread_source_v1"
 EXCLUSION_REASON_CODES = frozenset({
@@ -139,6 +142,9 @@ def build_selection(
         or not isinstance(inventory, Mapping)
         or not isinstance(inventory.get("rows"), list)
         or not isinstance(inventory.get("actionable_links"), list)
+        or not _SHA256.fullmatch(
+            str(inventory.get("decision_inventory_sha256") or "")
+        )
         or not _SHA256.fullmatch(str(inventory.get("inventory_sha256") or ""))
     ):
         raise LinkedInUnit1PreparePublisherError("selection input is invalid")
@@ -239,6 +245,7 @@ def build_exclusions(
         )
     decision = {
         "schema": NOTIFICATION_EXCLUSIONS_SCHEMA,
+        "decision_inventory_sha256": inventory["decision_inventory_sha256"],
         "notification_inventory_sha256": inventory["inventory_sha256"],
         "policy_sha256": preparation["policy_sha256"],
         "transaction_sha256": preparation_transaction_sha256(preparation),
