@@ -414,6 +414,8 @@ For other model families, set the parsers your model expects.
 | `TAEY_TURN_LEASE_SECS` | `120` | active-turn lease; expiry is archived as an abandoned turn |
 | `TAEY_TURN_HEARTBEAT_SECS` | `30` | lease-renewal interval, capped at one-third of the lease |
 | `TAEY_DRIVE_CHAT_CAPTURE_ROOT` | *(empty → `drive_chat` refused)* | private write-once evidence root; required before any UI action |
+| `TAEY_PRIVATE_TURN_TRACE_DIR` | *(empty → tool-turn capture disabled unless required)* | absolute owner-controlled nonsymlink `0700` root for private full-message and per-tool checkpoints |
+| `TAEY_TRACE_CAPTURE_REQUIRED` | `0` | exact `0` or `1`; `1` refuses every tool-enabled turn before its first model call unless private trace storage is configured and writable |
 | `TAEYS_HANDS_ROOT` | *(empty → LinkedIn tools refused)* | absolute path to a committed public `palios-taey/taeys-hands` checkout |
 | `TAEY_UI_ACTION_BINDINGS` | *(empty → `ui_action` refused)* | trusted comma-separated platform/display bindings; first qualified form is `linkedin=:N` |
 | `TAEY_UI_DRIVE_PYTHON` | `/home/mira/taeys-env-sys/bin/python` | interpreter for the public one-action Hands adapter; production should set an explicit deployed path |
@@ -458,6 +460,17 @@ paths, URLs, and account details. Never commit it or feed it to a public receipt
 builder. A missing or unsafe root refuses the action before mutation; a
 result-finalization failure terminalizes the turn so Taey cannot continue
 without its evidence.
+
+For complete private model/tool trajectories, pre-create
+`TAEY_PRIVATE_TURN_TRACE_DIR` as the proxy service user with mode `0700` and set
+`TAEY_TRACE_CAPTURE_REQUIRED=1`. Tool-enabled turns checkpoint the injected
+system/user messages before the first model call, the assistant tool intent
+before any tool executes, and each tool result before another tool or model
+call. The same mode-`0400` JSON target is atomically replaced after every
+checkpoint; the file and parent directory are both synced before execution can
+continue. The root is configuration only—public code contains no operator path.
+These records contain full private prompts, reasoning, arguments, observations,
+and results. Never commit or publish them.
 
 The `manual-chat-ui-send` profile is the structurally narrowed SEND-phase
 surface for Gemini displays `:4` and `:22`. Its model-facing `drive_chat`

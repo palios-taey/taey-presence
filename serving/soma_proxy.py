@@ -55,6 +55,12 @@ from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import StreamingResponse, JSONResponse
 import uvicorn
 
+from private_turn_trace import (
+    PrivateTurnTrace,
+    PrivateTurnTraceConfigurationError,
+    PrivateTurnTraceError,
+)
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [SOMA-PROXY] %(message)s",
@@ -170,6 +176,15 @@ TAEY_TURN_HEARTBEAT_SECS = max(
 TAEY_DRIVE_CHAT_CAPTURE_ROOT = os.environ.get(
     "TAEY_DRIVE_CHAT_CAPTURE_ROOT", ""
 ).strip()
+TAEY_PRIVATE_TURN_TRACE_DIR = os.environ.get(
+    "TAEY_PRIVATE_TURN_TRACE_DIR", ""
+).strip()
+_TRACE_CAPTURE_REQUIRED_RAW = os.environ.get(
+    "TAEY_TRACE_CAPTURE_REQUIRED", "0"
+).strip()
+if _TRACE_CAPTURE_REQUIRED_RAW not in {"0", "1"}:
+    raise RuntimeError("TAEY_TRACE_CAPTURE_REQUIRED must be exactly 0 or 1")
+TAEY_TRACE_CAPTURE_REQUIRED = _TRACE_CAPTURE_REQUIRED_RAW == "1"
 
 app = FastAPI(title="Taey Soma Proxy", version="1.0.0")
 
@@ -9578,6 +9593,133 @@ def _turn_payload(turn: TurnContext) -> dict:
     }
 
 
+_PRIVATE_TURN_TRACE_SEQUENCE_KEYS = (
+    "_ui_sequence",
+    "_revenue_ui_sequence",
+    "_linkedin_unit1_sequence",
+    "_linkedin_unit1_prepare_sequence",
+    "_greenhouse_ats_ui_sequence",
+    "_tool_profile_state",
+)
+
+
+def _private_turn_trace_sequence_state(
+    trace: PrivateTurnTrace | None = None,
+) -> dict[str, object]:
+    context = _request_context.get()
+    state = {
+        key: context[key]
+        for key in _PRIVATE_TURN_TRACE_SEQUENCE_KEYS
+        if key in context
+    }
+    if not state and trace is not None:
+        return trace.last_sequence_state
+    return state
+
+
+def _private_turn_trace_start(
+    turn: TurnContext,
+    messages: list[dict],
+    *,
+    enabled: bool,
+) -> PrivateTurnTrace | None:
+    try:
+        trace = PrivateTurnTrace.start(
+            root=TAEY_PRIVATE_TURN_TRACE_DIR,
+            required=TAEY_TRACE_CAPTURE_REQUIRED,
+            enabled=enabled,
+            identity=_turn_payload(turn),
+            messages=messages,
+            sequence_state=_private_turn_trace_sequence_state(),
+        )
+    except PrivateTurnTraceConfigurationError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except PrivateTurnTraceError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="turn_trace_checkpoint_failed",
+        ) from exc
+    if trace is not None:
+        _request_context.get()["_private_turn_trace"] = trace
+    return trace
+
+
+def _private_turn_trace_append(
+    trace: PrivateTurnTrace | None,
+    message: dict,
+) -> None:
+    if trace is None:
+        return
+    try:
+        trace.append_message(message)
+    except PrivateTurnTraceError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="turn_trace_checkpoint_failed",
+        ) from exc
+
+
+def _private_turn_trace_checkpoint(
+    trace: PrivateTurnTrace | None,
+    *,
+    phase: str,
+    state: str,
+    tool_rounds: int,
+    usage: dict | None = None,
+    terminal_response: object = None,
+    error: dict | None = None,
+) -> None:
+    if trace is None:
+        return
+    try:
+        trace.checkpoint(
+            phase=phase,
+            state=state,
+            tool_rounds=tool_rounds,
+            sequence_state=_private_turn_trace_sequence_state(trace),
+            usage=usage,
+            terminal_response=terminal_response,
+            error=error,
+        )
+    except PrivateTurnTraceError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="turn_trace_checkpoint_failed",
+        ) from exc
+
+
+def _private_turn_trace_error(exc: BaseException) -> dict[str, object]:
+    detail = getattr(exc, "detail", None)
+    if not isinstance(detail, (dict, list, str, int, float, bool, type(None))):
+        detail = str(detail)
+    return {
+        "type": type(exc).__name__,
+        "detail": detail,
+    }
+
+
+async def _private_turn_stream_background(
+    turn: TurnContext,
+    trace: PrivateTurnTrace | None,
+    terminal_response: object,
+    usage: dict,
+    liveness_registered: bool,
+) -> None:
+    try:
+        if trace is not None and not trace.failed and not trace.terminal:
+            _private_turn_trace_checkpoint(
+                trace,
+                phase="turn_final",
+                state="stream_background",
+                tool_rounds=trace.last_tool_rounds,
+                usage=usage,
+                terminal_response=terminal_response,
+            )
+    finally:
+        if liveness_registered:
+            await _end_turn(turn, "stream_background")
+
+
 def _liveness_keys(seat_id: str) -> list[str]:
     prefix = f"taey:{seat_id}"
     return [
@@ -10165,9 +10307,24 @@ async def chat_completions(request: Request):
         if started and not isinstance(response, StreamingResponse):
             await _end_turn(turn, "nonstream_complete")
         return response
-    except BaseException:
-        if started:
-            await _end_turn(turn, "handler_error")
+    except BaseException as exc:
+        try:
+            trace = turn_payload.get("_private_turn_trace")
+            if (
+                isinstance(trace, PrivateTurnTrace)
+                and not trace.failed
+                and not trace.terminal
+            ):
+                _private_turn_trace_checkpoint(
+                    trace,
+                    phase="turn_error",
+                    state="handler_error",
+                    tool_rounds=trace.last_tool_rounds,
+                    error=_private_turn_trace_error(exc),
+                )
+        finally:
+            if started:
+                await _end_turn(turn, "handler_error")
         raise
     finally:
         _close_greenhouse_ats_pending(
@@ -10378,6 +10535,13 @@ async def _chat_completions_for_turn(
         body["tools"] = _tools_for_profile(turn.tool_profile)
         body.pop("tool_choice", None)
 
+    private_turn_trace = _private_turn_trace_start(
+        turn,
+        body["messages"],
+        enabled=bool(body.get("tools")),
+    )
+    trace_terminal_response: object = None
+    trace_usage: dict = {}
     t0 = time.time()
 
     if is_stream and body.get("tools"):
@@ -10416,6 +10580,7 @@ async def _chat_completions_for_turn(
                         raise
                     log.warning("upstream dropped a pooled connection; retrying once")
             payload = resp.json()
+            trace_usage = dict(payload.get("usage") or {})
             choice = (payload.get("choices") or [{}])[0]
             message = choice.get("message", {}) or {}
             tool_calls = message.get("tool_calls") or []
@@ -10489,6 +10654,16 @@ async def _chat_completions_for_turn(
                 # model was in fact thinking. Both names are accepted here so a build that renames it again
                 # does not silently blank the panel a second time.
                 resolved_thinking = thinking
+                _private_turn_trace_append(private_turn_trace, message)
+                trace_terminal_response = payload
+                _private_turn_trace_checkpoint(
+                    private_turn_trace,
+                    phase="terminal_response_resolved",
+                    state="in_progress",
+                    tool_rounds=rounds,
+                    usage=trace_usage,
+                    terminal_response=trace_terminal_response,
+                )
                 break
             rounds += 1
             log.info("Stream tool calls (round %d): %s", rounds,
@@ -10496,6 +10671,14 @@ async def _chat_completions_for_turn(
             if one_shot_spec is not None:
                 tc = tool_calls[0]
                 func = tc.get("function", {}) or {}
+                _private_turn_trace_append(private_turn_trace, message)
+                _private_turn_trace_checkpoint(
+                    private_turn_trace,
+                    phase="tool_intent",
+                    state="in_progress",
+                    tool_rounds=rounds,
+                    usage=trace_usage,
+                )
                 arguments = _tool_arguments_or_terminal(
                     func.get("arguments"),
                     tool=one_shot_spec.tool,
@@ -10516,9 +10699,47 @@ async def _chat_completions_for_turn(
                             "turn_id": turn.turn_id,
                         },
                     )
+                tool_message = {
+                    "role": "tool",
+                    "tool_call_id": tc.get("id", ""),
+                    "content": resolved_answer,
+                }
+                _private_turn_trace_append(private_turn_trace, tool_message)
+                _private_turn_trace_checkpoint(
+                    private_turn_trace,
+                    phase="tool_result",
+                    state="in_progress",
+                    tool_rounds=rounds,
+                    usage=trace_usage,
+                )
                 resolved_thinking = ""
+                terminal_message = {
+                    "role": "assistant",
+                    "content": resolved_answer,
+                }
+                _private_turn_trace_append(
+                    private_turn_trace,
+                    terminal_message,
+                )
+                trace_terminal_response = {"message": terminal_message}
+                _private_turn_trace_checkpoint(
+                    private_turn_trace,
+                    phase="terminal_response_resolved",
+                    state="in_progress",
+                    tool_rounds=rounds,
+                    usage=trace_usage,
+                    terminal_response=trace_terminal_response,
+                )
                 break
             body["messages"].append(message)
+            _private_turn_trace_append(private_turn_trace, message)
+            _private_turn_trace_checkpoint(
+                private_turn_trace,
+                phase="tool_intent",
+                state="in_progress",
+                tool_rounds=rounds,
+                usage=trace_usage,
+            )
             for tc in tool_calls:
                 func = tc.get("function", {}) or {}
                 arguments = _tool_arguments_or_terminal(
@@ -10534,17 +10755,27 @@ async def _chat_completions_for_turn(
                     round_num=rounds,
                 )
                 log.info("Tool %s -> %d chars", func.get("name", ""), len(result))
-                body["messages"].append({
+                tool_message = {
                     "role": "tool",
                     "tool_call_id": tc.get("id", ""),
                     "content": result,
-                })
+                }
+                body["messages"].append(tool_message)
+                _private_turn_trace_append(private_turn_trace, tool_message)
+                _private_turn_trace_checkpoint(
+                    private_turn_trace,
+                    phase="tool_result",
+                    state="in_progress",
+                    tool_rounds=rounds,
+                    usage=trace_usage,
+                )
     if is_stream:
         async def stream_and_measure():
             context_token = _request_context.set(_turn_payload(turn))
             token_count = 0
             prompt_tokens = 0
             outcome = "stream_complete"
+            stream_error: BaseException | None = None
             try:
                 if resolved_answer:
                     completion_id = f"chatcmpl-{turn.turn_id}"
@@ -10588,21 +10819,51 @@ async def _chat_completions_for_turn(
                                         token_count = u.get("completion_tokens", token_count)
                             except Exception:
                                 pass
-            except BaseException:
+            except BaseException as exc:
                 outcome = "stream_error"
+                stream_error = exc
                 raise
             finally:
-                if liveness_registered:
-                    await _end_turn(turn, outcome)
-                elapsed_ms = (time.time() - t0) * 1000
-                publish_metrics(elapsed_ms, prompt_tokens, token_count)
-                log.info(
-                    "Streamed %d tokens in %.0fms (%.1f tok/s, prompt=%d)",
-                    token_count, elapsed_ms,
-                    token_count / max(elapsed_ms / 1000, 0.001),
-                    prompt_tokens,
-                )
-                _request_context.reset(context_token)
+                try:
+                    if (
+                        private_turn_trace is not None
+                        and not private_turn_trace.failed
+                        and not private_turn_trace.terminal
+                    ):
+                        _private_turn_trace_checkpoint(
+                            private_turn_trace,
+                            phase="turn_final",
+                            state=outcome,
+                            tool_rounds=private_turn_trace.last_tool_rounds,
+                            usage=(
+                                trace_usage
+                                if trace_usage
+                                else {
+                                    "prompt_tokens": prompt_tokens,
+                                    "completion_tokens": token_count,
+                                }
+                            ),
+                            terminal_response=trace_terminal_response,
+                            error=(
+                                _private_turn_trace_error(stream_error)
+                                if stream_error is not None
+                                else None
+                            ),
+                        )
+                finally:
+                    try:
+                        if liveness_registered:
+                            await _end_turn(turn, outcome)
+                        elapsed_ms = (time.time() - t0) * 1000
+                        publish_metrics(elapsed_ms, prompt_tokens, token_count)
+                        log.info(
+                            "Streamed %d tokens in %.0fms (%.1f tok/s, prompt=%d)",
+                            token_count, elapsed_ms,
+                            token_count / max(elapsed_ms / 1000, 0.001),
+                            prompt_tokens,
+                        )
+                    finally:
+                        _request_context.reset(context_token)
 
         # Background cleanup covers disconnect paths where Starlette never advances the generator
         # into its finally. Exact turn-ID removal keeps the duplicate cleanup harmless.
@@ -10611,8 +10872,15 @@ async def _chat_completions_for_turn(
             media_type="text/event-stream",
             headers=_turn_headers(turn),
             background=(
-                BackgroundTask(_end_turn, turn, "stream_background")
-                if liveness_registered
+                BackgroundTask(
+                    _private_turn_stream_background,
+                    turn,
+                    private_turn_trace,
+                    trace_terminal_response,
+                    trace_usage,
+                    liveness_registered,
+                )
+                if private_turn_trace is not None or liveness_registered
                 else None
             ),
         )
@@ -10622,6 +10890,7 @@ async def _chat_completions_for_turn(
             messages = body["messages"]
             total_tokens = 0
             round_num = 0
+            last_trace_usage: dict = {}
 
             # A schema-constrained grammar leaves NO tokens for tool-call syntax, so one request
             # carrying both `response_format` and `tools` can neither call a tool nor answer:
@@ -10656,6 +10925,7 @@ async def _chat_completions_for_turn(
                 )
                 result = resp.json()
                 usage = result.get("usage", {})
+                last_trace_usage = dict(usage or {})
                 total_tokens += usage.get("completion_tokens", 0)
 
                 choice = result.get("choices", [{}])[0]
@@ -10683,8 +10953,20 @@ async def _chat_completions_for_turn(
                     # No tool calls -- final response. If a schema was held aside for the tool
                     # rounds, the answer the caller contracted for has not been produced yet.
                     if held_response_format is not None:
+                        _private_turn_trace_append(private_turn_trace, message)
+                        _private_turn_trace_checkpoint(
+                            private_turn_trace,
+                            phase="pre_final_schema_model",
+                            state="in_progress",
+                            tool_rounds=round_num,
+                            usage=last_trace_usage,
+                        )
                         result = await _final_answer()
-                        total_tokens += result.get("usage", {}).get("completion_tokens", 0)
+                        last_trace_usage = dict(result.get("usage") or {})
+                        total_tokens += last_trace_usage.get(
+                            "completion_tokens",
+                            0,
+                        )
                     break
 
                 # Execute tool calls
@@ -10696,6 +10978,14 @@ async def _chat_completions_for_turn(
                 if one_shot_spec is not None:
                     tc = tool_calls[0]
                     func = tc.get("function", {}) or {}
+                    _private_turn_trace_append(private_turn_trace, message)
+                    _private_turn_trace_checkpoint(
+                        private_turn_trace,
+                        phase="tool_intent",
+                        state="in_progress",
+                        tool_rounds=round_num,
+                        usage=last_trace_usage,
+                    )
                     arguments = _tool_arguments_or_terminal(
                         func.get("arguments"),
                         tool=one_shot_spec.tool,
@@ -10716,6 +11006,22 @@ async def _chat_completions_for_turn(
                                 "turn_id": turn.turn_id,
                             },
                         )
+                    tool_message = {
+                        "role": "tool",
+                        "tool_call_id": tc.get("id", ""),
+                        "content": tool_result,
+                    }
+                    _private_turn_trace_append(
+                        private_turn_trace,
+                        tool_message,
+                    )
+                    _private_turn_trace_checkpoint(
+                        private_turn_trace,
+                        phase="tool_result",
+                        state="in_progress",
+                        tool_rounds=round_num,
+                        usage=last_trace_usage,
+                    )
                     result = dict(result)
                     result["choices"] = [{
                         "index": 0,
@@ -10736,6 +11042,14 @@ async def _chat_completions_for_turn(
 
                 # Add assistant message with tool calls to history
                 messages.append(message)
+                _private_turn_trace_append(private_turn_trace, message)
+                _private_turn_trace_checkpoint(
+                    private_turn_trace,
+                    phase="tool_intent",
+                    state="in_progress",
+                    tool_rounds=round_num,
+                    usage=last_trace_usage,
+                )
 
                 for tc in tool_calls:
                     func = tc.get("function", {})
@@ -10757,11 +11071,23 @@ async def _chat_completions_for_turn(
                              name, json.dumps(arguments)[:100], len(tool_result))
 
                     # Add tool result to messages
-                    messages.append({
+                    tool_message = {
                         "role": "tool",
                         "tool_call_id": tc.get("id", ""),
                         "content": tool_result,
-                    })
+                    }
+                    messages.append(tool_message)
+                    _private_turn_trace_append(
+                        private_turn_trace,
+                        tool_message,
+                    )
+                    _private_turn_trace_checkpoint(
+                        private_turn_trace,
+                        phase="tool_result",
+                        state="in_progress",
+                        tool_rounds=round_num,
+                        usage=last_trace_usage,
+                    )
 
                 # Update body with extended messages for next round
                 body["messages"] = messages
@@ -10781,11 +11107,27 @@ async def _chat_completions_for_turn(
                 round_num, prompt_tok, completion_tok, context_pct,
             )
 
-            return JSONResponse(
+            response = JSONResponse(
                 content=result,
                 status_code=resp.status_code,
                 headers=_turn_headers(turn),
             )
+            terminal_message = (
+                (result.get("choices") or [{}])[0].get("message") or {}
+            )
+            _private_turn_trace_append(
+                private_turn_trace,
+                terminal_message,
+            )
+            _private_turn_trace_checkpoint(
+                private_turn_trace,
+                phase="turn_final",
+                state="nonstream_complete",
+                tool_rounds=round_num,
+                usage=last_trace_usage,
+                terminal_response=result,
+            )
+            return response
 
         return await nonstream_response()
 
