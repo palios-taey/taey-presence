@@ -276,6 +276,7 @@ _MANUAL_CHAT_UI_SEND_TOOL_PROFILE = "manual-chat-ui-send"
 _REVENUE_UI_TOOL_PROFILE = "revenue-ui"
 _LINKEDIN_UNIT1_TOOL_PROFILE = "linkedin-unit1"
 _LINKEDIN_UNIT1_PREPARE_TOOL_PROFILE = "linkedin-unit1-prepare"
+_LINKEDIN_UNIT1_PREPARE_TRANSPORT_TIMEOUT_SECS = 300
 _GREENHOUSE_ATS_UI_TOOL_PROFILE = "greenhouse-ats-ui"
 _CONSULT_CHAT_TOOL_PROFILE = "consult-chat"
 _LINKEDIN_JOBS_TOOL_PROFILE = "linkedin-jobs"
@@ -7137,7 +7138,7 @@ def _do_linkedin_unit1_prepare(arguments: dict) -> str:
             command,
             input=envelope_bytes,
             capture_output=True,
-            timeout=130,
+            timeout=_LINKEDIN_UNIT1_PREPARE_TRANSPORT_TIMEOUT_SECS,
             env=drive_env,
         )
     except subprocess.TimeoutExpired:
