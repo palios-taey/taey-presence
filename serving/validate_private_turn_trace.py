@@ -15,6 +15,7 @@ import tempfile
 SERVING_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(SERVING_ROOT))
 
+import private_turn_trace as trace_module  # noqa: E402
 from private_turn_trace import (  # noqa: E402
     PrivateTurnTrace,
     PrivateTurnTraceConfigurationError,
@@ -307,6 +308,50 @@ def main() -> int:
             and not list(failed_target.parent.glob(".*.tmp.*")),
             "failed checkpoint left an executable trace state or temp file",
         )
+
+        durability_failure = PrivateTurnTrace.start(
+            root=str(root),
+            required=True,
+            enabled=True,
+            identity={**identity, "turn_id": "turn-003"},
+            messages=initial_messages,
+            sequence_state=sequence_state,
+        )
+        require(
+            durability_failure is not None,
+            "durability failure fixture did not start",
+        )
+        durability_target = (
+            root / "event-001" / "turn_trace_turn-003.json"
+        )
+        durable_before = durability_target.read_bytes()
+        original_fsync = trace_module.os.fsync
+
+        def fail_file_fsync(_descriptor: int) -> None:
+            raise OSError("injected private trace file fsync failure")
+
+        trace_module.os.fsync = fail_file_fsync
+        try:
+            durability_failure.append_message(assistant)
+            try:
+                durability_failure.checkpoint(
+                    phase="tool_intent",
+                    state="in_progress",
+                    tool_rounds=1,
+                    sequence_state=sequence_state,
+                )
+            except PrivateTurnTraceError:
+                pass
+            else:
+                raise AssertionError("file fsync failure did not fail loud")
+        finally:
+            trace_module.os.fsync = original_fsync
+        require(
+            durability_failure.failed is True
+            and durability_target.read_bytes() == durable_before
+            and not list(durability_target.parent.glob(".*.tmp.*")),
+            "failed file fsync replaced prior evidence or left a temp file",
+        )
         integration_root = Path(temporary) / "integration-traces"
         integration_root.mkdir(mode=0o700)
         asyncio.run(validate_proxy_integration(integration_root, stream=False))
@@ -353,11 +398,18 @@ def main() -> int:
     module_source = (SERVING_ROOT / "private_turn_trace.py").read_text(
         encoding="utf-8"
     )
+    atomic_source = function_source(
+        SERVING_ROOT / "private_turn_trace.py",
+        "_atomic_checkpoint_write",
+    )
     require(
         "/home/mira" not in module_source
-        and "os.replace(" in module_source
-        and module_source.index("os.replace(")
-        < module_source.index("os.fsync(parent_fd)", module_source.index("os.replace(")),
+        and atomic_source.index("os.write(descriptor, view)")
+        < atomic_source.index("os.fchmod(descriptor, 0o400)")
+        < atomic_source.index("os.fsync(descriptor)")
+        < atomic_source.index("os.close(descriptor)")
+        < atomic_source.index("os.replace(")
+        < atomic_source.index("os.fsync(parent_fd)", atomic_source.index("os.replace(")),
         "private trace storage lost portability or directory durability",
     )
     loop_source = function_source(

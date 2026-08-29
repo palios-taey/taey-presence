@@ -149,8 +149,8 @@ def _atomic_checkpoint_write(parent_fd: int, name: str, payload: dict) -> None:
             if written <= 0:
                 raise OSError("short write while checkpointing private turn trace")
             view = view[written:]
-        os.fsync(descriptor)
         os.fchmod(descriptor, 0o400)
+        os.fsync(descriptor)
         os.close(descriptor)
         descriptor = None
         os.replace(
