@@ -376,6 +376,13 @@ def main() -> int:
     for token in (
         "accept_preparation_step(",
         "_revenue_snapshot(deps)",
+        'stored_card.get("phase") == "notifications_navigation"',
+        "lease = _lease_context()",
+        "lease_receipt = _guard_action(",
+        "stable_initial(",
+        "activate_notifications(snapshot)",
+        "stable_observation(",
+        '"lease": lease_receipt',
         '"activate": "ui-activate"',
         '"mapped_pointer_activate": "ui-activate"',
         '"scroll_into_view": "ui-scroll-into-view"',
