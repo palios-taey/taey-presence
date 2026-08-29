@@ -163,6 +163,128 @@ async def validate_proxy_integration(root: Path, *, stream: bool) -> None:
     )
 
 
+async def validate_handler_failure_trace(root: Path) -> None:
+    import soma_proxy
+
+    arguments = json.dumps({"display": ":18"}, separators=(",", ":"))
+    upstream = {
+        "choices": [{
+            "finish_reason": "tool_calls",
+            "message": {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{
+                    "id": "call-failure-001",
+                    "type": "function",
+                    "function": {
+                        "name": "linkedin_jobs",
+                        "arguments": arguments,
+                    },
+                }],
+            },
+        }],
+        "usage": {"prompt_tokens": 11, "completion_tokens": 1},
+    }
+    calls = {"model": 0, "tool": 0, "end": []}
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self) -> dict:
+            return upstream
+
+    class FakeHttp:
+        async def post(self, *_args, **_kwargs) -> FakeResponse:
+            calls["model"] += 1
+            return FakeResponse()
+
+    class FakeRequest:
+        headers = {
+            "x-taey-seat-id": "failure-seat",
+            "x-taey-event-id": "failure-event",
+            "x-taey-correlation-id": "failure-correlation",
+            "x-taey-tool-profile": "linkedin-jobs",
+        }
+
+        async def json(self) -> dict:
+            return {
+                "stream": False,
+                "messages": [{"role": "user", "content": "fail exactly"}],
+            }
+
+    async def fail_tool(*_args, **_kwargs) -> str:
+        calls["tool"] += 1
+        raise ValueError("injected exact tool-loop failure")
+
+    async def direct_run(_request, operation, _turn):
+        return await operation
+
+    async def record_end(_turn, outcome: str) -> None:
+        calls["end"].append(outcome)
+
+    prior = {
+        "_http": soma_proxy._http,
+        "execute": soma_proxy.execute_tool_call_async,
+        "root": soma_proxy.TAEY_PRIVATE_TURN_TRACE_DIR,
+        "required": soma_proxy.TAEY_TRACE_CAPTURE_REQUIRED,
+        "prompts": soma_proxy._one_shot_system_prompts,
+        "start": soma_proxy._start_turn,
+        "run": soma_proxy._run_while_downstream_connected,
+        "end": soma_proxy._end_turn,
+    }
+    try:
+        soma_proxy._http = FakeHttp()
+        soma_proxy.execute_tool_call_async = fail_tool
+        soma_proxy.TAEY_PRIVATE_TURN_TRACE_DIR = str(root)
+        soma_proxy.TAEY_TRACE_CAPTURE_REQUIRED = True
+        soma_proxy._one_shot_system_prompts = {
+            "linkedin-jobs": "private failure system",
+        }
+        soma_proxy._start_turn = lambda _turn: 0
+        soma_proxy._run_while_downstream_connected = direct_run
+        soma_proxy._end_turn = record_end
+        try:
+            await soma_proxy.chat_completions(FakeRequest())
+        except ValueError as exc:
+            require(
+                str(exc) == "injected exact tool-loop failure",
+                "handler did not preserve the exact tool-loop error",
+            )
+        else:
+            raise AssertionError("handler tool-loop failure did not fail loud")
+    finally:
+        soma_proxy._http = prior["_http"]
+        soma_proxy.execute_tool_call_async = prior["execute"]
+        soma_proxy.TAEY_PRIVATE_TURN_TRACE_DIR = prior["root"]
+        soma_proxy.TAEY_TRACE_CAPTURE_REQUIRED = prior["required"]
+        soma_proxy._one_shot_system_prompts = prior["prompts"]
+        soma_proxy._start_turn = prior["start"]
+        soma_proxy._run_while_downstream_connected = prior["run"]
+        soma_proxy._end_turn = prior["end"]
+
+    event_dir = root / "failure-event"
+    targets = list(event_dir.glob("turn_trace_*.json"))
+    require(len(targets) == 1, "handler failure emitted no unique turn trace")
+    persisted = read_trace(targets[0])
+    require(
+        persisted["state"] == "handler_error"
+        and persisted["outcome"] == "handler_error"
+        and persisted["checkpoint_phase"] == "turn_error"
+        and persisted["error"] == {
+            "type": "ValueError",
+            "detail": "injected exact tool-loop failure",
+        }
+        and [message["role"] for message in persisted["messages"]]
+        == ["system", "user", "assistant"]
+        and calls == {
+            "model": 1,
+            "tool": 1,
+            "end": ["handler_error"],
+        },
+        "handler failure trace lost exact detail or allowed a later action",
+    )
+
+
 def main() -> int:
     identity = {
         "turn_id": "turn-001",
@@ -356,6 +478,7 @@ def main() -> int:
         integration_root.mkdir(mode=0o700)
         asyncio.run(validate_proxy_integration(integration_root, stream=False))
         asyncio.run(validate_proxy_integration(integration_root, stream=True))
+        asyncio.run(validate_handler_failure_trace(integration_root))
 
     require(
         PrivateTurnTrace.start(

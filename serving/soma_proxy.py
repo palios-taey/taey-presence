@@ -9689,9 +9689,21 @@ def _private_turn_trace_checkpoint(
 
 
 def _private_turn_trace_error(exc: BaseException) -> dict[str, object]:
-    detail = getattr(exc, "detail", None)
-    if not isinstance(detail, (dict, list, str, int, float, bool, type(None))):
-        detail = str(detail)
+    missing = object()
+    detail = getattr(exc, "detail", missing)
+    if detail is missing or detail is None:
+        detail = str(exc) or type(exc).__name__
+    else:
+        try:
+            detail = json.loads(json.dumps(
+                detail,
+                allow_nan=False,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ))
+        except (TypeError, ValueError):
+            detail = str(detail)
     return {
         "type": type(exc).__name__,
         "detail": detail,
