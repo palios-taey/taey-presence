@@ -7,6 +7,7 @@ DECLARED_EFFECTS = {"activate": "page", "mapped_pointer_activate": "page", "scro
 SEMANTIC_OUTWARD = frozenset({"activate_optional_like", "submit_frozen_comment"})
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _SCROLL_TARGET = re.compile(r"[a-z][a-z0-9_]{0,63}")
+_SCROLL_PHASE = re.compile(r"[a-z][a-z0-9_]{0,63}")
 def canonical_json_bytes(value: object) -> bytes:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
 def canonical_sha256(value: object) -> str:
@@ -23,21 +24,46 @@ def operation_card(*, element: str, ref: str, declared: dict[str, Any]) -> dict[
             raise ValueError("paste operation has no positive YAML maximum")
         card["max_text_chars"] = maximum
     if method == "scroll_into_view":
+        phase = declared.get("phase")
         target = declared.get("scroll_target")
         source = declared.get("scroll_target_source")
         alignment = declared.get("scroll_alignment")
+        minimum_clearance = declared.get("min_downward_clearance_px")
         if (
-            not isinstance(target, str)
+            not isinstance(phase, str)
+            or _SCROLL_PHASE.fullmatch(phase) is None
+            or not isinstance(target, str)
             or _SCROLL_TARGET.fullmatch(target) is None
             or source not in {"self", "mapped_context"}
             or alignment not in {"anywhere", "top_edge"}
+            or (
+                phase == "thread_scroll"
+                and (
+                    isinstance(minimum_clearance, bool)
+                    or not isinstance(minimum_clearance, int)
+                    or minimum_clearance < 0
+                )
+            )
+            or (
+                minimum_clearance is not None
+                and (
+                    isinstance(minimum_clearance, bool)
+                    or not isinstance(minimum_clearance, int)
+                    or minimum_clearance < 0
+                )
+            )
         ):
-            raise ValueError("scroll operation has no exact target and alignment")
+            raise ValueError(
+                "scroll operation has no exact phase, target, alignment, and clearance"
+            )
         card.update(
+            phase=phase,
             scroll_target=target,
             scroll_target_source=source,
             scroll_alignment=alignment,
         )
+        if minimum_clearance is not None:
+            card["min_downward_clearance_px"] = minimum_clearance
     if method in SEMANTIC_OUTWARD or method == "paste_frozen_text":
         activity = post.get("activity") if isinstance((post := declared.get("postcondition")), dict) else None
         body = post.get("body_sha256") if isinstance(post, dict) else None
@@ -57,13 +83,26 @@ def validate_operation_card(card: dict[str, Any]) -> dict[str, Any]:
     payload = {key: value for key, value in card.items() if key != "card_sha256"}
     method = card.get("method")
     keys = {"schema", "element", "ref", "method", "effect_class", "card_sha256"}
-    keys |= ({"max_text_chars"} if method == "paste_frozen_text" else set()) | ({"scroll_target", "scroll_target_source", "scroll_alignment"} if method == "scroll_into_view" else set()) | ({"draft_sha256", "precondition_kind"} if method == "submit_frozen_comment" else set()) | ({"selected_activity", "selected_post_body_sha256", "postcondition_kind"} if method in SEMANTIC_OUTWARD or method == "paste_frozen_text" else set())
+    keys |= ({"max_text_chars"} if method == "paste_frozen_text" else set()) | ({"phase", "scroll_target", "scroll_target_source", "scroll_alignment"} if method == "scroll_into_view" else set()) | ({"min_downward_clearance_px"} if method == "scroll_into_view" and "min_downward_clearance_px" in card else set()) | ({"draft_sha256", "precondition_kind"} if method == "submit_frozen_comment" else set()) | ({"selected_activity", "selected_post_body_sha256", "postcondition_kind"} if method in SEMANTIC_OUTWARD or method == "paste_frozen_text" else set())
     if (set(card) != keys or card.get("schema") != "taey_revenue_ui_operation_card_v1"
             or method not in DECLARED_EFFECTS or card.get("effect_class") != DECLARED_EFFECTS[method]
             or (method == "scroll_into_view" and (
-                _SCROLL_TARGET.fullmatch(str(card.get("scroll_target") or "")) is None
+                _SCROLL_PHASE.fullmatch(str(card.get("phase") or "")) is None
+                or _SCROLL_TARGET.fullmatch(str(card.get("scroll_target") or "")) is None
                 or card.get("scroll_target_source") not in {"self", "mapped_context"}
                 or card.get("scroll_alignment") not in {"anywhere", "top_edge"}
+                or (
+                    card.get("phase") == "thread_scroll"
+                    and "min_downward_clearance_px" not in card
+                )
+                or (
+                    "min_downward_clearance_px" in card
+                    and (
+                        isinstance(card.get("min_downward_clearance_px"), bool)
+                        or not isinstance(card.get("min_downward_clearance_px"), int)
+                        or card.get("min_downward_clearance_px", -1) < 0
+                    )
+                )
             ))
             or card.get("card_sha256") != canonical_sha256(payload)):
         raise ValueError("revenue UI operation card hash is not exact")

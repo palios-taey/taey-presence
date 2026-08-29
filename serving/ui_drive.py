@@ -2384,9 +2384,19 @@ def _revenue_scroll_into_view(
         description=row.get("description"),
         atspi_obj=target_object,
         raw={
+            "phase": card["phase"],
             "scroll_target": card["scroll_target"],
             "scroll_target_source": target_source,
             "scroll_alignment": card["scroll_alignment"],
+            **(
+                {
+                    "min_downward_clearance_px": card[
+                        "min_downward_clearance_px"
+                    ],
+                }
+                if "min_downward_clearance_px" in card
+                else {}
+            ),
         },
     )
     if not runtime.scroll_element_into_view(
@@ -2421,6 +2431,33 @@ def _revenue_scroll_into_view(
         if isinstance(barrier_receipt, dict)
         else None
     )
+    minimum_clearance = card.get("min_downward_clearance_px")
+    clearance_exact = bool(
+        minimum_clearance is None
+        or (
+            not isinstance(minimum_clearance, bool)
+            and isinstance(minimum_clearance, int)
+            and minimum_clearance >= 0
+            and postcondition is not None
+            and postcondition.get("min_downward_clearance_px")
+            == minimum_clearance
+            and postcondition.get("selected_post_root_intersects_viewport")
+            is True
+            and postcondition.get("scroll_target_exact") is True
+            and postcondition.get("thread_opener_live_extent_in_viewport")
+            is True
+            and not isinstance(
+                postcondition.get("thread_opener_available_below_px"),
+                bool,
+            )
+            and isinstance(
+                postcondition.get("thread_opener_available_below_px"),
+                int,
+            )
+            and postcondition.get("thread_opener_available_below_px", -1)
+            >= minimum_clearance
+        )
+    )
     if (
         post_snapshot is None
         or not isinstance(barrier_receipt, dict)
@@ -2434,9 +2471,11 @@ def _revenue_scroll_into_view(
         or postcondition.get("activity_exact") is not True
         or postcondition.get("body_sha256_exact") is not True
         or postcondition.get("live_extent_in_viewport") is not True
+        or postcondition.get("phase") != card["phase"]
         or postcondition.get("scroll_target") != card["scroll_target"]
         or postcondition.get("scroll_target_source") != target_source
         or postcondition.get("scroll_alignment") != card["scroll_alignment"]
+        or clearance_exact is not True
     ):
         raise UiDriveError(
             f"{deps.platform} scroll observation barrier did not prove the "
@@ -2447,9 +2486,17 @@ def _revenue_scroll_into_view(
         "performed_primitive": "scroll_into_view",
         "performed_operation": "scroll_into_view",
         "effect_class": "viewport",
+        "phase": card["phase"],
         "scroll_target": card["scroll_target"],
         "scroll_target_source": target_source,
         "scroll_alignment": card["scroll_alignment"],
+        **(
+            {
+                "min_downward_clearance_px": minimum_clearance,
+            }
+            if minimum_clearance is not None
+            else {}
+        ),
         "element": {
             "category": "mapped",
             "element": row["element"],

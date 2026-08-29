@@ -44,12 +44,14 @@ def main() -> int:
     require('value.get("operation") != card.get("method")' in function_source(REPO_ROOT / 'serving/revenue_ui_contract.py', 'parse_semantic_input'), 'semantic envelope operation is not bound to card method')
     scroll_declaration = {
         'method': 'scroll_into_view',
+        'phase': 'thread_scroll',
         'effect_class': 'viewport',
         'primitives': ['scroll_into_view'],
         'allowed_now': ['scroll_into_view'],
-        'scroll_target': 'selected_post_root',
-        'scroll_target_source': 'mapped_context',
+        'scroll_target': 'selected_thread_opener',
+        'scroll_target_source': 'self',
         'scroll_alignment': 'top_edge',
+        'min_downward_clearance_px': 500,
     }
     scroll_card = contract.operation_card(
         element='selected_thread',
@@ -57,11 +59,44 @@ def main() -> int:
         declared=scroll_declaration,
     )
     require(
-        scroll_card['scroll_target'] == 'selected_post_root'
-        and scroll_card['scroll_target_source'] == 'mapped_context'
+        scroll_card['phase'] == 'thread_scroll'
+        and scroll_card['scroll_target'] == 'selected_thread_opener'
+        and scroll_card['scroll_target_source'] == 'self'
         and scroll_card['scroll_alignment'] == 'top_edge'
+        and scroll_card['min_downward_clearance_px'] == 500
         and contract.validate_operation_card(scroll_card) is scroll_card,
-        'scroll operation card lost its exact target or alignment',
+        'scroll operation card lost its exact phase, target, or clearance',
+    )
+    missing_clearance = dict(scroll_declaration)
+    missing_clearance.pop('min_downward_clearance_px')
+    try:
+        contract.operation_card(
+            element='selected_thread',
+            ref='atspi3.scroll',
+            declared=missing_clearance,
+        )
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('thread scroll accepted missing minimum clearance')
+    expander_card = contract.operation_card(
+        element='selected_thread_expander',
+        ref='atspi3.expand',
+        declared={
+            'method': 'scroll_into_view',
+            'phase': 'thread_expand_scroll',
+            'effect_class': 'viewport',
+            'primitives': ['scroll_into_view'],
+            'allowed_now': ['scroll_into_view'],
+            'scroll_target': 'selected_thread_expander',
+            'scroll_target_source': 'self',
+            'scroll_alignment': 'anywhere',
+        },
+    )
+    require(
+        'min_downward_clearance_px' not in expander_card
+        and contract.validate_operation_card(expander_card) is expander_card,
+        'generic expander scroll gained opener-only clearance authority',
     )
     observe = function_source(UI_DRIVE, '_observe_revenue')
     require(
@@ -168,9 +203,15 @@ def main() -> int:
         'stable_scroll_post_action_observation',
         'postcondition.get("element_key") != row["element"]',
         'postcondition.get("live_extent_in_viewport") is not True',
+        'postcondition.get("phase") != card["phase"]',
         'postcondition.get("scroll_target") != card["scroll_target"]',
         'postcondition.get("scroll_target_source") != target_source',
         'postcondition.get("scroll_alignment") != card["scroll_alignment"]',
+        'postcondition.get("min_downward_clearance_px")',
+        'postcondition.get("selected_post_root_intersects_viewport")',
+        'postcondition.get("scroll_target_exact") is True',
+        'postcondition.get("thread_opener_available_below_px")',
+        'clearance_exact is not True',
         '"observe_required_before_next_mutation": True',
     ):
         require(required in scroll, f'revenue scroll transition missing {required!r}')
@@ -355,6 +396,10 @@ def main() -> int:
         'result.get("consumed_max_text_chars") != expected_max_text_chars',
         '"state": "viewport_transition_complete"',
         'postcondition.get("live_extent_in_viewport") is not True',
+        'postcondition.get("phase") != card.get("phase")',
+        'postcondition.get("min_downward_clearance_px")',
+        'postcondition.get("scroll_target_exact") is True',
+        'clearance_exact is not True',
     ):
         require(required in proxy, f'proxy scroll binding missing {required!r}')
     soma_source = SOMA_PROXY.read_text(encoding='utf-8')
