@@ -269,6 +269,15 @@ def main() -> int:
     )
     operate_source = source_function(drive, "_linkedin_unit1_prepare_operate")
     compile_source = source_function(drive, "_linkedin_unit1_prepare_compile")
+    primitive_timeout = ast.literal_eval(
+        assignment(drive, "_LINKEDIN_UNIT1_PREPARE_PRIMITIVE_TIMEOUT_SECS")
+    )
+    require(
+        primitive_timeout == 180
+        and "timeout=_LINKEDIN_UNIT1_PREPARE_PRIMITIVE_TIMEOUT_SECS"
+        in operate_source,
+        "preparation primitive timeout no longer covers its bounded observation",
+    )
     require(
         '"kind": "phase_receipt"' in compile_source
         and "PREPARATION_RECEIPT_SCHEMA" in compile_source,

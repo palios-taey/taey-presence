@@ -88,6 +88,8 @@ if LOCK_TTL_DEFAULT < _MONITOR_TTL_DEFAULT:
         "ownership survives the no-poll consultation wait"
     )
 
+_LINKEDIN_UNIT1_PREPARE_PRIMITIVE_TIMEOUT_SECS = 180
+
 
 REF_PREFIX = "atspi3."
 OBSERVE_SCOPES = ("base", "menu_snapshot", "app_root_snapshot")
@@ -1701,7 +1703,7 @@ def _linkedin_unit1_prepare_operate(
         completed = subprocess.run(
             command,
             capture_output=True,
-            timeout=90,
+            timeout=_LINKEDIN_UNIT1_PREPARE_PRIMITIVE_TIMEOUT_SECS,
             env=dict(os.environ),
         )
     except subprocess.TimeoutExpired as exc:
