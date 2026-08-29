@@ -27,6 +27,7 @@ from revenue_ui_contract import (
     parse_semantic_input,
     semantic_input,
     semantic_receipt,
+    validate_operation_card,
 )
 
 
@@ -1671,10 +1672,43 @@ def _linkedin_unit1_prepare_operate(
         raise UiDriveError(f"LinkedIn Unit 1 preparation recompile failed: {exc}") from exc
     if fresh_card.get("schema") != PREPARATION_ACTION_CARD_SCHEMA:
         raise UiDriveError("LinkedIn Unit 1 preparation is no longer one action card")
-    if fresh_card != stored_card:
+    stored_card_authority = {
+        key: item
+        for key, item in stored_card.items()
+        if key != "snapshot_revision"
+    }
+    fresh_card_authority = {
+        key: item
+        for key, item in fresh_card.items()
+        if key != "snapshot_revision"
+    }
+    if fresh_card_authority != stored_card_authority:
         raise UiDriveError("LinkedIn Unit 1 preparation card changed before operation")
     fresh_runtime_card = _linkedin_unit1_runtime_card(deps, snapshot, fresh_card)
-    if fresh_runtime_card != stored_runtime_card:
+    try:
+        validate_operation_card(stored_runtime_card)
+        stored_descriptor = _decode_ref(str(stored_runtime_card.get("ref") or ""))
+        fresh_descriptor = _decode_ref(str(fresh_runtime_card.get("ref") or ""))
+    except (TypeError, ValueError, UiDriveError) as exc:
+        raise UiDriveError(
+            "LinkedIn Unit 1 stored runtime operation is invalid"
+        ) from exc
+    stored_descriptor.pop("revision")
+    fresh_descriptor.pop("revision")
+    stored_runtime_authority = {
+        key: item
+        for key, item in stored_runtime_card.items()
+        if key not in {"card_sha256", "ref"}
+    }
+    fresh_runtime_authority = {
+        key: item
+        for key, item in fresh_runtime_card.items()
+        if key not in {"card_sha256", "ref"}
+    }
+    if (
+        fresh_runtime_authority != stored_runtime_authority
+        or fresh_descriptor != stored_descriptor
+    ):
         raise UiDriveError("LinkedIn Unit 1 preparation runtime operation changed before operation")
     method = str(fresh_card.get("method") or "")
     subcommand = {
