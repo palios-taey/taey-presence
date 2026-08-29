@@ -445,6 +445,7 @@ def main() -> int:
         "allowed_now": None,
         "target_state_digest": None,
         "exact": False,
+        "firefox_cache_invalidation": "recursive_success",
     }
     timeout_barrier = {
         "result": "TIMEOUT",
@@ -469,6 +470,19 @@ def main() -> int:
             "TIMEOUT",
         ),
         "a malformed timeout URL is accepted",
+    )
+    require(
+        not initial_barrier_exact(
+            {
+                **timeout_barrier,
+                "samples": [{
+                    **timeout_sample,
+                    "firefox_cache_invalidation": "failed",
+                }],
+            },
+            "TIMEOUT",
+        ),
+        "a failed initial Firefox invalidation is accepted",
     )
     require(
         'sequence["published"] = published' in handler_source
