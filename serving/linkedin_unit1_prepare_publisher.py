@@ -14,6 +14,7 @@ NOTIFICATION_INVENTORY_SCHEMA = "linkedin_notification_inventory_v1"
 NOTIFICATION_DECISION_INVENTORY_SCHEMA = (
     "linkedin_notification_decision_inventory_v1"
 )
+PRIVATE_SELECTION_DECISION_SCHEMA = "linkedin_unit1_private_selection_decision_v1"
 NOTIFICATION_EXCLUSIONS_SCHEMA = "linkedin_notification_inventory_exclusions_v1"
 SELECTED_SOURCE_SCHEMA = "linkedin_selected_post_thread_source_v1"
 EXCLUSION_REASON_CODES = frozenset({
@@ -175,6 +176,79 @@ def build_selection(
     }
     selection["selection_sha256"] = canonical_sha256(selection)
     return selection, dict(inventory)
+
+
+def selection_decision_input(selection_input: Mapping[str, Any]) -> dict[str, Any]:
+    inventory = selection_input.get("notification_inventory")
+    decision = selection_input.get("decision_input")
+    if (
+        set(selection_input)
+        != {
+            "schema", "policy_sha256", "transaction_sha256",
+            "notification_inventory", "decision_input", "continuation_available",
+        }
+        or selection_input.get("schema")
+        != "linkedin_unit1_private_selection_input_v1"
+        or not isinstance(inventory, Mapping)
+        or not isinstance(inventory.get("rows"), list)
+        or not isinstance(inventory.get("actionable_links"), list)
+        or not isinstance(decision, Mapping)
+    ):
+        raise LinkedInUnit1PreparePublisherError(
+            "private selection decision input is invalid"
+        )
+    expected_candidates: list[dict[str, Any]] = []
+    for link in inventory["actionable_links"]:
+        ordinal = link.get("ordinal") if isinstance(link, Mapping) else None
+        if (
+            isinstance(ordinal, bool)
+            or not isinstance(ordinal, int)
+            or not 1 <= ordinal <= len(inventory["rows"])
+        ):
+            raise LinkedInUnit1PreparePublisherError(
+                "private selection decision ordinal is invalid"
+            )
+        row = inventory["rows"][ordinal - 1]
+        if (
+            not isinstance(row, Mapping)
+            or row.get("actionable") is not True
+            or row.get("activity") != link.get("activity")
+            or row.get("ordinal") != ordinal
+            or row.get("age_seconds") != link.get("age_seconds")
+            or not isinstance(row.get("notification_text"), str)
+            or hashlib.sha256(row["notification_text"].encode()).hexdigest()
+            != row.get("notification_text_sha256")
+        ):
+            raise LinkedInUnit1PreparePublisherError(
+                "private selection decision candidate binding is invalid"
+            )
+        expected_candidates.append({
+            "activity": link["activity"],
+            "notification_text": row["notification_text"],
+            "notification_text_sha256": row["notification_text_sha256"],
+            "age_seconds": row["age_seconds"],
+            "age_token": row["age_token"],
+            "ordinal": ordinal,
+            "element": link["element"],
+            "element_sha256": link["element_sha256"],
+            "uri": link["uri"],
+            "uri_sha256": link["uri_sha256"],
+        })
+    expected = {
+        "schema": PRIVATE_SELECTION_DECISION_SCHEMA,
+        "policy_sha256": selection_input["policy_sha256"],
+        "transaction_sha256": selection_input["transaction_sha256"],
+        "continuation_available": selection_input["continuation_available"],
+        "decision_inventory_sha256": inventory["decision_inventory_sha256"],
+        "inventory_sha256": inventory["inventory_sha256"],
+        "mounted_article_count": inventory["mounted_article_count"],
+        "actionable_candidates": expected_candidates,
+    }
+    if dict(decision) != expected:
+        raise LinkedInUnit1PreparePublisherError(
+            "private selection decision projection does not bind full inventory"
+        )
+    return expected
 
 
 def build_exclusions(
