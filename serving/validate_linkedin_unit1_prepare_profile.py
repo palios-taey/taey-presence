@@ -273,10 +273,11 @@ def main() -> int:
         assignment(drive, "_LINKEDIN_UNIT1_PREPARE_PRIMITIVE_TIMEOUT_SECS")
     )
     require(
-        primitive_timeout == 180
+        primitive_timeout == 240
+        and transport_timeout - primitive_timeout == 60
         and "timeout=_LINKEDIN_UNIT1_PREPARE_PRIMITIVE_TIMEOUT_SECS"
         in operate_source,
-        "preparation primitive timeout no longer covers its bounded observation",
+        "preparation timeout stack lost its exact bounded margin",
     )
     require(
         '"kind": "phase_receipt"' in compile_source
