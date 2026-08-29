@@ -230,7 +230,20 @@ def main() -> int:
         for row in tools
         if row.get("function", {}).get("name") == "linkedin_unit1_prepare"
     )
-    variants = tool["parameters"].get("oneOf")
+    parameters = tool["parameters"]
+    properties = parameters.get("properties", {})
+    require(
+        parameters.get("type") == "object"
+        and parameters.get("additionalProperties") is False
+        and parameters.get("required") == ["display", "action"],
+        "preparation root grammar is not a closed typed object",
+    )
+    require(
+        properties.get("action", {}).get("enum")
+        == ["observe", "operate", "select", "exclude", "draft"],
+        "preparation root action enum drifted",
+    )
+    variants = parameters.get("oneOf")
     require(
         isinstance(variants, list) and len(variants) == 5,
         "preparation action grammar is not five exact variants",
@@ -245,38 +258,51 @@ def main() -> int:
         "preparation action grammar drifted",
     )
     expected_fields = {
-        "observe": {"display", "action"},
-        "operate": {"display", "action", "card_sha256"},
+        "observe": set(),
+        "operate": {"card_sha256"},
         "select": {
-            "display", "action", "selected_activity", "target_passed",
-            "dedup_passed", "author_cooloff_passed",
+            "selected_activity", "target_passed", "dedup_passed",
+            "author_cooloff_passed",
         },
-        "exclude": {"display", "action", "excluded_candidates"},
-        "draft": {"display", "action", "text"},
+        "exclude": {"excluded_candidates"},
+        "draft": {"text"},
+    }
+    expected_max_properties = {
+        "observe": 2,
+        "operate": 3,
+        "select": 6,
+        "exclude": 3,
+        "draft": 3,
     }
     require(
         all(
-            variant.get("type") == "object"
-            and variant.get("additionalProperties") is False
-            and set(variant.get("required", [])) == expected_fields[action]
-            and set(variant.get("properties", {})) == expected_fields[action]
+            set(variant.get("required", [])) == expected_fields[action]
+            and variant.get("maxProperties") == expected_max_properties[action]
+            and variant.get("properties", {}).get("action") == {"const": action}
             for action, variant in variants_by_action.items()
         ),
         "preparation action variants do not forbid cross-action fields",
     )
+    require(
+        all(
+            properties[field].get("type") == "boolean"
+            for field in (
+                "target_passed", "dedup_passed", "author_cooloff_passed",
+            )
+        ),
+        "select verdict types are not visible at the root tool boundary",
+    )
     select_properties = variants_by_action["select"]["properties"]
     require(
         all(
-            select_properties[field] == {"type": "boolean", "const": True}
+            select_properties[field] == {"const": True}
             for field in (
                 "target_passed", "dedup_passed", "author_cooloff_passed",
             )
         ),
         "select grammar permits a false qualifying verdict",
     )
-    exclusion_schema = variants_by_action["exclude"]["properties"][
-        "excluded_candidates"
-    ]
+    exclusion_schema = properties["excluded_candidates"]
     require(
         exclusion_schema["type"] == "array"
         and exclusion_schema["items"]["additionalProperties"] is False
@@ -290,10 +316,7 @@ def main() -> int:
     )
     for forbidden in ("selector", "coordinate", "url", "path", "element"):
         require(
-            all(
-                forbidden not in variant["properties"]
-                for variant in variants
-            ),
+            forbidden not in properties,
             f"model-facing preparation tool exposes {forbidden}",
         )
     lowered_prompt = prompt.lower()
