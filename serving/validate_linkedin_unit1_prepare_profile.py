@@ -199,6 +199,13 @@ def main() -> int:
     )
     profile = ast.literal_eval(assignment(proxy, "_LINKEDIN_UNIT1_PREPARE_TOOL_PROFILE"))
     require(profile == "linkedin-unit1-prepare", "preparation profile name drifted")
+    transport_timeout = ast.literal_eval(
+        assignment(proxy, "_LINKEDIN_UNIT1_PREPARE_TRANSPORT_TIMEOUT_SECS")
+    )
+    require(
+        transport_timeout == 300,
+        "preparation transport timeout no longer covers the bounded Hands barrier",
+    )
     profile_map = assignment(proxy, "_TOOL_PROFILE_ALLOWED")
     require(isinstance(profile_map, ast.Dict), "profile map is not exact")
     matches = [
@@ -303,6 +310,11 @@ def main() -> int:
             f"preparation profile can execute forbidden {forbidden}",
         )
     handler_source = source_function(proxy, "_do_linkedin_unit1_prepare")
+    require(
+        "timeout=_LINKEDIN_UNIT1_PREPARE_TRANSPORT_TIMEOUT_SECS"
+        in handler_source,
+        "preparation transport does not consume its exact outer timeout",
+    )
     for required in (
         "def initial_barrier_exact(",
         'result["kind"] == "initial_observation_timeout"',
