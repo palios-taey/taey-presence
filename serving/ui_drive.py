@@ -89,7 +89,7 @@ if LOCK_TTL_DEFAULT < _MONITOR_TTL_DEFAULT:
         "ownership survives the no-poll consultation wait"
     )
 
-_LINKEDIN_UNIT1_PREPARE_PRIMITIVE_TIMEOUT_SECS = 180
+_LINKEDIN_UNIT1_PREPARE_PRIMITIVE_TIMEOUT_SECS = 240
 
 
 REF_PREFIX = "atspi3."
