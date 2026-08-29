@@ -6873,6 +6873,7 @@ def _do_linkedin_unit1_prepare(arguments: dict) -> str:
             "allowed_now",
             "target_state_digest",
             "exact",
+            "firefox_cache_invalidation",
         }
         if (
             not isinstance(barrier, dict)
@@ -6918,6 +6919,8 @@ def _do_linkedin_unit1_prepare(arguments: dict) -> str:
                     is None
                 )
                 or not isinstance(sample.get("exact"), bool)
+                or sample.get("firefox_cache_invalidation")
+                != "recursive_success"
             ):
                 return False
         if expected_result == "TIMEOUT":
