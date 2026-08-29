@@ -43,6 +43,7 @@ from linkedin_unit1_prepare_publisher import (
     build_selection,
     canonical_sha256 as linkedin_prepare_sha256,
     preparation_transaction_sha256,
+    selection_decision_input,
     validate_bootstrap,
 )
 
@@ -7326,6 +7327,12 @@ def _do_linkedin_unit1_prepare(arguments: dict) -> str:
                         "exclusions_sha256"
                     ],
                 })
+            try:
+                model_input = selection_decision_input(selection_input)
+            except LinkedInUnit1PreparePublisherError as exc:
+                return terminal_refusal(str(exc))
+        else:
+            model_input = readiness_result["input"]
         sequence["readiness"] = {
             "state": state,
             "input": readiness_result["input"],
@@ -7349,7 +7356,7 @@ def _do_linkedin_unit1_prepare(arguments: dict) -> str:
             "action": action,
             "preparation_sequence": {
                 "state": state,
-                "input": readiness_result["input"],
+                "input": model_input,
                 "decision_context": decision_context,
                 "result_sha256": readiness_digest,
                 "next_mutation_authorized": False,

@@ -423,6 +423,13 @@ def main() -> int:
         "accepted continuation does not clear its exact private exclusions",
     )
     require(
+        "model_input = selection_decision_input(selection_input)"
+        in handler_source
+        and '"input": readiness_result["input"]' in handler_source
+        and '"input": model_input' in handler_source,
+        "full server readiness and slim model decision input are not separated",
+    )
+    require(
         'def continue_with_observe(' in handler_source
         and 'def refuse_with_evidence(' in handler_source
         and '"validated_transitions"' in handler_source
@@ -601,6 +608,54 @@ def main() -> int:
             "notification_inventory": inventory(),
             "continuation_available": True,
         }
+        artifact = selection_input["notification_inventory"]
+        row = artifact["rows"][0]
+        link = artifact["actionable_links"][0]
+        selection_input["decision_input"] = {
+            "schema": publisher.PRIVATE_SELECTION_DECISION_SCHEMA,
+            "policy_sha256": selection_input["policy_sha256"],
+            "transaction_sha256": selection_input["transaction_sha256"],
+            "continuation_available": True,
+            "decision_inventory_sha256": artifact[
+                "decision_inventory_sha256"
+            ],
+            "inventory_sha256": artifact["inventory_sha256"],
+            "mounted_article_count": artifact["mounted_article_count"],
+            "actionable_candidates": [{
+                "activity": link["activity"],
+                "notification_text": row["notification_text"],
+                "notification_text_sha256": row[
+                    "notification_text_sha256"
+                ],
+                "age_seconds": row["age_seconds"],
+                "age_token": row["age_token"],
+                "ordinal": link["ordinal"],
+                "element": link["element"],
+                "element_sha256": link["element_sha256"],
+                "uri": link["uri"],
+                "uri_sha256": link["uri_sha256"],
+            }],
+        }
+        require(
+            publisher.selection_decision_input(selection_input)
+            == selection_input["decision_input"],
+            "exact actionable decision input did not bind the full inventory",
+        )
+        require(
+            "notification_inventory" not in selection_input["decision_input"]
+            and "rows" not in selection_input["decision_input"]
+            and len(selection_input["decision_input"]["actionable_candidates"])
+            == len(artifact["actionable_links"]),
+            "model decision input retained non-decision inventory rows",
+        )
+        tampered_decision = json.loads(json.dumps(selection_input))
+        tampered_decision["decision_input"]["actionable_candidates"][0][
+            "notification_text"
+        ] += " changed"
+        expect_refusal(
+            lambda: publisher.selection_decision_input(tampered_decision),
+            "changed model decision text retained full-inventory authority",
+        )
         selection_arguments = {
             "display": ":18",
             "action": "select",

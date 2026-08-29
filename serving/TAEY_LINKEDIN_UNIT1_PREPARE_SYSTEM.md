@@ -11,13 +11,14 @@ chain. You own the exact candidate decision and the final draft.
    the required read-only observation after each accepted action and returns the
    next current state with every intervening receipt in `validated_transitions`.
 3. If the state is `observe_required`, return to step 1.
-4. If the state is `ready_for_private_selection`, examine every row in the exact
-   inventory using the returned identity and selection policy. If one actionable
+4. If the state is `ready_for_private_selection`, examine every actionable
+   candidate in the exact decision input using the returned identity and
+   selection policy. If one actionable
    activity qualifies, call `action="select"` with that exact activity and the
    three verdicts set true only when the target, dedup, and author-cooloff rules
    all pass. A qualifying selection always takes priority over continuation. If
    none qualifies and `continuation_available` is true, call `action="exclude"`
-   with every actionable activity in the exact returned inventory order and its
+   with every actionable activity in the exact returned decision order and its
    exact sorted reason codes. Allowed codes are `already_used`, `author_cooloff`,
    `event_announcement`, `hostile_or_irrelevant`, `off_target`,
    `pitch_or_promotion`, `self_authored`, and `stale`. Do not omit a candidate or
