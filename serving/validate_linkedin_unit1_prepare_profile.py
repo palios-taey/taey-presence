@@ -374,14 +374,14 @@ def main() -> int:
     require(
         'result["kind"] == "phase_receipt"' in handler_source
         and 'sequence["receipts"].append(receipt)' in handler_source
-        and '"next_mutation_authorized": False' in handler_source
-        and '"allowed_next": {"action": "observe"}' in handler_source,
-        "route proof does not preserve the receipt and fresh-observe boundary",
+        and 'return continue_with_observe({' in handler_source
+        and '"kind": "phase_receipt"' in handler_source,
+        "route proof does not preserve the receipt and chained-observe boundary",
     )
     require(
         "frozen_exclusions = build_exclusions(" in handler_source
         and '"excluded_candidates": []' in handler_source
-        and '"mechanical_empty_inventory": True' in handler_source
+        and '"kind": "mechanical_empty_inventory"' in handler_source
         and 'not actionable_links' in handler_source
         and '{"action": "select", "alternative_action": "exclude"}'
         in handler_source
@@ -389,6 +389,19 @@ def main() -> int:
         and 'sequence.pop("selection", None)' in handler_source
         and 'sequence.pop("inventory", None)' in handler_source,
         "accepted continuation does not clear its exact private exclusions",
+    )
+    require(
+        'def continue_with_observe(' in handler_source
+        and 'def refuse_with_evidence(' in handler_source
+        and '"validated_transitions"' in handler_source
+        and 'invalid success state' in handler_source
+        and 'invalid terminal state' in handler_source
+        and 'set(first_failure)' in handler_source
+        and 'payload.get("error") != first_failure["reason"]' in handler_source
+        and '"kind": "private_selection_frozen"' in handler_source
+        and '"kind": "private_exclusions_frozen"' in handler_source
+        and '"kind": "operated_step"' in handler_source,
+        "deterministic preparation transitions still require model-only observe rounds",
     )
     transport_source = source_function(
         proxy, "_linkedin_unit1_prepare_transport_action"

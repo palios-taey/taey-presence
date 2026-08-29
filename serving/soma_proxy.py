@@ -6639,12 +6639,16 @@ def _do_linkedin_unit1_prepare(arguments: dict) -> str:
     process_generation = str(context.get("process_generation") or "")
     tool_round = context.get("tool_round")
 
-    def terminal_refusal(message: str) -> str:
+    def terminal_refusal(
+        message: str,
+        *,
+        failure_action: str | None = None,
+    ) -> str:
         terminal = sequence.get("terminal") if isinstance(sequence, dict) else None
         if not isinstance(terminal, dict):
             terminal = {
                 "display": display,
-                "action": action,
+                "action": failure_action or action,
                 "tool_round": tool_round,
                 "reason": message,
             }
@@ -6663,13 +6667,161 @@ def _do_linkedin_unit1_prepare(arguments: dict) -> str:
         return _json.dumps({
             "ok": False,
             "display": display,
-            "action": action,
-            "error": message,
+            "action": terminal["action"],
+            "error": terminal["reason"],
             "preparation_sequence": {
                 "state": "terminal_refusal",
                 "first_failure": terminal,
             },
         })
+
+    def continue_with_observe(evidence: dict[str, object]) -> str:
+        def refuse_with_evidence(
+            message: str,
+            prior: list[dict[str, object]] | None = None,
+        ) -> str:
+            refused = _json.loads(terminal_refusal(
+                message,
+                failure_action="observe",
+            ))
+            refusal_sequence = refused["preparation_sequence"]
+            refusal_sequence["validated_transitions"] = [
+                dict(evidence),
+                *(prior or []),
+            ]
+            return _json.dumps(refused)
+
+        chained = _do_linkedin_unit1_prepare({
+            "display": display,
+            "action": "observe",
+        })
+        try:
+            payload = _json.loads(chained)
+        except ValueError:
+            return refuse_with_evidence(
+                "LinkedIn Unit 1 chained observation returned invalid JSON"
+            )
+        if not isinstance(payload, dict):
+            return refuse_with_evidence(
+                "LinkedIn Unit 1 chained observation returned invalid payload"
+            )
+        preparation_sequence = payload.get("preparation_sequence")
+        if not isinstance(preparation_sequence, dict):
+            return refuse_with_evidence(
+                "LinkedIn Unit 1 chained observation returned no exact state"
+            )
+        prior = preparation_sequence.get("validated_transitions", [])
+        if not isinstance(prior, list) or not all(
+            isinstance(item, dict) for item in prior
+        ):
+            return refuse_with_evidence(
+                "LinkedIn Unit 1 chained observation evidence is invalid"
+            )
+        if payload.get("ok") is True:
+            state = preparation_sequence.get("state")
+            state_keys = set(preparation_sequence) - {"validated_transitions"}
+            success_exact = (
+                set(payload) == {"ok", "display", "action", "preparation_sequence"}
+                and payload.get("display") == display
+                and payload.get("action") == "observe"
+                and (
+                    (
+                        state == "ready_for_one_action"
+                        and state_keys
+                        == {"state", "card_sha256", "phase", "allowed_next"}
+                        and re.fullmatch(
+                            r"[0-9a-f]{64}",
+                            str(preparation_sequence.get("card_sha256") or ""),
+                        )
+                        is not None
+                        and isinstance(preparation_sequence.get("phase"), str)
+                        and preparation_sequence.get("allowed_next")
+                        == {
+                            "action": "operate",
+                            "card_sha256": preparation_sequence["card_sha256"],
+                        }
+                    )
+                    or (
+                        state
+                        in {
+                            "ready_for_private_selection",
+                            "ready_for_private_draft",
+                        }
+                        and state_keys
+                        == {
+                            "state",
+                            "input",
+                            "decision_context",
+                            "result_sha256",
+                            "next_mutation_authorized",
+                            "allowed_next",
+                        }
+                        and isinstance(preparation_sequence.get("input"), dict)
+                        and isinstance(
+                            preparation_sequence.get("decision_context"), dict
+                        )
+                        and re.fullmatch(
+                            r"[0-9a-f]{64}",
+                            str(preparation_sequence.get("result_sha256") or ""),
+                        )
+                        is not None
+                        and preparation_sequence.get("next_mutation_authorized")
+                        is False
+                        and (
+                            (
+                                state == "ready_for_private_selection"
+                                and preparation_sequence.get("allowed_next")
+                                in (
+                                    {"action": "select"},
+                                    {
+                                        "action": "select",
+                                        "alternative_action": "exclude",
+                                    },
+                                )
+                            )
+                            or (
+                                state == "ready_for_private_draft"
+                                and preparation_sequence.get("allowed_next")
+                                == {"action": "draft"}
+                            )
+                        )
+                    )
+                )
+            )
+            if not success_exact:
+                return refuse_with_evidence(
+                    "LinkedIn Unit 1 chained observation returned invalid success state",
+                    prior,
+                )
+        else:
+            first_failure = preparation_sequence.get("first_failure")
+            if (
+                set(payload)
+                != {"ok", "display", "action", "error", "preparation_sequence"}
+                or payload.get("ok") is not False
+                or payload.get("display") != display
+                or payload.get("action") != "observe"
+                or not isinstance(payload.get("error"), str)
+                or not payload["error"]
+                or set(preparation_sequence) - {"validated_transitions"}
+                != {"state", "first_failure"}
+                or preparation_sequence.get("state") != "terminal_refusal"
+                or not isinstance(first_failure, dict)
+                or set(first_failure)
+                != {"display", "action", "tool_round", "reason"}
+                or first_failure.get("display") != display
+                or first_failure.get("action") != "observe"
+                or first_failure.get("tool_round") != tool_round
+                or not isinstance(first_failure.get("reason"), str)
+                or not first_failure["reason"]
+                or payload.get("error") != first_failure["reason"]
+            ):
+                return refuse_with_evidence(
+                    "LinkedIn Unit 1 chained observation returned invalid terminal state",
+                    prior,
+                )
+        preparation_sequence["validated_transitions"] = [dict(evidence), *prior]
+        return _json.dumps(payload)
 
     def initial_barrier_exact(barrier: object, expected_result: str) -> bool:
         barrier_keys = {
@@ -6861,16 +7013,9 @@ def _do_linkedin_unit1_prepare(arguments: dict) -> str:
             sequence["selection"] = frozen_selection
             sequence["inventory"] = inventory
             sequence.pop("readiness", None)
-            return _json.dumps({
-                "ok": True,
-                "display": display,
-                "action": action,
-                "preparation_sequence": {
-                    "state": "observe_required",
-                    "selection_sha256": frozen_selection["selection_sha256"],
-                    "next_mutation_authorized": False,
-                    "allowed_next": {"action": "observe"},
-                },
+            return continue_with_observe({
+                "kind": "private_selection_frozen",
+                "selection_sha256": frozen_selection["selection_sha256"],
             })
         if action == "exclude":
             try:
@@ -6884,18 +7029,9 @@ def _do_linkedin_unit1_prepare(arguments: dict) -> str:
             sequence["selection"] = frozen_exclusions
             sequence.pop("inventory", None)
             sequence.pop("readiness", None)
-            return _json.dumps({
-                "ok": True,
-                "display": display,
-                "action": action,
-                "preparation_sequence": {
-                    "state": "observe_required",
-                    "exclusions_sha256": frozen_exclusions[
-                        "exclusions_sha256"
-                    ],
-                    "next_mutation_authorized": False,
-                    "allowed_next": {"action": "observe"},
-                },
+            return continue_with_observe({
+                "kind": "private_exclusions_frozen",
+                "exclusions_sha256": frozen_exclusions["exclusions_sha256"],
             })
         if not isinstance(selection, dict) or not isinstance(
             sequence.get("inventory"), dict
@@ -7126,17 +7262,10 @@ def _do_linkedin_unit1_prepare(arguments: dict) -> str:
             except RuntimeError as exc:
                 return terminal_refusal(str(exc))
             sequence["receipts"].append(receipt)
-            return _json.dumps({
-                "ok": True,
-                "display": display,
-                "action": action,
-                "preparation_sequence": {
-                    "state": "observe_required",
-                    "phase": receipt["phase"],
-                    "receipt_sha256": receipt["receipt_sha256"],
-                    "next_mutation_authorized": False,
-                    "allowed_next": {"action": "observe"},
-                },
+            return continue_with_observe({
+                "kind": "phase_receipt",
+                "phase": receipt["phase"],
+                "receipt_sha256": receipt["receipt_sha256"],
             })
         if set(result) != {"schema", "kind", "result"} or not isinstance(
             result.get("result"), dict
@@ -7190,19 +7319,11 @@ def _do_linkedin_unit1_prepare(arguments: dict) -> str:
                 sequence["selection"] = frozen_exclusions
                 sequence.pop("inventory", None)
                 sequence.pop("readiness", None)
-                return _json.dumps({
-                    "ok": True,
-                    "display": display,
-                    "action": action,
-                    "preparation_sequence": {
-                        "state": "observe_required",
-                        "exclusions_sha256": frozen_exclusions[
-                            "exclusions_sha256"
-                        ],
-                        "mechanical_empty_inventory": True,
-                        "next_mutation_authorized": False,
-                        "allowed_next": {"action": "observe"},
-                    },
+                return continue_with_observe({
+                    "kind": "mechanical_empty_inventory",
+                    "exclusions_sha256": frozen_exclusions[
+                        "exclusions_sha256"
+                    ],
                 })
         sequence["readiness"] = {
             "state": state,
@@ -7276,18 +7397,11 @@ def _do_linkedin_unit1_prepare(arguments: dict) -> str:
         sequence.pop("selection", None)
         sequence.pop("inventory", None)
     sequence["receipts"].append(receipt)
-    return _json.dumps({
-        "ok": True,
-        "display": display,
-        "action": action,
-        "preparation_sequence": {
-            "state": "observe_required",
-            "phase": result["phase"],
-            "receipt_sha256": receipt.get("receipt_sha256"),
-            "operation_evidence_sha256": result["operation_evidence_sha256"],
-            "next_mutation_authorized": False,
-            "allowed_next": {"action": "observe"},
-        },
+    return continue_with_observe({
+        "kind": "operated_step",
+        "phase": result["phase"],
+        "receipt_sha256": receipt.get("receipt_sha256"),
+        "operation_evidence_sha256": result["operation_evidence_sha256"],
     })
 
 
