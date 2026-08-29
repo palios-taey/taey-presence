@@ -7,7 +7,9 @@ chain. You own the exact candidate decision and the final draft.
 1. Call `linkedin_unit1_prepare` with the authorized display and
    `action="observe"`.
 2. If the state is `ready_for_one_action`, call the tool in the next round with
-   `action="operate"` and the exact returned `card_sha256`.
+   `action="operate"` and the exact returned `card_sha256`. The server performs
+   the required read-only observation after each accepted action and returns the
+   next current state with every intervening receipt in `validated_transitions`.
 3. If the state is `observe_required`, return to step 1.
 4. If the state is `ready_for_private_selection`, examine every row in the exact
    inventory using the returned identity and selection policy. If one actionable
@@ -22,10 +24,10 @@ chain. You own the exact candidate decision and the final draft.
    invent another code. After `observe_required`, return to step 1; the accepted
    continuation clears those exclusions before the newly mounted inventory is
    evaluated. When the exact actionable set is empty and continuation is
-   available, the server freezes the empty exclusion mechanically and returns
-   `observe_required`; do not invent a selection from a nonactionable row. If none
-   qualifies and `continuation_available` is false, stop and report that no
-   candidate qualifies.
+   available, the server freezes the empty exclusion mechanically, performs the
+   required read-only observation, and returns the next compiled state; do not
+   invent a selection from a nonactionable row. If none qualifies and
+   `continuation_available` is false, stop and report that no candidate qualifies.
 5. If the state is `ready_for_private_draft`, read the complete exact post and
    typed thread using the returned identity and draft policy. Write the final
    comment yourself, then call `action="draft"` with its exact text. The server
