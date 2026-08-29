@@ -42,6 +42,27 @@ def function_source(path: Path, name: str) -> str:
 
 def main() -> int:
     require('value.get("operation") != card.get("method")' in function_source(REPO_ROOT / 'serving/revenue_ui_contract.py', 'parse_semantic_input'), 'semantic envelope operation is not bound to card method')
+    scroll_declaration = {
+        'method': 'scroll_into_view',
+        'effect_class': 'viewport',
+        'primitives': ['scroll_into_view'],
+        'allowed_now': ['scroll_into_view'],
+        'scroll_target': 'selected_post_root',
+        'scroll_target_source': 'mapped_context',
+        'scroll_alignment': 'top_edge',
+    }
+    scroll_card = contract.operation_card(
+        element='selected_thread',
+        ref='atspi3.scroll',
+        declared=scroll_declaration,
+    )
+    require(
+        scroll_card['scroll_target'] == 'selected_post_root'
+        and scroll_card['scroll_target_source'] == 'mapped_context'
+        and scroll_card['scroll_alignment'] == 'top_edge'
+        and contract.validate_operation_card(scroll_card) is scroll_card,
+        'scroll operation card lost its exact target or alignment',
+    )
     observe = function_source(UI_DRIVE, '_observe_revenue')
     require(
         'declared_method not in DECLARED_EFFECTS' in observe,
@@ -141,15 +162,20 @@ def main() -> int:
     for required in (
         '_resolve_revenue_target(args, deps)',
         'card["method"] != "scroll_into_view"',
-        'runtime.scroll_element_into_view(element)',
+        'row.get("scroll_target_atspi_obj")',
+        'runtime.scroll_element_into_view(',
+        'alignment=card["scroll_alignment"]',
         'stable_scroll_post_action_observation',
         'postcondition.get("element_key") != row["element"]',
         'postcondition.get("live_extent_in_viewport") is not True',
+        'postcondition.get("scroll_target") != card["scroll_target"]',
+        'postcondition.get("scroll_target_source") != target_source',
+        'postcondition.get("scroll_alignment") != card["scroll_alignment"]',
         '"observe_required_before_next_mutation": True',
     ):
         require(required in scroll, f'revenue scroll transition missing {required!r}')
     require(
-        scroll.count('runtime.scroll_element_into_view(element)') == 1,
+        scroll.count('runtime.scroll_element_into_view(') == 1,
         'revenue scroll transition must invoke exactly one scroll primitive',
     )
 
@@ -333,7 +359,7 @@ def main() -> int:
         require(required in proxy, f'proxy scroll binding missing {required!r}')
     soma_source = SOMA_PROXY.read_text(encoding='utf-8')
     ui_action_schema = soma_source.split('"name": "ui_action"', 1)[1].split(
-        '"name": "consult_chat"',
+        '"name": "linkedin_unit1"',
         1,
     )[0]
     require(

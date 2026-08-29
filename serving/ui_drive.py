@@ -2362,6 +2362,16 @@ def _revenue_scroll_into_view(
             f"{row['element']} is not currently authorized for one viewport scroll"
         )
 
+    target_source = card["scroll_target_source"]
+    target_object = (
+        row.get("atspi_obj")
+        if target_source == "self"
+        else row.get("scroll_target_atspi_obj")
+    )
+    if target_object is None:
+        raise UiDriveError(
+            f"{row['element']} has no exact {card['scroll_target']} scroll target"
+        )
     runtime = ConsultationRuntime(deps.platform)
     element = ElementRef(
         key=str(row["element"]),
@@ -2372,10 +2382,17 @@ def _revenue_scroll_into_view(
         states=list(row.get("states") or []),
         text=row.get("text"),
         description=row.get("description"),
-        atspi_obj=row.get("atspi_obj"),
-        raw={},
+        atspi_obj=target_object,
+        raw={
+            "scroll_target": card["scroll_target"],
+            "scroll_target_source": target_source,
+            "scroll_alignment": card["scroll_alignment"],
+        },
     )
-    if not runtime.scroll_element_into_view(element):
+    if not runtime.scroll_element_into_view(
+        element,
+        alignment=card["scroll_alignment"],
+    ):
         raise UiDriveError(
             f"{row['element']} scroll_into_view primitive returned false"
         )
@@ -2417,6 +2434,9 @@ def _revenue_scroll_into_view(
         or postcondition.get("activity_exact") is not True
         or postcondition.get("body_sha256_exact") is not True
         or postcondition.get("live_extent_in_viewport") is not True
+        or postcondition.get("scroll_target") != card["scroll_target"]
+        or postcondition.get("scroll_target_source") != target_source
+        or postcondition.get("scroll_alignment") != card["scroll_alignment"]
     ):
         raise UiDriveError(
             f"{deps.platform} scroll observation barrier did not prove the "
@@ -2427,6 +2447,9 @@ def _revenue_scroll_into_view(
         "performed_primitive": "scroll_into_view",
         "performed_operation": "scroll_into_view",
         "effect_class": "viewport",
+        "scroll_target": card["scroll_target"],
+        "scroll_target_source": target_source,
+        "scroll_alignment": card["scroll_alignment"],
         "element": {
             "category": "mapped",
             "element": row["element"],
