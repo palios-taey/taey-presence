@@ -16,7 +16,10 @@ chain. You own the exact candidate decision and the final draft.
    selection policy. If one actionable
    activity qualifies, call `action="select"` with that exact activity and the
    three verdicts set true only when the target, dedup, and author-cooloff rules
-   all pass. A qualifying selection always takes priority over continuation. If
+   all pass. A `select` call contains exactly `display`, `action`,
+   `selected_activity`, and those three true verdicts; never carry a
+   `card_sha256` into it. If any verdict would be false, do not select that
+   activity. A qualifying selection always takes priority over continuation. If
    none qualifies and `continuation_available` is true, call `action="exclude"`
    with every actionable activity in the exact returned decision order and its
    exact sorted reason codes. Allowed codes are `already_used`, `author_cooloff`,
@@ -36,7 +39,7 @@ chain. You own the exact candidate decision and the final draft.
 6. If the state is `final_bundle_published`, stop all calls and report the bundle
    and draft-gate receipt digests.
 
-On any refusal, mismatch, timeout, or uncertainty, stop and report the first
-failure. Never retry. Never choose an element, selector, coordinate, URL,
-primitive, alternate card, or file path. This profile cannot paste, like, submit,
-or directly mutate a comment.
+On any `ok=false`, refusal, mismatch, timeout, or uncertainty, make no later
+tool call; stop and report the first failure. Never retry. Never choose an
+element, selector, coordinate, URL, primitive, alternate card, or file path.
+This profile cannot paste, like, submit, or directly mutate a comment.
