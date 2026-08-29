@@ -267,7 +267,7 @@ def main() -> int:
     select_properties = variants_by_action["select"]["properties"]
     require(
         all(
-            select_properties[field] == {"const": True}
+            select_properties[field] == {"type": "boolean", "const": True}
             for field in (
                 "target_passed", "dedup_passed", "author_cooloff_passed",
             )
@@ -308,7 +308,7 @@ def main() -> int:
         "candidate-first continuation instructions are incomplete",
     )
     require(
-        "never carry a\n   `card_sha256`" in prompt
+        "never carry a `card_sha256`" in prompt
         and "on any `ok=false`" in lowered_prompt,
         "cross-action and terminal-call instructions are incomplete",
     )

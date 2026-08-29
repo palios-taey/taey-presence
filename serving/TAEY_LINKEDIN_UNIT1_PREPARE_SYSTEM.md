@@ -17,9 +17,10 @@ chain. You own the exact candidate decision and the final draft.
    activity qualifies, call `action="select"` with that exact activity and the
    three verdicts set true only when the target, dedup, and author-cooloff rules
    all pass. A `select` call contains exactly `display`, `action`,
-   `selected_activity`, and those three true verdicts; never carry a
-   `card_sha256` into it. If any verdict would be false, do not select that
-   activity. A qualifying selection always takes priority over continuation. If
+   `selected_activity`, and those three literal JSON boolean `true` verdicts,
+   never quoted strings; never carry a `card_sha256` into it. If any verdict
+   would be false, do not select that activity.
+   A qualifying selection always takes priority over continuation. If
    none qualifies and `continuation_available` is true, call `action="exclude"`
    with every actionable activity in the exact returned decision order and its
    exact sorted reason codes. Allowed codes are `already_used`, `author_cooloff`,
