@@ -27,6 +27,7 @@ from revenue_ui_contract import (
     parse_semantic_input,
     semantic_input,
     semantic_receipt,
+    scroll_postcondition_exact,
     validate_operation_card,
 )
 
@@ -2432,32 +2433,7 @@ def _revenue_scroll_into_view(
         else None
     )
     minimum_clearance = card.get("min_downward_clearance_px")
-    clearance_exact = bool(
-        minimum_clearance is None
-        or (
-            not isinstance(minimum_clearance, bool)
-            and isinstance(minimum_clearance, int)
-            and minimum_clearance >= 0
-            and postcondition is not None
-            and postcondition.get("min_downward_clearance_px")
-            == minimum_clearance
-            and postcondition.get("selected_post_root_intersects_viewport")
-            is True
-            and postcondition.get("scroll_target_exact") is True
-            and postcondition.get("thread_opener_live_extent_in_viewport")
-            is True
-            and not isinstance(
-                postcondition.get("thread_opener_available_below_px"),
-                bool,
-            )
-            and isinstance(
-                postcondition.get("thread_opener_available_below_px"),
-                int,
-            )
-            and postcondition.get("thread_opener_available_below_px", -1)
-            >= minimum_clearance
-        )
-    )
+    clearance_exact = scroll_postcondition_exact(card, postcondition)
     if (
         post_snapshot is None
         or not isinstance(barrier_receipt, dict)

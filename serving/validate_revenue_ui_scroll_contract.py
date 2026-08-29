@@ -98,6 +98,81 @@ def main() -> int:
         and contract.validate_operation_card(expander_card) is expander_card,
         'generic expander scroll gained opener-only clearance authority',
     )
+    generic_scroll_evidence = {
+        'scroll_context_intersects_viewport': True,
+        'scroll_target_exact': True,
+        'live_extent_in_viewport': True,
+        'available_below_px': 500,
+    }
+    require(
+        contract.scroll_postcondition_exact(
+            scroll_card,
+            {
+                **generic_scroll_evidence,
+                'min_downward_clearance_px': 500,
+            },
+        )
+        and contract.scroll_postcondition_exact(
+            expander_card,
+            {**generic_scroll_evidence, 'available_below_px': 0},
+        )
+        and not contract.scroll_postcondition_exact(
+            expander_card,
+            {
+                **generic_scroll_evidence,
+                'min_downward_clearance_px': 0,
+            },
+        )
+        and not contract.scroll_postcondition_exact(
+            expander_card,
+            {**generic_scroll_evidence, 'available_below_px': -1},
+        )
+        and not contract.scroll_postcondition_exact(
+            scroll_card,
+            {
+                **generic_scroll_evidence,
+                'min_downward_clearance_px': 500,
+                'available_below_px': 499,
+            },
+        ),
+        'generic scroll evidence accepted a forbidden or insufficient clearance',
+    )
+    expander_with_clearance = dict(
+        method='scroll_into_view',
+        phase='thread_expand_scroll',
+        effect_class='viewport',
+        primitives=['scroll_into_view'],
+        allowed_now=['scroll_into_view'],
+        scroll_target='selected_thread_expander',
+        scroll_target_source='self',
+        scroll_alignment='anywhere',
+        min_downward_clearance_px=500,
+    )
+    try:
+        contract.operation_card(
+            element='selected_thread_expander',
+            ref='atspi3.expand',
+            declared=expander_with_clearance,
+        )
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('non-thread scroll accepted opener-only clearance')
+    forged_expander_card = dict(expander_card)
+    forged_expander_card['min_downward_clearance_px'] = 500
+    forged_expander_card['card_sha256'] = contract.canonical_sha256(
+        {
+            key: value
+            for key, value in forged_expander_card.items()
+            if key != 'card_sha256'
+        }
+    )
+    try:
+        contract.validate_operation_card(forged_expander_card)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('validator accepted non-thread opener-only clearance')
     observe = function_source(UI_DRIVE, '_observe_revenue')
     require(
         'declared_method not in DECLARED_EFFECTS' in observe,
@@ -207,10 +282,7 @@ def main() -> int:
         'postcondition.get("scroll_target") != card["scroll_target"]',
         'postcondition.get("scroll_target_source") != target_source',
         'postcondition.get("scroll_alignment") != card["scroll_alignment"]',
-        'postcondition.get("min_downward_clearance_px")',
-        'postcondition.get("selected_post_root_intersects_viewport")',
-        'postcondition.get("scroll_target_exact") is True',
-        'postcondition.get("thread_opener_available_below_px")',
+        'scroll_postcondition_exact(card, postcondition)',
         'clearance_exact is not True',
         '"observe_required_before_next_mutation": True',
     ):
@@ -397,11 +469,19 @@ def main() -> int:
         '"state": "viewport_transition_complete"',
         'postcondition.get("live_extent_in_viewport") is not True',
         'postcondition.get("phase") != card.get("phase")',
-        'postcondition.get("min_downward_clearance_px")',
-        'postcondition.get("scroll_target_exact") is True',
+        'scroll_postcondition_exact(card, postcondition)',
         'clearance_exact is not True',
     ):
         require(required in proxy, f'proxy scroll binding missing {required!r}')
+    for forbidden in (
+        'selected_post_root_intersects_viewport',
+        'thread_opener_live_extent_in_viewport',
+        'thread_opener_available_below_px',
+    ):
+        require(
+            forbidden not in scroll and forbidden not in proxy,
+            f'generic Presence runtime embeds provider scroll field {forbidden!r}',
+        )
     soma_source = SOMA_PROXY.read_text(encoding='utf-8')
     ui_action_schema = soma_source.split('"name": "ui_action"', 1)[1].split(
         '"name": "linkedin_unit1"',

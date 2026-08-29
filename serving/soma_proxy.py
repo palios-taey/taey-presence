@@ -31,6 +31,7 @@ from revenue_ui_contract import (
     SEMANTIC_OUTWARD,
     canonical_json_bytes,
     semantic_input,
+    scroll_postcondition_exact,
     validate_operation_evidence,
     validate_operation_card,
     validate_semantic_receipt,
@@ -8164,37 +8165,7 @@ def _do_ui_action(arguments: dict) -> str:
 
     if action == "scroll_into_view":
         assert isinstance(card, dict)
-        minimum_clearance = card.get("min_downward_clearance_px")
-        clearance_exact = bool(
-            minimum_clearance is None
-            or (
-                not isinstance(minimum_clearance, bool)
-                and isinstance(minimum_clearance, int)
-                and minimum_clearance >= 0
-                and isinstance(postcondition, dict)
-                and postcondition.get("min_downward_clearance_px")
-                == minimum_clearance
-                and postcondition.get(
-                    "selected_post_root_intersects_viewport"
-                ) is True
-                and postcondition.get("scroll_target_exact") is True
-                and postcondition.get(
-                    "thread_opener_live_extent_in_viewport"
-                ) is True
-                and not isinstance(
-                    postcondition.get("thread_opener_available_below_px"),
-                    bool,
-                )
-                and isinstance(
-                    postcondition.get("thread_opener_available_below_px"),
-                    int,
-                )
-                and postcondition.get(
-                    "thread_opener_available_below_px",
-                    -1,
-                ) >= minimum_clearance
-            )
-        )
+        clearance_exact = scroll_postcondition_exact(card, postcondition)
         if (
             result.get("performed") is not True
             or result.get("performed_primitive") != "scroll_into_view"
