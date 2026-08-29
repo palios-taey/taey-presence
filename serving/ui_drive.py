@@ -1661,7 +1661,43 @@ def _linkedin_unit1_prepare_operate(
             compile_preparation_step,
         )
 
-        snapshot = _revenue_snapshot(deps)
+        initial_navigation = (
+            not receipts
+            and stored_card.get("phase") == "notifications_navigation"
+        )
+        if initial_navigation:
+            lease = _lease_context()
+            assert lease is not None
+            lease_receipt = _guard_action(
+                deps.display,
+                lease,
+                LOCK_TTL_DEFAULT,
+            )
+            manual = _manual_ui_module(deps.platform)
+            stable_initial = getattr(
+                manual,
+                "stable_initial_preparation_observation",
+                None,
+            )
+            if not callable(stable_initial):
+                raise UiDriveError(
+                    "LinkedIn has no public initial preparation observation barrier"
+                )
+            snapshot, initial_revalidation = stable_initial(
+                time.monotonic() + LOCK_TTL_DEFAULT,
+            )
+            if (
+                not isinstance(snapshot, Snapshot)
+                or not isinstance(initial_revalidation, dict)
+                or initial_revalidation.get("result") != "PASS"
+                or initial_revalidation.get("compile_authorized") is not True
+                or initial_revalidation.get("next_mutation_authorized") is not False
+            ):
+                raise UiDriveError(
+                    "LinkedIn initial navigation revalidation did not pass"
+                )
+        else:
+            snapshot = _revenue_snapshot(deps)
         fresh_card = compile_preparation_step(
             snapshot,
             _snapshot_revision(snapshot, scope="base"),
@@ -1720,48 +1756,111 @@ def _linkedin_unit1_prepare_operate(
         raise UiDriveError(
             f"LinkedIn Unit 1 preparation method {method!r} is not a preparation primitive"
         )
-    command = [
-        sys.executable,
-        str(Path(__file__).resolve()),
-        subcommand,
-        "--display",
-        deps.display,
-        "--ref",
-        str(fresh_runtime_card["ref"]),
-        "--operation-card-sha256",
-        str(fresh_runtime_card["card_sha256"]),
-    ]
-    try:
-        import subprocess
+    if initial_navigation:
+        try:
+            from consultation_v2.platforms.linkedin.driver import (
+                activate_notifications,
+            )
 
-        completed = subprocess.run(
-            command,
-            capture_output=True,
-            timeout=_LINKEDIN_UNIT1_PREPARE_PRIMITIVE_TIMEOUT_SECS,
-            env=dict(os.environ),
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise UiDriveError("LinkedIn Unit 1 preparation operation timed out") from exc
-    stdout = (completed.stdout or b"").decode("utf-8", errors="replace").strip()
-    try:
-        payload = json.loads(stdout)
-    except ValueError as exc:
-        raise UiDriveError(
-            "LinkedIn Unit 1 preparation primitive returned invalid JSON"
-        ) from exc
-    result = payload.get("result") if isinstance(payload, dict) else None
-    if (
-        completed.returncode != 0
-        or not isinstance(payload, dict)
-        or payload.get("ok") is not True
-        or payload.get("display") != deps.display
-        or payload.get("platform") != "linkedin"
-        or not isinstance(result, dict)
-    ):
-        detail = payload.get("error") if isinstance(payload, dict) else None
-        raise UiDriveError(
-            f"LinkedIn Unit 1 preparation primitive failed: {detail or 'unknown error'}"
-        )
+            action_receipt = activate_notifications(snapshot)
+            manual = _manual_ui_module(deps.platform)
+            stable_observation = getattr(
+                manual,
+                "stable_post_action_observation",
+                None,
+            )
+            if not callable(stable_observation):
+                raise UiDriveError(
+                    "LinkedIn has no public stable post-action observation hook"
+                )
+            post_snapshot, barrier = stable_observation(
+                str(fresh_card["element"]),
+                str(fresh_card["verification_operation"]),
+                time.monotonic() + LOCK_TTL_DEFAULT,
+            )
+            postcondition = (
+                barrier.get("postcondition_receipt")
+                if isinstance(barrier, dict)
+                else None
+            )
+            if (
+                not isinstance(post_snapshot, Snapshot)
+                or not isinstance(barrier, dict)
+                or barrier.get("result") != "PASS"
+                or barrier.get("next_mutation_authorized") is not True
+                or not isinstance(postcondition, dict)
+                or postcondition.get("route_exact") is not True
+            ):
+                raise UiDriveError(
+                    "LinkedIn initial navigation post-action observation did not pass"
+                )
+            result = {
+                "performed": True,
+                "performed_primitive": "activate",
+                "performed_operation": "activate",
+                "effect_class": "page",
+                "operation_evidence": action_receipt,
+                "post_action_observation": {
+                    "snapshot_revision": _snapshot_revision(
+                        post_snapshot,
+                        scope="base",
+                    ),
+                    "barrier": barrier,
+                    **postcondition,
+                },
+                "observe_required_before_next_mutation": True,
+                "next_mutation_authorized": True,
+                "lease": lease_receipt,
+            }
+        except UiDriveError:
+            raise
+        except Exception as exc:
+            raise UiDriveError(
+                f"LinkedIn initial navigation primitive failed: {exc}"
+            ) from exc
+    else:
+        command = [
+            sys.executable,
+            str(Path(__file__).resolve()),
+            subcommand,
+            "--display",
+            deps.display,
+            "--ref",
+            str(fresh_runtime_card["ref"]),
+            "--operation-card-sha256",
+            str(fresh_runtime_card["card_sha256"]),
+        ]
+        try:
+            import subprocess
+
+            completed = subprocess.run(
+                command,
+                capture_output=True,
+                timeout=_LINKEDIN_UNIT1_PREPARE_PRIMITIVE_TIMEOUT_SECS,
+                env=dict(os.environ),
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise UiDriveError("LinkedIn Unit 1 preparation operation timed out") from exc
+        stdout = (completed.stdout or b"").decode("utf-8", errors="replace").strip()
+        try:
+            payload = json.loads(stdout)
+        except ValueError as exc:
+            raise UiDriveError(
+                "LinkedIn Unit 1 preparation primitive returned invalid JSON"
+            ) from exc
+        result = payload.get("result") if isinstance(payload, dict) else None
+        if (
+            completed.returncode != 0
+            or not isinstance(payload, dict)
+            or payload.get("ok") is not True
+            or payload.get("display") != deps.display
+            or payload.get("platform") != "linkedin"
+            or not isinstance(result, dict)
+        ):
+            detail = payload.get("error") if isinstance(payload, dict) else None
+            raise UiDriveError(
+                f"LinkedIn Unit 1 preparation primitive failed: {detail or 'unknown error'}"
+            )
     observation = result.get("post_action_observation")
     barrier = observation.get("barrier") if isinstance(observation, dict) else None
     previous_receipt_sha256 = (
