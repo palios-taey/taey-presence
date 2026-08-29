@@ -230,12 +230,53 @@ def main() -> int:
         for row in tools
         if row.get("function", {}).get("name") == "linkedin_unit1_prepare"
     )
+    variants = tool["parameters"].get("oneOf")
     require(
-        tool["parameters"]["properties"]["action"]["enum"]
+        isinstance(variants, list) and len(variants) == 5,
+        "preparation action grammar is not five exact variants",
+    )
+    variants_by_action = {
+        variant["properties"]["action"]["const"]: variant
+        for variant in variants
+    }
+    require(
+        list(variants_by_action)
         == ["observe", "operate", "select", "exclude", "draft"],
         "preparation action grammar drifted",
     )
-    exclusion_schema = tool["parameters"]["properties"]["excluded_candidates"]
+    expected_fields = {
+        "observe": {"display", "action"},
+        "operate": {"display", "action", "card_sha256"},
+        "select": {
+            "display", "action", "selected_activity", "target_passed",
+            "dedup_passed", "author_cooloff_passed",
+        },
+        "exclude": {"display", "action", "excluded_candidates"},
+        "draft": {"display", "action", "text"},
+    }
+    require(
+        all(
+            variant.get("type") == "object"
+            and variant.get("additionalProperties") is False
+            and set(variant.get("required", [])) == expected_fields[action]
+            and set(variant.get("properties", {})) == expected_fields[action]
+            for action, variant in variants_by_action.items()
+        ),
+        "preparation action variants do not forbid cross-action fields",
+    )
+    select_properties = variants_by_action["select"]["properties"]
+    require(
+        all(
+            select_properties[field] == {"const": True}
+            for field in (
+                "target_passed", "dedup_passed", "author_cooloff_passed",
+            )
+        ),
+        "select grammar permits a false qualifying verdict",
+    )
+    exclusion_schema = variants_by_action["exclude"]["properties"][
+        "excluded_candidates"
+    ]
     require(
         exclusion_schema["type"] == "array"
         and exclusion_schema["items"]["additionalProperties"] is False
@@ -249,7 +290,10 @@ def main() -> int:
     )
     for forbidden in ("selector", "coordinate", "url", "path", "element"):
         require(
-            forbidden not in tool["parameters"]["properties"],
+            all(
+                forbidden not in variant["properties"]
+                for variant in variants
+            ),
             f"model-facing preparation tool exposes {forbidden}",
         )
     lowered_prompt = prompt.lower()
@@ -262,6 +306,11 @@ def main() -> int:
         and "continuation_available" in prompt
         and "qualifying selection always takes priority" in lowered_prompt,
         "candidate-first continuation instructions are incomplete",
+    )
+    require(
+        "never carry a\n   `card_sha256`" in prompt
+        and "on any `ok=false`" in lowered_prompt,
+        "cross-action and terminal-call instructions are incomplete",
     )
     require(
         "review before" not in lowered_prompt and "await approval" not in lowered_prompt,

@@ -1665,83 +1665,130 @@ TOOLS = [
                 "There is no human approval state and this tool cannot paste or submit."
             ),
             "parameters": {
-                "type": "object",
-                "additionalProperties": False,
-                "required": ["display", "action"],
-                "properties": {
-                    "display": {
-                        "type": "string",
-                        "description": "trusted LinkedIn display configured by the server",
+                "oneOf": [
+                    {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": ["display", "action"],
+                        "properties": {
+                            "display": {
+                                "type": "string",
+                                "description": "trusted LinkedIn display configured by the server",
+                            },
+                            "action": {"const": "observe"},
+                        },
                     },
-                    "action": {
-                        "type": "string",
-                        "enum": ["observe", "operate", "select", "exclude", "draft"],
+                    {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": ["display", "action", "card_sha256"],
+                        "properties": {
+                            "display": {
+                                "type": "string",
+                                "description": "trusted LinkedIn display configured by the server",
+                            },
+                            "action": {"const": "operate"},
+                            "card_sha256": {
+                                "type": "string",
+                                "pattern": "^[0-9a-f]{64}$",
+                                "description": "exact preceding opaque card hash",
+                            },
+                        },
                     },
-                    "card_sha256": {
-                        "type": "string",
-                        "pattern": "^[0-9a-f]{64}$",
-                        "description": "operate only: exact preceding opaque card hash",
+                    {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": [
+                            "display",
+                            "action",
+                            "selected_activity",
+                            "target_passed",
+                            "dedup_passed",
+                            "author_cooloff_passed",
+                        ],
+                        "properties": {
+                            "display": {
+                                "type": "string",
+                                "description": "trusted LinkedIn display configured by the server",
+                            },
+                            "action": {"const": "select"},
+                            "selected_activity": {
+                                "type": "string",
+                                "pattern": "^[0-9]+$",
+                                "description": "exact activity from the returned inventory",
+                            },
+                            "target_passed": {"const": True},
+                            "dedup_passed": {"const": True},
+                            "author_cooloff_passed": {"const": True},
+                        },
                     },
-                    "selected_activity": {
-                        "type": "string",
-                        "pattern": "^[0-9]+$",
-                        "description": "select only: exact activity from the returned inventory",
-                    },
-                    "target_passed": {
-                        "type": "boolean",
-                        "description": "select only: Taey's qualifying target verdict",
-                    },
-                    "dedup_passed": {
-                        "type": "boolean",
-                        "description": "select only: Taey's exact dedup verdict",
-                    },
-                    "author_cooloff_passed": {
-                        "type": "boolean",
-                        "description": "select only: Taey's author-cooloff verdict",
-                    },
-                    "excluded_candidates": {
-                        "type": "array",
-                        "description": (
-                            "exclude only: exact inventory-ordered evidence for every "
-                            "mounted actionable candidate"
-                        ),
-                        "items": {
-                            "type": "object",
-                            "additionalProperties": False,
-                            "required": ["activity", "reason_codes"],
-                            "properties": {
-                                "activity": {
-                                    "type": "string",
-                                    "pattern": "^[0-9]+$",
-                                },
-                                "reason_codes": {
-                                    "type": "array",
-                                    "minItems": 1,
-                                    "uniqueItems": True,
-                                    "items": {
-                                        "type": "string",
-                                        "enum": [
-                                            "already_used",
-                                            "author_cooloff",
-                                            "event_announcement",
-                                            "hostile_or_irrelevant",
-                                            "off_target",
-                                            "pitch_or_promotion",
-                                            "self_authored",
-                                            "stale",
-                                        ],
+                    {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": ["display", "action", "excluded_candidates"],
+                        "properties": {
+                            "display": {
+                                "type": "string",
+                                "description": "trusted LinkedIn display configured by the server",
+                            },
+                            "action": {"const": "exclude"},
+                            "excluded_candidates": {
+                                "type": "array",
+                                "description": (
+                                    "exact inventory-ordered evidence for every mounted "
+                                    "actionable candidate"
+                                ),
+                                "items": {
+                                    "type": "object",
+                                    "additionalProperties": False,
+                                    "required": ["activity", "reason_codes"],
+                                    "properties": {
+                                        "activity": {
+                                            "type": "string",
+                                            "pattern": "^[0-9]+$",
+                                        },
+                                        "reason_codes": {
+                                            "type": "array",
+                                            "minItems": 1,
+                                            "uniqueItems": True,
+                                            "items": {
+                                                "type": "string",
+                                                "enum": [
+                                                    "already_used",
+                                                    "author_cooloff",
+                                                    "event_announcement",
+                                                    "hostile_or_irrelevant",
+                                                    "off_target",
+                                                    "pitch_or_promotion",
+                                                    "self_authored",
+                                                    "stale",
+                                                ],
+                                            },
+                                        },
                                     },
                                 },
                             },
                         },
                     },
-                    "text": {
-                        "type": "string",
-                        "minLength": 1,
-                        "maxLength": 1800,
-                        "description": "draft only: Taey's final autonomous comment text",
+                    {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": ["display", "action", "text"],
+                        "properties": {
+                            "display": {
+                                "type": "string",
+                                "description": "trusted LinkedIn display configured by the server",
+                            },
+                            "action": {"const": "draft"},
+                            "text": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 1800,
+                                "description": "Taey's final autonomous comment text",
+                            },
+                        },
                     },
-                },
+                ],
             },
         },
     },
