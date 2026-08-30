@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import re
 import stat
+import subprocess
 import sys
 import tempfile
 
@@ -44,6 +45,213 @@ def source_function(path: Path, name: str) -> str:
     ]
     require(len(matches) == 1, f"{name} is not one exact function")
     return ast.get_source_segment(source, matches[0]) or ""
+
+
+def validate_private_launcher(launcher: Path) -> None:
+    source = launcher.read_text(encoding="utf-8")
+    umask_index = source.index("umask 077")
+    require(
+        umask_index < source.index("mkdir -m 700")
+        and umask_index < source.index(': > "$headers_path"')
+        and umask_index < source.index(': > "$response_path"'),
+        "private launcher does not establish umask before creation",
+    )
+    require(
+        "set -o noclobber" in source
+        and "--dump-header \"$headers_path\"" in source
+        and "--output \"$response_path\"" in source,
+        "private launcher lost collision-safe capture outputs",
+    )
+
+    with tempfile.TemporaryDirectory() as temporary:
+        temporary_root = Path(temporary)
+        artifact_root = temporary_root / "artifacts"
+        fake_bin = temporary_root / "bin"
+        artifact_root.mkdir(mode=0o700)
+        fake_bin.mkdir(mode=0o700)
+        artifact_root.chmod(0o700)
+        fake_bin.chmod(0o700)
+        curl_marker = temporary_root / "curl-invoked"
+        fake_curl = fake_bin / "curl"
+        fake_curl.write_text(
+            """#!/usr/bin/env python3
+import json
+import os
+from pathlib import Path
+import stat
+import sys
+
+arguments = sys.argv[1:]
+
+def option(name):
+    index = arguments.index(name)
+    return arguments[index + 1]
+
+headers = Path(option("--dump-header"))
+response = Path(option("--output"))
+for path in (headers, response):
+    metadata = os.lstat(path)
+    if not stat.S_ISREG(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) != 0o600:
+        raise SystemExit(91)
+    if metadata.st_uid != os.geteuid() or metadata.st_size != 0:
+        raise SystemExit(92)
+body = json.loads(option("--data-binary"))
+if body != {
+    "model": "served-model",
+    "stream": False,
+    "chat_template_kwargs": {"enable_thinking": False},
+    "messages": [{
+        "role": "user",
+        "content": (
+            "Prepare the frozen LinkedIn Unit 1 transaction on display :18. "
+            "Continue only through the injected profile until "
+            "final_bundle_published or the first failure."
+        ),
+    }],
+}:
+    raise SystemExit(93)
+headers_by_name = {
+    value.split(":", 1)[0]: value.split(":", 1)[1].strip()
+    for index, value in enumerate(arguments)
+    if index > 0 and arguments[index - 1] == "-H"
+}
+if headers_by_name != {
+    "Content-Type": "application/json",
+    "X-Taey-Seat-Id": "seat-1",
+    "X-Taey-Event-Id": "event-1",
+    "X-Taey-Correlation-Id": os.environ.get(
+        "FAKE_EXPECTED_CORRELATION_ID", "correlation-1"
+    ),
+    "X-Taey-Tool-Profile": "linkedin-unit1-prepare",
+}:
+    raise SystemExit(94)
+if arguments[-1] != "http://127.0.0.1:8765/v1/chat/completions":
+    raise SystemExit(95)
+for flag in ("--fail-with-body", "--silent", "--show-error"):
+    if arguments.count(flag) != 1:
+        raise SystemExit(96)
+if arguments.count("--max-time") != 1 or option("--max-time") != "2400":
+    raise SystemExit(97)
+Path(os.environ["FAKE_CURL_MARKER"]).write_text("invoked\\n", encoding="utf-8")
+if os.environ.get("FAKE_CURL_EXIT") == "28":
+    raise SystemExit(28)
+headers.write_text("HTTP/1.1 200 OK\\n", encoding="utf-8")
+response.write_text('{"ok":true}\\n', encoding="utf-8")
+""",
+            encoding="utf-8",
+        )
+        fake_curl.chmod(0o700)
+        environment = {
+            **os.environ,
+            "PATH": f"{fake_bin}:{os.environ.get('PATH', '')}",
+            "FAKE_CURL_MARKER": str(curl_marker),
+            "TAEY_LINKEDIN_UNIT1_ARTIFACT_ROOT": str(artifact_root),
+            "TAEY_LINKEDIN_UNIT1_SEAT_ID": "seat-1",
+            "TAEY_LINKEDIN_UNIT1_EVENT_ID": "event-1",
+            "TAEY_LINKEDIN_UNIT1_CORRELATION_ID": "correlation-1",
+            "TAEY_LINKEDIN_UNIT1_MODEL": "served-model",
+            "TAEY_LINKEDIN_UNIT1_DISPLAY": ":18",
+            "TAEY_PROXY_URL": "http://127.0.0.1:8765/v1/chat/completions",
+        }
+        command = [
+            "bash",
+            "-c",
+            'umask 000; exec "$1"',
+            "launcher-validator",
+            str(launcher),
+        ]
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            env=environment,
+            text=True,
+        )
+        require(
+            completed.returncode == 0,
+            f"private launcher failed synthetic launch: {completed.stderr}",
+        )
+        run_dir = artifact_root / "correlation-1"
+        require(
+            stat.S_IMODE(os.lstat(run_dir).st_mode) == 0o700,
+            "private launcher run directory is not 0700",
+        )
+        for name in ("headers.txt", "response.json"):
+            path = run_dir / name
+            metadata = os.lstat(path)
+            require(
+                stat.S_ISREG(metadata.st_mode)
+                and stat.S_IMODE(metadata.st_mode) == 0o600,
+                f"private launcher {name} is not 0600",
+            )
+        require(curl_marker.is_file(), "synthetic curl was not invoked")
+
+        curl_marker.unlink()
+        timeout_environment = {
+            **environment,
+            "FAKE_EXPECTED_CORRELATION_ID": "correlation-timeout",
+            "FAKE_CURL_EXIT": "28",
+            "TAEY_LINKEDIN_UNIT1_CORRELATION_ID": "correlation-timeout",
+        }
+        timed_out = subprocess.run(
+            command,
+            capture_output=True,
+            env=timeout_environment,
+            text=True,
+        )
+        timeout_dir = artifact_root / "correlation-timeout"
+        require(
+            timed_out.returncode == 28
+            and timed_out.stdout == ""
+            and curl_marker.is_file(),
+            "private launcher did not propagate the fixed curl timeout: "
+            f"rc={timed_out.returncode} stdout={timed_out.stdout!r} "
+            f"marker={curl_marker.is_file()}",
+        )
+        require(
+            stat.S_IMODE(os.lstat(timeout_dir).st_mode) == 0o700,
+            "private launcher timeout directory is not 0700",
+        )
+        for name in ("headers.txt", "response.json"):
+            path = timeout_dir / name
+            metadata = os.lstat(path)
+            require(
+                stat.S_ISREG(metadata.st_mode)
+                and stat.S_IMODE(metadata.st_mode) == 0o600
+                and metadata.st_size == 0,
+                f"private launcher timeout {name} is not empty 0600",
+            )
+
+        curl_marker.unlink()
+        collision = subprocess.run(
+            command,
+            capture_output=True,
+            env=environment,
+            text=True,
+        )
+        require(
+            collision.returncode != 0
+            and "artifact directory already exists" in collision.stderr
+            and not curl_marker.exists(),
+            "private launcher did not refuse an existing identity before curl",
+        )
+
+        symlink_environment = {
+            **environment,
+            "TAEY_LINKEDIN_UNIT1_CORRELATION_ID": "correlation-link",
+        }
+        (artifact_root / "correlation-link").symlink_to(run_dir)
+        symlink = subprocess.run(
+            command,
+            capture_output=True,
+            env=symlink_environment,
+            text=True,
+        )
+        require(
+            symlink.returncode != 0
+            and "artifact directory already exists" in symlink.stderr
+            and not curl_marker.exists(),
+            "private launcher did not refuse a symlinked identity before curl",
+        )
 
 
 def assignment(path: Path, name: str) -> ast.expr:
@@ -224,6 +432,13 @@ def main() -> int:
 
     proxy = SERVING_ROOT / "soma_proxy.py"
     drive = SERVING_ROOT / "ui_drive.py"
+    launcher = SERVING_ROOT / "launch_linkedin_unit1_prepare.sh"
+    require(launcher.is_file(), "private preparation launcher is missing")
+    require(
+        stat.S_IMODE(os.lstat(launcher).st_mode) == 0o755,
+        "private preparation launcher is not executable 0755",
+    )
+    validate_private_launcher(launcher)
     prompt = (SERVING_ROOT / "TAEY_LINKEDIN_UNIT1_PREPARE_SYSTEM.md").read_text(
         encoding="utf-8"
     )
