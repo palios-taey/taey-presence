@@ -42,6 +42,137 @@ def function_source(path: Path, name: str) -> str:
 
 def main() -> int:
     require('value.get("operation") != card.get("method")' in function_source(REPO_ROOT / 'serving/revenue_ui_contract.py', 'parse_semantic_input'), 'semantic envelope operation is not bound to card method')
+    scroll_declaration = {
+        'method': 'scroll_into_view',
+        'phase': 'thread_scroll',
+        'effect_class': 'viewport',
+        'primitives': ['scroll_into_view'],
+        'allowed_now': ['scroll_into_view'],
+        'scroll_target': 'selected_thread_opener',
+        'scroll_target_source': 'self',
+        'scroll_alignment': 'top_edge',
+        'min_downward_clearance_px': 500,
+    }
+    scroll_card = contract.operation_card(
+        element='selected_thread',
+        ref='atspi3.scroll',
+        declared=scroll_declaration,
+    )
+    require(
+        scroll_card['phase'] == 'thread_scroll'
+        and scroll_card['scroll_target'] == 'selected_thread_opener'
+        and scroll_card['scroll_target_source'] == 'self'
+        and scroll_card['scroll_alignment'] == 'top_edge'
+        and scroll_card['min_downward_clearance_px'] == 500
+        and contract.validate_operation_card(scroll_card) is scroll_card,
+        'scroll operation card lost its exact phase, target, or clearance',
+    )
+    missing_clearance = dict(scroll_declaration)
+    missing_clearance.pop('min_downward_clearance_px')
+    try:
+        contract.operation_card(
+            element='selected_thread',
+            ref='atspi3.scroll',
+            declared=missing_clearance,
+        )
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('thread scroll accepted missing minimum clearance')
+    expander_card = contract.operation_card(
+        element='selected_thread_expander',
+        ref='atspi3.expand',
+        declared={
+            'method': 'scroll_into_view',
+            'phase': 'thread_expand_scroll',
+            'effect_class': 'viewport',
+            'primitives': ['scroll_into_view'],
+            'allowed_now': ['scroll_into_view'],
+            'scroll_target': 'selected_thread_expander',
+            'scroll_target_source': 'self',
+            'scroll_alignment': 'anywhere',
+        },
+    )
+    require(
+        'min_downward_clearance_px' not in expander_card
+        and contract.validate_operation_card(expander_card) is expander_card,
+        'generic expander scroll gained opener-only clearance authority',
+    )
+    generic_scroll_evidence = {
+        'scroll_context_intersects_viewport': True,
+        'scroll_target_exact': True,
+        'live_extent_in_viewport': True,
+        'available_below_px': 500,
+    }
+    require(
+        contract.scroll_postcondition_exact(
+            scroll_card,
+            {
+                **generic_scroll_evidence,
+                'min_downward_clearance_px': 500,
+            },
+        )
+        and contract.scroll_postcondition_exact(
+            expander_card,
+            {**generic_scroll_evidence, 'available_below_px': 0},
+        )
+        and not contract.scroll_postcondition_exact(
+            expander_card,
+            {
+                **generic_scroll_evidence,
+                'min_downward_clearance_px': 0,
+            },
+        )
+        and not contract.scroll_postcondition_exact(
+            expander_card,
+            {**generic_scroll_evidence, 'available_below_px': -1},
+        )
+        and not contract.scroll_postcondition_exact(
+            scroll_card,
+            {
+                **generic_scroll_evidence,
+                'min_downward_clearance_px': 500,
+                'available_below_px': 499,
+            },
+        ),
+        'generic scroll evidence accepted a forbidden or insufficient clearance',
+    )
+    expander_with_clearance = dict(
+        method='scroll_into_view',
+        phase='thread_expand_scroll',
+        effect_class='viewport',
+        primitives=['scroll_into_view'],
+        allowed_now=['scroll_into_view'],
+        scroll_target='selected_thread_expander',
+        scroll_target_source='self',
+        scroll_alignment='anywhere',
+        min_downward_clearance_px=500,
+    )
+    try:
+        contract.operation_card(
+            element='selected_thread_expander',
+            ref='atspi3.expand',
+            declared=expander_with_clearance,
+        )
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('non-thread scroll accepted opener-only clearance')
+    forged_expander_card = dict(expander_card)
+    forged_expander_card['min_downward_clearance_px'] = 500
+    forged_expander_card['card_sha256'] = contract.canonical_sha256(
+        {
+            key: value
+            for key, value in forged_expander_card.items()
+            if key != 'card_sha256'
+        }
+    )
+    try:
+        contract.validate_operation_card(forged_expander_card)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('validator accepted non-thread opener-only clearance')
     observe = function_source(UI_DRIVE, '_observe_revenue')
     require(
         'declared_method not in DECLARED_EFFECTS' in observe,
@@ -141,15 +272,23 @@ def main() -> int:
     for required in (
         '_resolve_revenue_target(args, deps)',
         'card["method"] != "scroll_into_view"',
-        'runtime.scroll_element_into_view(element)',
+        'row.get("scroll_target_atspi_obj")',
+        'runtime.scroll_element_into_view(',
+        'alignment=card["scroll_alignment"]',
         'stable_scroll_post_action_observation',
         'postcondition.get("element_key") != row["element"]',
         'postcondition.get("live_extent_in_viewport") is not True',
+        'postcondition.get("phase") != card["phase"]',
+        'postcondition.get("scroll_target") != card["scroll_target"]',
+        'postcondition.get("scroll_target_source") != target_source',
+        'postcondition.get("scroll_alignment") != card["scroll_alignment"]',
+        'scroll_postcondition_exact(card, postcondition)',
+        'clearance_exact is not True',
         '"observe_required_before_next_mutation": True',
     ):
         require(required in scroll, f'revenue scroll transition missing {required!r}')
     require(
-        scroll.count('runtime.scroll_element_into_view(element)') == 1,
+        scroll.count('runtime.scroll_element_into_view(') == 1,
         'revenue scroll transition must invoke exactly one scroll primitive',
     )
 
@@ -329,11 +468,23 @@ def main() -> int:
         'result.get("consumed_max_text_chars") != expected_max_text_chars',
         '"state": "viewport_transition_complete"',
         'postcondition.get("live_extent_in_viewport") is not True',
+        'postcondition.get("phase") != card.get("phase")',
+        'scroll_postcondition_exact(card, postcondition)',
+        'clearance_exact is not True',
     ):
         require(required in proxy, f'proxy scroll binding missing {required!r}')
+    for forbidden in (
+        'selected_post_root_intersects_viewport',
+        'thread_opener_live_extent_in_viewport',
+        'thread_opener_available_below_px',
+    ):
+        require(
+            forbidden not in scroll and forbidden not in proxy,
+            f'generic Presence runtime embeds provider scroll field {forbidden!r}',
+        )
     soma_source = SOMA_PROXY.read_text(encoding='utf-8')
     ui_action_schema = soma_source.split('"name": "ui_action"', 1)[1].split(
-        '"name": "consult_chat"',
+        '"name": "linkedin_unit1"',
         1,
     )[0]
     require(

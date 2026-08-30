@@ -31,6 +31,7 @@ from revenue_ui_contract import (
     SEMANTIC_OUTWARD,
     canonical_json_bytes,
     semantic_input,
+    scroll_postcondition_exact,
     validate_operation_evidence,
     validate_operation_card,
     validate_semantic_receipt,
@@ -8163,6 +8164,8 @@ def _do_ui_action(arguments: dict) -> str:
         return _json.dumps(payload)
 
     if action == "scroll_into_view":
+        assert isinstance(card, dict)
+        clearance_exact = scroll_postcondition_exact(card, postcondition)
         if (
             result.get("performed") is not True
             or result.get("performed_primitive") != "scroll_into_view"
@@ -8174,6 +8177,8 @@ def _do_ui_action(arguments: dict) -> str:
             or postcondition.get("activity_exact") is not True
             or postcondition.get("body_sha256_exact") is not True
             or postcondition.get("live_extent_in_viewport") is not True
+            or postcondition.get("phase") != card.get("phase")
+            or clearance_exact is not True
         ):
             return terminal_refusal(
                 "ui_action scroll_into_view returned no exact same-element "

@@ -191,6 +191,36 @@ def main() -> int:
             "consultation_v2.platforms.linkedin.unit1_prepare"
         )
         soma = importlib.import_module("soma_proxy")
+        manual_source = source_function(
+            hands_root / "consultation_v2/platforms/linkedin/manual.py",
+            "stable_scroll_post_action_observation",
+        )
+        unit1_accept_source = source_function(
+            hands_root / "consultation_v2/platforms/linkedin/unit1.py",
+            "accept_unit1_step",
+        )
+        prepare_accept_source = source_function(
+            hands_root / "consultation_v2/platforms/linkedin/unit1_prepare.py",
+            "accept_preparation_step",
+        )
+        for generic_field in (
+            "scroll_context_intersects_viewport",
+            "scroll_target_exact",
+            "live_extent_in_viewport",
+            "available_below_px",
+            "min_downward_clearance_px",
+        ):
+            require(
+                generic_field in manual_source,
+                f"Hands scroll barrier lost generic field {generic_field}",
+            )
+        for accept_source in (unit1_accept_source, prepare_accept_source):
+            require(
+                "postcondition.get('available_below_px')" in accept_source
+                and "postcondition.get('thread_opener_available_below_px')"
+                in accept_source,
+                "Hands acceptance lost generic/provider clearance equivalence",
+            )
 
     proxy = SERVING_ROOT / "soma_proxy.py"
     drive = SERVING_ROOT / "ui_drive.py"

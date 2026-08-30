@@ -27,6 +27,7 @@ from revenue_ui_contract import (
     parse_semantic_input,
     semantic_input,
     semantic_receipt,
+    scroll_postcondition_exact,
     validate_operation_card,
 )
 
@@ -2362,6 +2363,16 @@ def _revenue_scroll_into_view(
             f"{row['element']} is not currently authorized for one viewport scroll"
         )
 
+    target_source = card["scroll_target_source"]
+    target_object = (
+        row.get("atspi_obj")
+        if target_source == "self"
+        else row.get("scroll_target_atspi_obj")
+    )
+    if target_object is None:
+        raise UiDriveError(
+            f"{row['element']} has no exact {card['scroll_target']} scroll target"
+        )
     runtime = ConsultationRuntime(deps.platform)
     element = ElementRef(
         key=str(row["element"]),
@@ -2372,10 +2383,27 @@ def _revenue_scroll_into_view(
         states=list(row.get("states") or []),
         text=row.get("text"),
         description=row.get("description"),
-        atspi_obj=row.get("atspi_obj"),
-        raw={},
+        atspi_obj=target_object,
+        raw={
+            "phase": card["phase"],
+            "scroll_target": card["scroll_target"],
+            "scroll_target_source": target_source,
+            "scroll_alignment": card["scroll_alignment"],
+            **(
+                {
+                    "min_downward_clearance_px": card[
+                        "min_downward_clearance_px"
+                    ],
+                }
+                if "min_downward_clearance_px" in card
+                else {}
+            ),
+        },
     )
-    if not runtime.scroll_element_into_view(element):
+    if not runtime.scroll_element_into_view(
+        element,
+        alignment=card["scroll_alignment"],
+    ):
         raise UiDriveError(
             f"{row['element']} scroll_into_view primitive returned false"
         )
@@ -2404,6 +2432,8 @@ def _revenue_scroll_into_view(
         if isinstance(barrier_receipt, dict)
         else None
     )
+    minimum_clearance = card.get("min_downward_clearance_px")
+    clearance_exact = scroll_postcondition_exact(card, postcondition)
     if (
         post_snapshot is None
         or not isinstance(barrier_receipt, dict)
@@ -2417,6 +2447,11 @@ def _revenue_scroll_into_view(
         or postcondition.get("activity_exact") is not True
         or postcondition.get("body_sha256_exact") is not True
         or postcondition.get("live_extent_in_viewport") is not True
+        or postcondition.get("phase") != card["phase"]
+        or postcondition.get("scroll_target") != card["scroll_target"]
+        or postcondition.get("scroll_target_source") != target_source
+        or postcondition.get("scroll_alignment") != card["scroll_alignment"]
+        or clearance_exact is not True
     ):
         raise UiDriveError(
             f"{deps.platform} scroll observation barrier did not prove the "
@@ -2427,6 +2462,17 @@ def _revenue_scroll_into_view(
         "performed_primitive": "scroll_into_view",
         "performed_operation": "scroll_into_view",
         "effect_class": "viewport",
+        "phase": card["phase"],
+        "scroll_target": card["scroll_target"],
+        "scroll_target_source": target_source,
+        "scroll_alignment": card["scroll_alignment"],
+        **(
+            {
+                "min_downward_clearance_px": minimum_clearance,
+            }
+            if minimum_clearance is not None
+            else {}
+        ),
         "element": {
             "category": "mapped",
             "element": row["element"],

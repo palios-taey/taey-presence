@@ -6,6 +6,8 @@ DECLARED_EFFECTS = {"activate": "page", "mapped_pointer_activate": "page", "scro
                     "paste_frozen_text": "draft", "activate_optional_like": "outward", "submit_frozen_comment": "outward"}
 SEMANTIC_OUTWARD = frozenset({"activate_optional_like", "submit_frozen_comment"})
 _SHA256 = re.compile(r"[0-9a-f]{64}")
+_SCROLL_TARGET = re.compile(r"[a-z][a-z0-9_]{0,63}")
+_SCROLL_PHASE = re.compile(r"[a-z][a-z0-9_]{0,63}")
 def canonical_json_bytes(value: object) -> bytes:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
 def canonical_sha256(value: object) -> str:
@@ -21,6 +23,43 @@ def operation_card(*, element: str, ref: str, declared: dict[str, Any]) -> dict[
         if isinstance(maximum, bool) or not isinstance(maximum, int) or maximum < 1:
             raise ValueError("paste operation has no positive YAML maximum")
         card["max_text_chars"] = maximum
+    if method == "scroll_into_view":
+        phase = declared.get("phase")
+        target = declared.get("scroll_target")
+        source = declared.get("scroll_target_source")
+        alignment = declared.get("scroll_alignment")
+        minimum_clearance = declared.get("min_downward_clearance_px")
+        if (
+            not isinstance(phase, str)
+            or _SCROLL_PHASE.fullmatch(phase) is None
+            or not isinstance(target, str)
+            or _SCROLL_TARGET.fullmatch(target) is None
+            or source not in {"self", "mapped_context"}
+            or alignment not in {"anywhere", "top_edge"}
+            or (
+                phase != "thread_scroll"
+                and minimum_clearance is not None
+            )
+            or (
+                phase == "thread_scroll"
+                and (
+                    isinstance(minimum_clearance, bool)
+                    or not isinstance(minimum_clearance, int)
+                    or minimum_clearance < 0
+                )
+            )
+        ):
+            raise ValueError(
+                "scroll operation has no exact phase, target, alignment, and clearance"
+            )
+        card.update(
+            phase=phase,
+            scroll_target=target,
+            scroll_target_source=source,
+            scroll_alignment=alignment,
+        )
+        if minimum_clearance is not None:
+            card["min_downward_clearance_px"] = minimum_clearance
     if method in SEMANTIC_OUTWARD or method == "paste_frozen_text":
         activity = post.get("activity") if isinstance((post := declared.get("postcondition")), dict) else None
         body = post.get("body_sha256") if isinstance(post, dict) else None
@@ -40,12 +79,60 @@ def validate_operation_card(card: dict[str, Any]) -> dict[str, Any]:
     payload = {key: value for key, value in card.items() if key != "card_sha256"}
     method = card.get("method")
     keys = {"schema", "element", "ref", "method", "effect_class", "card_sha256"}
-    keys |= ({"max_text_chars"} if method == "paste_frozen_text" else set()) | ({"draft_sha256", "precondition_kind"} if method == "submit_frozen_comment" else set()) | ({"selected_activity", "selected_post_body_sha256", "postcondition_kind"} if method in SEMANTIC_OUTWARD or method == "paste_frozen_text" else set())
+    keys |= ({"max_text_chars"} if method == "paste_frozen_text" else set()) | ({"phase", "scroll_target", "scroll_target_source", "scroll_alignment"} if method == "scroll_into_view" else set()) | ({"min_downward_clearance_px"} if method == "scroll_into_view" and "min_downward_clearance_px" in card else set()) | ({"draft_sha256", "precondition_kind"} if method == "submit_frozen_comment" else set()) | ({"selected_activity", "selected_post_body_sha256", "postcondition_kind"} if method in SEMANTIC_OUTWARD or method == "paste_frozen_text" else set())
     if (set(card) != keys or card.get("schema") != "taey_revenue_ui_operation_card_v1"
             or method not in DECLARED_EFFECTS or card.get("effect_class") != DECLARED_EFFECTS[method]
+            or (method == "scroll_into_view" and (
+                _SCROLL_PHASE.fullmatch(str(card.get("phase") or "")) is None
+                or _SCROLL_TARGET.fullmatch(str(card.get("scroll_target") or "")) is None
+                or card.get("scroll_target_source") not in {"self", "mapped_context"}
+                or card.get("scroll_alignment") not in {"anywhere", "top_edge"}
+                or (
+                    card.get("phase") == "thread_scroll"
+                    and "min_downward_clearance_px" not in card
+                )
+                or (
+                    card.get("phase") != "thread_scroll"
+                    and "min_downward_clearance_px" in card
+                )
+                or (
+                    card.get("phase") == "thread_scroll"
+                    and (
+                        isinstance(card.get("min_downward_clearance_px"), bool)
+                        or not isinstance(card.get("min_downward_clearance_px"), int)
+                        or card.get("min_downward_clearance_px", -1) < 0
+                    )
+                )
+            ))
             or card.get("card_sha256") != canonical_sha256(payload)):
         raise ValueError("revenue UI operation card hash is not exact")
     return card
+def scroll_postcondition_exact(
+    card: dict[str, Any],
+    postcondition: dict[str, Any] | None,
+) -> bool:
+    if card.get("method") != "scroll_into_view" or not isinstance(postcondition, dict):
+        return False
+    available_below = postcondition.get("available_below_px")
+    if (
+        postcondition.get("scroll_context_intersects_viewport") is not True
+        or postcondition.get("scroll_target_exact") is not True
+        or postcondition.get("live_extent_in_viewport") is not True
+        or isinstance(available_below, bool)
+        or not isinstance(available_below, int)
+        or available_below < 0
+    ):
+        return False
+    minimum_clearance = card.get("min_downward_clearance_px")
+    if minimum_clearance is None:
+        return "min_downward_clearance_px" not in postcondition
+    return bool(
+        not isinstance(minimum_clearance, bool)
+        and isinstance(minimum_clearance, int)
+        and minimum_clearance >= 0
+        and postcondition.get("min_downward_clearance_px") == minimum_clearance
+        and available_below >= minimum_clearance
+    )
 def semantic_input(manifest: dict[str, Any], card: dict[str, Any]) -> dict[str, Any]:
     validate_operation_card(card)
     if card["method"] not in SEMANTIC_OUTWARD:
