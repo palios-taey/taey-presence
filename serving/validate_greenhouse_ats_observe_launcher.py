@@ -222,6 +222,12 @@ def validate_exact_request(request: dict[str, object], correlation: str) -> None
     }
     for name, value in expected.items():
         require(headers.get(name) == value, f"{name} drifted")
+    require(
+        set(headers)
+        == set(expected) | {"Host", "Accept-Encoding", "Content-Length"},
+        "request contained an unexpected header",
+    )
+    require(headers.get("Content-Length") == "17", "content length drifted")
     require("Authorization" not in headers, "launcher transmitted an authorization secret")
 
 
