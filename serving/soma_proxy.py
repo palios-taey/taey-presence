@@ -1683,10 +1683,10 @@ TOOLS = [
                         "pattern": "^[0-9a-f]{64}$",
                         "description": "operate only: exact preceding opaque card hash",
                     },
-                    "selected_activity": {
-                        "type": "string",
-                        "pattern": "^[0-9]+$",
-                        "description": "select only: exact activity from the returned inventory",
+                    "selected_notification_ordinal": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "select only: exact mounted notification ordinal from the returned inventory",
                     },
                     "target_passed": {"type": "boolean"},
                     "dedup_passed": {"type": "boolean"},
@@ -1700,11 +1700,11 @@ TOOLS = [
                         "items": {
                             "type": "object",
                             "additionalProperties": False,
-                            "required": ["activity", "reason_codes"],
+                            "required": ["notification_ordinal", "reason_codes"],
                             "properties": {
-                                "activity": {
-                                    "type": "string",
-                                    "pattern": "^[0-9]+$",
+                                "notification_ordinal": {
+                                    "type": "integer",
+                                    "minimum": 1,
                                 },
                                 "reason_codes": {
                                     "type": "array",
@@ -1746,7 +1746,7 @@ TOOLS = [
                     },
                     {
                         "required": [
-                            "selected_activity",
+                            "selected_notification_ordinal",
                             "target_passed",
                             "dedup_passed",
                             "author_cooloff_passed",
@@ -6980,7 +6980,7 @@ def _do_linkedin_unit1_prepare(arguments: dict) -> str:
         "select": {
             "display",
             "action",
-            "selected_activity",
+            "selected_notification_ordinal",
             "target_passed",
             "dedup_passed",
             "author_cooloff_passed",
