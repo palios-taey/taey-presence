@@ -14,16 +14,20 @@ chain. You own the exact candidate decision and the final draft.
 4. If the state is `ready_for_private_selection`, examine every actionable
    candidate in the exact decision input using the returned identity and
    selection policy. If one actionable
-   activity qualifies, call `action="select"` with that exact activity and the
+   activity qualifies, call `action="select"` with that candidate's exact
+   integer mounted notification ordinal and the
    three verdicts set true only when the target, dedup, and author-cooloff rules
    all pass. A `select` call contains exactly `display`, `action`,
-   `selected_activity`, and those three literal JSON boolean `true` verdicts,
+   `selected_notification_ordinal`, and those three literal JSON boolean `true`
+   verdicts,
    never quoted strings; never carry a `card_sha256` into it. If any verdict
    would be false, do not select that activity.
    A qualifying selection always takes priority over continuation. If
    none qualifies and `continuation_available` is true, call `action="exclude"`
-   with every actionable activity in the exact returned decision order and its
-   exact sorted reason codes. Allowed codes are `already_used`, `author_cooloff`,
+   with every actionable candidate's exact returned integer `ordinal` encoded
+   as `notification_ordinal` in the exact returned decision order and its exact
+   sorted reason codes. Allowed codes are
+   `already_used`, `author_cooloff`,
    `event_announcement`, `hostile_or_irrelevant`, `off_target`,
    `pitch_or_promotion`, `self_authored`, and `stale`. Do not omit a candidate or
    invent another code. After `observe_required`, return to step 1; the accepted

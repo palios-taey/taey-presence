@@ -125,21 +125,21 @@ def build_selection(
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     expected_arguments = {
         "action", "author_cooloff_passed", "dedup_passed", "display",
-        "selected_activity", "target_passed",
+        "selected_notification_ordinal", "target_passed",
     }
     if set(arguments) != expected_arguments or any(
         arguments[field] is not True
         for field in ("target_passed", "dedup_passed", "author_cooloff_passed")
     ):
         raise LinkedInUnit1PreparePublisherError("selection verdicts are incomplete")
-    activity = arguments["selected_activity"]
+    ordinal = arguments["selected_notification_ordinal"]
     inventory = selection_input.get("notification_inventory")
     if (
         selection_input.get("schema") != "linkedin_unit1_private_selection_input_v1"
         or selection_input.get("policy_sha256") != preparation["policy_sha256"]
         or selection_input.get("transaction_sha256")
         != preparation_transaction_sha256(preparation)
-        or not isinstance(activity, str) or _ACTIVITY.fullmatch(activity) is None
+        or isinstance(ordinal, bool) or not isinstance(ordinal, int)
         or not isinstance(inventory, Mapping)
         or not isinstance(inventory.get("rows"), list)
         or not isinstance(inventory.get("actionable_links"), list)
@@ -149,12 +149,14 @@ def build_selection(
         or not _SHA256.fullmatch(str(inventory.get("inventory_sha256") or ""))
     ):
         raise LinkedInUnit1PreparePublisherError("selection input is invalid")
-    links = [row for row in inventory["actionable_links"] if row.get("activity") == activity]
+    links = [row for row in inventory["actionable_links"] if row.get("ordinal") == ordinal]
     if len(links) != 1:
-        raise LinkedInUnit1PreparePublisherError("selected activity is not exact")
-    ordinal = links[0].get("ordinal")
+        raise LinkedInUnit1PreparePublisherError("selected ordinal is not exact")
     if not isinstance(ordinal, int) or not 1 <= ordinal <= len(inventory["rows"]):
         raise LinkedInUnit1PreparePublisherError("selected ordinal is invalid")
+    activity = links[0].get("activity")
+    if not isinstance(activity, str) or _ACTIVITY.fullmatch(activity) is None:
+        raise LinkedInUnit1PreparePublisherError("selected activity binding is invalid")
     row = inventory["rows"][ordinal - 1]
     text = row.get("notification_text")
     if (
@@ -274,29 +276,39 @@ def build_exclusions(
         or not isinstance(rows, list)
     ):
         raise LinkedInUnit1PreparePublisherError("exclusion input is invalid")
-    expected_activities: list[str] = []
+    expected_ordinals: list[int] = []
+    activities_by_ordinal: dict[int, str] = {}
     for link in inventory["actionable_links"]:
         activity = link.get("activity") if isinstance(link, Mapping) else None
+        ordinal = link.get("ordinal") if isinstance(link, Mapping) else None
         if (
             not isinstance(activity, str)
             or _ACTIVITY.fullmatch(activity) is None
-            or activity in expected_activities
+            or isinstance(ordinal, bool)
+            or not isinstance(ordinal, int)
+            or ordinal < 1
+            or ordinal in activities_by_ordinal
         ):
             raise LinkedInUnit1PreparePublisherError(
-                "exact actionable inventory activities are invalid"
+                "exact actionable inventory ordinals are invalid"
             )
-        expected_activities.append(activity)
+        expected_ordinals.append(ordinal)
+        activities_by_ordinal[ordinal] = activity
     excluded_candidates: list[dict[str, Any]] = []
+    submitted_ordinals: list[int] = []
     for row in rows:
-        if not isinstance(row, Mapping) or set(row) != {"activity", "reason_codes"}:
+        if not isinstance(row, Mapping) or set(row) != {
+            "notification_ordinal", "reason_codes",
+        }:
             raise LinkedInUnit1PreparePublisherError(
                 "excluded candidate fields are incomplete or unknown"
             )
-        activity = row["activity"]
+        ordinal = row["notification_ordinal"]
         reason_codes = row["reason_codes"]
         if (
-            not isinstance(activity, str)
-            or _ACTIVITY.fullmatch(activity) is None
+            isinstance(ordinal, bool)
+            or not isinstance(ordinal, int)
+            or ordinal not in activities_by_ordinal
             or not isinstance(reason_codes, list)
             or not reason_codes
             or reason_codes != sorted(set(reason_codes))
@@ -309,11 +321,12 @@ def build_exclusions(
             raise LinkedInUnit1PreparePublisherError(
                 "excluded candidate evidence is invalid"
             )
+        submitted_ordinals.append(ordinal)
         excluded_candidates.append({
-            "activity": activity,
+            "activity": activities_by_ordinal[ordinal],
             "reason_codes": list(reason_codes),
         })
-    if [row["activity"] for row in excluded_candidates] != expected_activities:
+    if submitted_ordinals != expected_ordinals:
         raise LinkedInUnit1PreparePublisherError(
             "exclusions do not cover the exact actionable inventory"
         )

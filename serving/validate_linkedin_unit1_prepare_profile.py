@@ -291,7 +291,7 @@ def main() -> int:
         "observe": set(),
         "operate": {"card_sha256"},
         "select": {
-            "selected_activity", "target_passed", "dedup_passed",
+            "selected_notification_ordinal", "target_passed", "dedup_passed",
             "author_cooloff_passed",
         },
         "exclude": {"excluded_candidates"},
@@ -322,6 +322,11 @@ def main() -> int:
         ),
         "select verdict types are not visible at the root tool boundary",
     )
+    require(
+        properties["selected_notification_ordinal"].get("type") == "integer"
+        and properties["selected_notification_ordinal"].get("minimum") == 1,
+        "select does not use one positive notification ordinal",
+    )
     select_properties = variants_by_action["select"]["properties"]
     require(
         all(
@@ -337,14 +342,21 @@ def main() -> int:
         exclusion_schema["type"] == "array"
         and exclusion_schema["items"]["additionalProperties"] is False
         and exclusion_schema["items"]["required"]
-        == ["activity", "reason_codes"]
+        == ["notification_ordinal", "reason_codes"]
+        and exclusion_schema["items"]["properties"]["notification_ordinal"]
+        == {"type": "integer", "minimum": 1}
+        and set(exclusion_schema["items"]["properties"])
+        == {"notification_ordinal", "reason_codes"}
         and exclusion_schema["items"]["properties"]["reason_codes"]["items"][
             "enum"
         ]
         == sorted(publisher.EXCLUSION_REASON_CODES),
         "private exclusion evidence grammar drifted",
     )
-    for forbidden in ("selector", "coordinate", "url", "path", "element"):
+    for forbidden in (
+        "selector", "coordinate", "url", "path", "element",
+        "selected_activity",
+    ):
         require(
             forbidden not in properties,
             f"model-facing preparation tool exposes {forbidden}",
@@ -782,7 +794,7 @@ def main() -> int:
         selection_arguments = {
             "display": ":18",
             "action": "select",
-            "selected_activity": "123456789",
+            "selected_notification_ordinal": 1,
             "target_passed": True,
             "dedup_passed": True,
             "author_cooloff_passed": True,
@@ -792,11 +804,40 @@ def main() -> int:
             selection_arguments,
             loaded["preparation"],
         )
+        require(
+            frozen_selection["selected_activity"] == link["activity"]
+            and frozen_selection["selected_notification_ordinal"]
+            == link["ordinal"],
+            "server did not resolve selected ordinal to the exact activity",
+        )
+        for invalid_ordinal in (True, 2):
+            expect_refusal(
+                lambda invalid_ordinal=invalid_ordinal: publisher.build_selection(
+                    selection_input,
+                    {
+                        **selection_arguments,
+                        "selected_notification_ordinal": invalid_ordinal,
+                    },
+                    loaded["preparation"],
+                ),
+                "invalid selected ordinal retained activity authority",
+            )
+        legacy_selection = dict(selection_arguments)
+        legacy_selection.pop("selected_notification_ordinal")
+        legacy_selection["selected_activity"] = link["activity"]
+        expect_refusal(
+            lambda: publisher.build_selection(
+                selection_input,
+                legacy_selection,
+                loaded["preparation"],
+            ),
+            "model-supplied activity retained selection authority",
+        )
         exclusion_arguments = {
             "display": ":18",
             "action": "exclude",
             "excluded_candidates": [{
-                "activity": "123456789",
+                "notification_ordinal": 1,
                 "reason_codes": ["off_target"],
             }],
         }
@@ -819,6 +860,41 @@ def main() -> int:
                 if key != "exclusions_sha256"
             }),
             "complete exact exclusions were not frozen",
+        )
+        require(
+            frozen_exclusions["excluded_candidates"] == [{
+                "activity": link["activity"],
+                "reason_codes": ["off_target"],
+            }],
+            "server did not resolve exclusion ordinal to the exact activity",
+        )
+        for invalid_ordinal in (True, 2):
+            invalid_exclusion = json.loads(json.dumps(exclusion_arguments))
+            invalid_exclusion["excluded_candidates"][0][
+                "notification_ordinal"
+            ] = invalid_ordinal
+            expect_refusal(
+                lambda invalid_exclusion=invalid_exclusion: (
+                    publisher.build_exclusions(
+                        selection_input,
+                        invalid_exclusion,
+                        loaded["preparation"],
+                    )
+                ),
+                "invalid exclusion ordinal retained activity authority",
+            )
+        legacy_exclusion = json.loads(json.dumps(exclusion_arguments))
+        legacy_exclusion["excluded_candidates"][0] = {
+            "activity": link["activity"],
+            "reason_codes": ["off_target"],
+        }
+        expect_refusal(
+            lambda: publisher.build_exclusions(
+                selection_input,
+                legacy_exclusion,
+                loaded["preparation"],
+            ),
+            "model-supplied activity retained exclusion authority",
         )
         empty_inventory = json.loads(json.dumps(selection_input))
         empty_inventory["notification_inventory"]["rows"][0][
