@@ -30,12 +30,12 @@ python3 serving/validate_greenhouse_ats_observe_launcher.py
 
 It proves the exact manifest and `observe_form` action schemas consumed by
 Presence, canonical JSON and digest binding, owner-only directory and file
-modes, duplicate launcher-identity refusal, symlink refusal, immutable-file
-whole-second birth/change time agreement where the filesystem reports birth
-time, one exact local POST, private response capture, and no retry after either
-a collision or an HTTP failure. A `200` refusal or malformed observe receipt is
-also terminal. The gate uses generated identities and a local synthetic
-endpoint; it does not touch a browser or production private data.
+modes, duplicate launcher-identity refusal, symlink refusal, the same-second
+file birth/change check where birth time is reported, one exact local POST,
+private response capture, and no retry after either a collision or an HTTP
+failure. A `200` refusal or malformed observe receipt is also terminal. The
+gate uses generated identities and a local synthetic endpoint; it does not
+touch a browser or production private data.
 
 ## One fresh production observe
 
