@@ -7051,6 +7051,11 @@ def _do_linkedin_unit1_prepare(arguments: dict) -> str:
             and barrier.get("next_mutation_authorized") is False
             and barrier.get("stable_cycles_observed") == 2
             and barrier.get("refresh_policy") == "invalidate_reacquire"
+            and all(
+                sample.get("firefox_cache_invalidation")
+                == "recursive_success"
+                for sample in barrier["samples"]
+            )
             and isinstance(authority, str)
             and re.fullmatch(r"[0-9a-f]{64}", authority) is not None
             and all(sample.get("error") is None for sample in final_samples)

@@ -535,7 +535,7 @@ def main() -> int:
                 "snapshot_revision": None,
                 "semantic_authority_sha256": None,
                 "matched_previous_authority": False,
-                "firefox_cache_invalidation": None,
+                "firefox_cache_invalidation": "recursive_success",
                 "error": "UiDriveError: detached AT-SPI node",
             },
             {
@@ -562,12 +562,20 @@ def main() -> int:
         compile_barrier_exact(stale_then_stable, "PASS"),
         "stale-first-read then two exact semantic samples did not pass",
     )
+    forged_refresh_policy = json.loads(json.dumps(stale_then_stable))
+    forged_refresh_policy["samples"][0]["firefox_cache_invalidation"] = None
+    require(
+        not compile_barrier_exact(forged_refresh_policy, "PASS"),
+        "PASS accepted refresh policy not derived from every sample receipt",
+    )
     changed_authority = json.loads(json.dumps(stale_then_stable))
     changed_authority["samples"][-1]["semantic_authority_sha256"] = "b" * 64
     require(
         not compile_barrier_exact(changed_authority, "PASS"),
         "two different semantic compile authorities passed",
     )
+    timeout_sample = json.loads(json.dumps(stale_then_stable["samples"][0]))
+    timeout_sample["firefox_cache_invalidation"] = None
     timeout_barrier = {
         **stale_then_stable,
         "result": "TIMEOUT",
@@ -575,7 +583,7 @@ def main() -> int:
         "refresh_policy": "invalidate_reacquire_incomplete",
         "stable_cycles_observed": 0,
         "semantic_authority_sha256": None,
-        "samples": stale_then_stable["samples"][:1],
+        "samples": [timeout_sample],
     }
     require(
         compile_barrier_exact(timeout_barrier, "TIMEOUT"),
