@@ -16,6 +16,9 @@ its private action or manifest by hand and do not reuse an earlier identity.
   Applicant content and the lease credential are never command arguments,
   environment values, logs, or public artifacts.
 - The transaction ID, action ID, event ID, and correlation ID are all new.
+- `GREENHOUSE_ONE_ACTION_ENDPOINT` is resolved from the active dedicated
+  Presence listener and ends with `/v1/greenhouse-ats/one-action`. Never infer
+  or reuse a port from another Presence service.
 
 ## Mechanical gate
 
@@ -50,7 +53,7 @@ python3 serving/launch_greenhouse_ats_observe.py \
   --hands-commit "$GREENHOUSE_HANDS_COMMIT" \
   --transaction-id "$GREENHOUSE_TRANSACTION_ID" \
   --action-id "$GREENHOUSE_ACTION_ID" \
-  --endpoint http://127.0.0.1:8765/v1/greenhouse-ats/one-action
+  --endpoint "$GREENHOUSE_ONE_ACTION_ENDPOINT"
 ```
 
 The launcher validates every supplied identity before creation. It creates:

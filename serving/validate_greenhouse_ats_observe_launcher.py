@@ -232,6 +232,29 @@ def validate_exact_request(request: dict[str, object], correlation: str) -> None
 
 
 def validate_refusals(endpoint: str, baseline_requests: int) -> None:
+    with tempfile.TemporaryDirectory(prefix="greenhouse-observe-endpoint-") as temporary:
+        root = Path(temporary) / "private"
+        root.mkdir(mode=0o700)
+        root.chmod(0o700)
+        missing_endpoint = launch_command(root, endpoint, "missing-endpoint")
+        endpoint_index = missing_endpoint.index("--endpoint")
+        del missing_endpoint[endpoint_index : endpoint_index + 2]
+        rejected = subprocess.run(
+            missing_endpoint,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        require(rejected.returncode != 0, "missing endpoint was accepted")
+        require(
+            not (root / "outputs").exists(),
+            "missing endpoint created private output",
+        )
+        require(
+            len(RequestRecorder.requests) == baseline_requests,
+            "missing endpoint reached the endpoint",
+        )
+
     with tempfile.TemporaryDirectory(prefix="greenhouse-observe-refusal-") as temporary:
         root = Path(temporary) / "private"
         root.mkdir(mode=0o700)
@@ -283,6 +306,11 @@ def main() -> int:
     require(
         source.count('connection.request("POST", _ENDPOINT_PATH') == 1,
         "launcher does not contain one exact POST call",
+    )
+    require(
+        'parser.add_argument("--endpoint", required=True)' in source
+        and "8765" not in source,
+        "launcher endpoint is not explicit",
     )
     require("Authorization" not in source, "launcher source contains authorization")
     RequestRecorder.requests = []

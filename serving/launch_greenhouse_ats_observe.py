@@ -254,10 +254,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--hands-commit", required=True)
     parser.add_argument("--transaction-id", required=True)
     parser.add_argument("--action-id", required=True)
-    parser.add_argument(
-        "--endpoint",
-        default="http://127.0.0.1:8765/v1/greenhouse-ats/one-action",
-    )
+    parser.add_argument("--endpoint", required=True)
     return parser
 
 
