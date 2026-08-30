@@ -537,10 +537,12 @@ Those files remain private even if the caller inherited a permissive umask.
 
 Presence enforces `chat_template_kwargs.enable_thinking=false` on every upstream
 generation round in this preparation profile, even when a caller requests `true`.
-Each public Hands invocation has a fixed 300-second outer transport watchdog and
-the preparation adapter gives its nested primitive 180 seconds, so the bounded
-YAML-owned post-action observation can finish before Presence judges its exact
-receipt. Neither watchdog authorizes a retry.
+The launcher gives the complete proxy request one fixed 2400-second client-side
+containment watchdog. This is a fail-loud ceiling, not an SLA or a claim that the
+transaction will succeed within 2400 seconds. Each public Hands invocation has a
+fixed 300-second outer transport watchdog, and the preparation adapter gives its
+nested primitive 240 seconds, retaining a 60-second margin for Presence to judge
+the exact receipt. None of these watchdogs authorizes a retry.
 The measured production finding in [THROUGHPUT_FINDINGS.md](THROUGHPUT_FINDINGS.md)
 shows that leaving the flag absent made comparable routine output take 10.8 times
 longer. This is a profile-local inference policy; it does not change `full`,

@@ -119,7 +119,9 @@ if headers_by_name != {
     "Content-Type": "application/json",
     "X-Taey-Seat-Id": "seat-1",
     "X-Taey-Event-Id": "event-1",
-    "X-Taey-Correlation-Id": "correlation-1",
+    "X-Taey-Correlation-Id": os.environ.get(
+        "FAKE_EXPECTED_CORRELATION_ID", "correlation-1"
+    ),
     "X-Taey-Tool-Profile": "linkedin-unit1-prepare",
 }:
     raise SystemExit(94)
@@ -128,9 +130,13 @@ if arguments[-1] != "http://127.0.0.1:8765/v1/chat/completions":
 for flag in ("--fail-with-body", "--silent", "--show-error"):
     if arguments.count(flag) != 1:
         raise SystemExit(96)
+if arguments.count("--max-time") != 1 or option("--max-time") != "2400":
+    raise SystemExit(97)
+Path(os.environ["FAKE_CURL_MARKER"]).write_text("invoked\\n", encoding="utf-8")
+if os.environ.get("FAKE_CURL_EXIT") == "28":
+    raise SystemExit(28)
 headers.write_text("HTTP/1.1 200 OK\\n", encoding="utf-8")
 response.write_text('{"ok":true}\\n', encoding="utf-8")
-Path(os.environ["FAKE_CURL_MARKER"]).write_text("invoked\\n", encoding="utf-8")
 """,
             encoding="utf-8",
         )
@@ -178,6 +184,42 @@ Path(os.environ["FAKE_CURL_MARKER"]).write_text("invoked\\n", encoding="utf-8")
                 f"private launcher {name} is not 0600",
             )
         require(curl_marker.is_file(), "synthetic curl was not invoked")
+
+        curl_marker.unlink()
+        timeout_environment = {
+            **environment,
+            "FAKE_EXPECTED_CORRELATION_ID": "correlation-timeout",
+            "FAKE_CURL_EXIT": "28",
+            "TAEY_LINKEDIN_UNIT1_CORRELATION_ID": "correlation-timeout",
+        }
+        timed_out = subprocess.run(
+            command,
+            capture_output=True,
+            env=timeout_environment,
+            text=True,
+        )
+        timeout_dir = artifact_root / "correlation-timeout"
+        require(
+            timed_out.returncode == 28
+            and timed_out.stdout == ""
+            and curl_marker.is_file(),
+            "private launcher did not propagate the fixed curl timeout: "
+            f"rc={timed_out.returncode} stdout={timed_out.stdout!r} "
+            f"marker={curl_marker.is_file()}",
+        )
+        require(
+            stat.S_IMODE(os.lstat(timeout_dir).st_mode) == 0o700,
+            "private launcher timeout directory is not 0700",
+        )
+        for name in ("headers.txt", "response.json"):
+            path = timeout_dir / name
+            metadata = os.lstat(path)
+            require(
+                stat.S_ISREG(metadata.st_mode)
+                and stat.S_IMODE(metadata.st_mode) == 0o600
+                and metadata.st_size == 0,
+                f"private launcher timeout {name} is not empty 0600",
+            )
 
         curl_marker.unlink()
         collision = subprocess.run(

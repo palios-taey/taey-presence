@@ -84,6 +84,7 @@ PY
 
 set +e
 curl --fail-with-body --silent --show-error \
+  --max-time 2400 \
   --dump-header "$headers_path" \
   --output "$response_path" \
   -H 'Content-Type: application/json' \
