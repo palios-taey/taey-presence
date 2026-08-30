@@ -9,6 +9,7 @@ import hashlib
 import importlib
 import importlib.util
 import json
+import math
 import os
 import re
 import sys
@@ -91,6 +92,10 @@ if LOCK_TTL_DEFAULT < _MONITOR_TTL_DEFAULT:
     )
 
 _LINKEDIN_UNIT1_PREPARE_PRIMITIVE_TIMEOUT_SECS = 240
+_LINKEDIN_UNIT1_PREPARE_CHILD_RETURN_MARGIN_SECS = 15
+_LINKEDIN_UNIT1_PREPARE_CHILD_DEADLINE_ENV = (
+    "TAEY_LINKEDIN_UNIT1_PREPARE_CHILD_DEADLINE_MONOTONIC"
+)
 
 
 REF_PREFIX = "atspi3."
@@ -109,6 +114,22 @@ _GENERATION_FENCE_KEY_RE = re.compile(
 
 class UiDriveError(RuntimeError):
     pass
+
+
+def _revenue_observation_deadline() -> float:
+    now = time.monotonic()
+    raw = os.environ.get(_LINKEDIN_UNIT1_PREPARE_CHILD_DEADLINE_ENV)
+    if raw is None:
+        return now + LOCK_TTL_DEFAULT
+    try:
+        deadline = float(raw)
+    except ValueError as exc:
+        raise UiDriveError(
+            "LinkedIn preparation child deadline is invalid"
+        ) from exc
+    if not math.isfinite(deadline):
+        raise UiDriveError("LinkedIn preparation child deadline is invalid")
+    return min(deadline, now + LOCK_TTL_DEFAULT)
 
 
 class JsonArgumentParser(argparse.ArgumentParser):
@@ -1949,11 +1970,19 @@ def _linkedin_unit1_prepare_operate(
         try:
             import subprocess
 
+            primitive_env = dict(os.environ)
+            primitive_deadline = time.monotonic() + (
+                _LINKEDIN_UNIT1_PREPARE_PRIMITIVE_TIMEOUT_SECS
+                - _LINKEDIN_UNIT1_PREPARE_CHILD_RETURN_MARGIN_SECS
+            )
+            primitive_env[
+                _LINKEDIN_UNIT1_PREPARE_CHILD_DEADLINE_ENV
+            ] = repr(primitive_deadline)
             completed = subprocess.run(
                 command,
                 capture_output=True,
                 timeout=_LINKEDIN_UNIT1_PREPARE_PRIMITIVE_TIMEOUT_SECS,
-                env=dict(os.environ),
+                env=primitive_env,
             )
         except subprocess.TimeoutExpired as exc:
             raise UiDriveError("LinkedIn Unit 1 preparation operation timed out") from exc
@@ -2174,7 +2203,7 @@ def _revenue_activate(
         post_snapshot, barrier_receipt = stable_observation(
             row["element"],
             "activate",
-            time.monotonic() + LOCK_TTL_DEFAULT,
+            _revenue_observation_deadline(),
         )
     except Exception as exc:
         raise UiDriveError(
@@ -2536,7 +2565,7 @@ def _revenue_scroll_into_view(
     try:
         post_snapshot, barrier_receipt = stable_observation(
             row["element"],
-            time.monotonic() + LOCK_TTL_DEFAULT,
+            _revenue_observation_deadline(),
         )
     except Exception as exc:
         raise UiDriveError(
