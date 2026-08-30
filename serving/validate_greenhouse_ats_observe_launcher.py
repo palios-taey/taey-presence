@@ -30,6 +30,7 @@ def require(condition: bool, message: str) -> None:
 class RequestRecorder(BaseHTTPRequestHandler):
     requests: list[dict[str, object]] = []
     next_status = 200
+    next_ok: bool | None = None
 
     def do_POST(self) -> None:
         length = int(self.headers.get("Content-Length", "0"))
@@ -40,15 +41,20 @@ class RequestRecorder(BaseHTTPRequestHandler):
             "headers": dict(self.headers.items()),
             "body": body,
         })
+        response_ok = (
+            self.__class__.next_status == 200
+            if self.__class__.next_ok is None
+            else self.__class__.next_ok
+        )
         payload = json.dumps(
             {
-                "ok": self.__class__.next_status == 200,
+                "ok": response_ok,
                 "display": ":26",
                 "action": "operate",
                 "greenhouse_ats_sequence": {
                     "state": (
                         "action_succeeded"
-                        if self.__class__.next_status == 200
+                        if response_ok
                         else "refused"
                     )
                 },
@@ -260,6 +266,7 @@ def main() -> int:
     require("Authorization" not in source, "launcher source contains authorization")
     RequestRecorder.requests = []
     RequestRecorder.next_status = 200
+    RequestRecorder.next_ok = None
     server = ThreadingHTTPServer(("127.0.0.1", 0), RequestRecorder)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -306,6 +313,22 @@ def main() -> int:
                 "non-success endpoint was retried",
             )
             output = root / "outputs" / "greenhouse-canary" / "http-failure"
+            require_private_file(output / "headers.txt", 0o600)
+            require_private_file(output / "response.json", 0o600)
+
+        with tempfile.TemporaryDirectory(prefix="greenhouse-observe-refused-") as temporary:
+            root = Path(temporary) / "private"
+            root.mkdir(mode=0o700)
+            root.chmod(0o700)
+            RequestRecorder.next_status = 200
+            RequestRecorder.next_ok = False
+            refused = run_launcher(root, endpoint, "endpoint-refusal")
+            require(refused.returncode != 0, "200 endpoint refusal was accepted")
+            require(
+                len(RequestRecorder.requests) == 3,
+                "200 endpoint refusal was retried",
+            )
+            output = root / "outputs" / "greenhouse-canary" / "endpoint-refusal"
             require_private_file(output / "headers.txt", 0o600)
             require_private_file(output / "response.json", 0o600)
     finally:

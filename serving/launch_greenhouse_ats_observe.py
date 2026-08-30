@@ -191,6 +191,21 @@ def launch_one_observe(arguments: argparse.Namespace) -> int:
             raise GreenhouseObserveLaunchError(
                 "one-action endpoint returned a non-object"
             )
+        if (
+            set(result) != {
+                "ok",
+                "display",
+                "action",
+                "greenhouse_ats_sequence",
+            }
+            or result.get("ok") is not True
+            or result.get("display") != arguments.display
+            or result.get("action") != "operate"
+            or not isinstance(result.get("greenhouse_ats_sequence"), dict)
+        ):
+            raise GreenhouseObserveLaunchError(
+                "one-action endpoint returned a refusal or contract mismatch"
+            )
         return 0
     finally:
         if connection is not None:
