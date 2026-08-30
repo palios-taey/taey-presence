@@ -350,14 +350,15 @@ GREENHOUSE_ATS_FIREFOX_PID = os.environ.get(
 GREENHOUSE_ATS_RECEIPT_ROOT = os.environ.get(
     "TAEY_GREENHOUSE_ATS_RECEIPT_ROOT", ""
 ).strip()
-GREENHOUSE_ATS_LEASE_SECRET = os.environ.get(
-    "TAEY_GREENHOUSE_ATS_LEASE_SECRET", ""
+GREENHOUSE_ATS_CREDENTIALS_DIRECTORY = os.environ.get(
+    "CREDENTIALS_DIRECTORY", ""
 ).strip()
+GREENHOUSE_ATS_LEASE_CREDENTIAL_NAME = "greenhouse-ats-lease-secret"
 GREENHOUSE_ATS_HANDS_COMMIT = os.environ.get(
     "TAEY_GREENHOUSE_ATS_HANDS_COMMIT", ""
 ).strip()
 GREENHOUSE_ATS_REQUIRED_HANDS_COMMIT = (
-    "4171a6cc700128d0d9d1107e8a91221a8ea6a1c1"
+    "d241e1a4c5238dcadca2c112765fa584516e68f9"
 )
 GREENHOUSE_ATS_HANDS_INCARNATION_ID = os.environ.get(
     "TAEY_GREENHOUSE_ATS_HANDS_INCARNATION_ID", ""
@@ -5455,6 +5456,36 @@ def _open_greenhouse_ats_frozen_action(
         raise
 
 
+def _open_greenhouse_ats_lease_credential(path: Path) -> int:
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
+        )
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.geteuid()
+            or stat.S_IMODE(metadata.st_mode) != 0o400
+            or metadata.st_size != 64
+        ):
+            raise RuntimeError(
+                "Greenhouse ATS lease credential failed descriptor validation"
+            )
+        return descriptor
+    except OSError as exc:
+        if descriptor is not None:
+            os.close(descriptor)
+        raise RuntimeError(
+            "Greenhouse ATS lease credential could not be opened"
+        ) from exc
+    except Exception:
+        if descriptor is not None:
+            os.close(descriptor)
+        raise
+
+
 def _greenhouse_ats_runtime() -> dict[str, str | int]:
     import subprocess
 
@@ -5467,8 +5498,6 @@ def _greenhouse_ats_runtime() -> dict[str, str | int]:
         raise RuntimeError(
             "TAEY_GREENHOUSE_ATS_BINDING must have exact greenhouse=:N form"
         )
-    if not re.fullmatch(r"[0-9a-f]{64}", GREENHOUSE_ATS_LEASE_SECRET):
-        raise RuntimeError("TAEY_GREENHOUSE_ATS_LEASE_SECRET must be 64 lowercase hex")
     if not re.fullmatch(r"[0-9a-f]{40}", GREENHOUSE_ATS_HANDS_COMMIT):
         raise RuntimeError("TAEY_GREENHOUSE_ATS_HANDS_COMMIT must be one exact Git SHA")
     if GREENHOUSE_ATS_HANDS_COMMIT != GREENHOUSE_ATS_REQUIRED_HANDS_COMMIT:
@@ -5495,6 +5524,10 @@ def _greenhouse_ats_runtime() -> dict[str, str | int]:
     hands_root = Path(GREENHOUSE_ATS_HANDS_ROOT)
     receipt_root = Path(GREENHOUSE_ATS_RECEIPT_ROOT)
     bus_path = Path(GREENHOUSE_ATS_AT_SPI_BUS_FILE)
+    credentials_directory = Path(GREENHOUSE_ATS_CREDENTIALS_DIRECTORY)
+    lease_credential_path = (
+        credentials_directory / GREENHOUSE_ATS_LEASE_CREDENTIAL_NAME
+    )
     runner = hands_root / "scripts" / "run_ats_greenhouse_one_action.py"
     if (
         not python_path.is_absolute()
@@ -5516,6 +5549,22 @@ def _greenhouse_ats_runtime() -> dict[str, str | int]:
     ):
         raise RuntimeError(
             "TAEY_GREENHOUSE_ATS_RECEIPT_ROOT must be owner-controlled mode 0700"
+        )
+    if not credentials_directory.is_absolute():
+        raise RuntimeError("Greenhouse ATS systemd credential directory is unavailable")
+    try:
+        credential_metadata = os.lstat(lease_credential_path)
+    except OSError as exc:
+        raise RuntimeError("Greenhouse ATS systemd lease credential is unavailable") from exc
+    if (
+        lease_credential_path.is_symlink()
+        or not stat.S_ISREG(credential_metadata.st_mode)
+        or credential_metadata.st_uid != os.geteuid()
+        or stat.S_IMODE(credential_metadata.st_mode) != 0o400
+        or credential_metadata.st_size != 64
+    ):
+        raise RuntimeError(
+            "Greenhouse ATS systemd lease credential failed file validation"
         )
     if not bus_path.is_absolute() or not bus_path.is_file() or bus_path.is_symlink():
         raise RuntimeError("TAEY_GREENHOUSE_ATS_AT_SPI_BUS_FILE is unavailable")
@@ -5548,6 +5597,7 @@ def _greenhouse_ats_runtime() -> dict[str, str | int]:
         "python": str(python_path),
         "runner": str(runner),
         "bus": bus,
+        "lease_credential_path": str(lease_credential_path),
         "receipt_root": str(receipt_root),
         "timeout": GREENHOUSE_ATS_TIMEOUT_SECS,
     }
@@ -6032,12 +6082,25 @@ def _do_greenhouse_ats_ui(arguments: dict) -> str:
         return terminal_refusal("Greenhouse ATS manifest Hands commit does not match runtime")
     owned_pending = sequence.pop("pending")
     action_kind = frozen_action["action"]["kind"]
+    try:
+        lease_fd = _open_greenhouse_ats_lease_credential(
+            Path(str(runtime["lease_credential_path"]))
+        )
+    except Exception as exc:
+        try:
+            os.close(action_fd)
+        except OSError:
+            pass
+        return terminal_refusal(str(exc))
     drive_env = dict(os.environ)
+    drive_env.pop("TAEY_GREENHOUSE_ATS_LEASE_SECRET", None)
+    drive_env.pop("ATS_ONE_ACTION_LEASE_SECRET", None)
+    drive_env.pop("ATS_ONE_ACTION_LEASE_SECRET_FD", None)
     drive_env.update({
         "DISPLAY": display,
         "AT_SPI_BUS_ADDRESS": str(runtime["bus"]),
         "ATS_FIREFOX_PID": GREENHOUSE_ATS_FIREFOX_PID,
-        "ATS_ONE_ACTION_LEASE_SECRET": GREENHOUSE_ATS_LEASE_SECRET,
+        "ATS_ONE_ACTION_LEASE_SECRET_FD": str(lease_fd),
         "ATS_ONE_ACTION_RECEIPT_ROOT": str(runtime["receipt_root"]),
         "ATS_HANDS_COMMIT": GREENHOUSE_ATS_HANDS_COMMIT,
         "ATS_PRESENCE_INCARNATION_ID": str(
@@ -6062,7 +6125,7 @@ def _do_greenhouse_ats_ui(arguments: dict) -> str:
                 text=True,
                 timeout=int(runtime["timeout"]),
                 env=drive_env,
-                pass_fds=(action_fd,),
+                pass_fds=(action_fd, lease_fd),
             )
         except subprocess.TimeoutExpired:
             launch_error = (
@@ -6079,14 +6142,18 @@ def _do_greenhouse_ats_ui(arguments: dict) -> str:
                 else "side_effect_uncertain",
             )
     finally:
-        try:
-            os.close(action_fd)
-        except OSError:
-            if launch_error is None:
-                launch_error = (
-                    "Greenhouse ATS action descriptor close failed",
-                    "side_effect_uncertain",
-                )
+        for descriptor_name, descriptor in (
+            ("action", action_fd),
+            ("lease credential", lease_fd),
+        ):
+            try:
+                os.close(descriptor)
+            except OSError:
+                if launch_error is None:
+                    launch_error = (
+                        f"Greenhouse ATS {descriptor_name} descriptor close failed",
+                        "side_effect_uncertain",
+                    )
     if launch_error is not None:
         return terminal_refusal(
             launch_error[0],
