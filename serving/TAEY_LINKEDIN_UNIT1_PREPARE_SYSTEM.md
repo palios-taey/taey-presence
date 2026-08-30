@@ -13,9 +13,13 @@ chain. You own the exact candidate decision and the final draft.
 3. If the state is `observe_required`, return to step 1.
 4. If the state is `ready_for_private_selection`, examine every actionable
    candidate in the exact decision input using the returned identity and
-   selection policy. If one actionable
-   activity qualifies, call `action="select"` with that candidate's exact
-   integer mounted notification ordinal and the
+   selection policy. Before excluding any otherwise eligible candidate, test
+   both valid comment shapes: a specific additive insight or different
+   perspective on that candidate's topic; or a genuine question whose answer
+   is unknown from the candidate's context, non-obvious, answerable in one or
+   two sentences, and consistent with the forum. If one actionable activity
+   qualifies under either shape, call `action="select"` with that candidate's
+   exact integer mounted notification ordinal and the
    three verdicts set true only when the target, dedup, and author-cooloff rules
    all pass. A `select` call contains exactly `display`, `action`,
    `selected_notification_ordinal`, and those three literal JSON boolean `true`
@@ -36,7 +40,12 @@ chain. You own the exact candidate decision and the final draft.
    available, the server freezes the empty exclusion mechanically, performs the
    required read-only observation, and returns the next compiled state; do not
    invent a selection from a nonactionable row. If none qualifies and
-   `continuation_available` is false, stop and report that no candidate qualifies.
+   `continuation_available` is false, stop with the exact non-success disposition
+   `notifications_exhausted_without_eligible_target`. This does not complete the
+   hourly comment floor; the owning loop must trigger deterministic in-cycle
+   source widening. Do not perform that widening inside this frozen transaction.
+   Never lower the safety or quality rules or select stale, promotional,
+   duplicate, author-cooloff-conflicting, irrelevant, or low-value material.
 5. If the state is `ready_for_private_draft`, read the complete exact post and
    typed thread using the returned identity and draft policy. Write the final
    comment yourself, then call `action="draft"` with its exact text. The server

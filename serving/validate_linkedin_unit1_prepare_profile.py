@@ -362,6 +362,7 @@ def main() -> int:
             f"model-facing preparation tool exposes {forbidden}",
         )
     lowered_prompt = prompt.lower()
+    normalized_prompt = " ".join(prompt.split()).lower()
     require(
         "there is no human review or approval step" in lowered_prompt,
         "autonomous no-human-approval boundary is missing",
@@ -371,6 +372,35 @@ def main() -> int:
         and "continuation_available" in prompt
         and "qualifying selection always takes priority" in lowered_prompt,
         "candidate-first continuation instructions are incomplete",
+    )
+    require(
+        "before excluding any otherwise eligible candidate" in normalized_prompt
+        and "both valid comment shapes" in normalized_prompt
+        and "a specific additive insight or different perspective"
+        in normalized_prompt
+        and "on that candidate's topic" in normalized_prompt
+        and "a genuine question whose answer is unknown from the candidate's context"
+        in normalized_prompt
+        and "non-obvious" in normalized_prompt
+        and "answerable in one or two sentences" in normalized_prompt
+        and "consistent with the forum" in normalized_prompt,
+        "both valid candidate shapes are not required before exclusion",
+    )
+    require(
+        "`notifications_exhausted_without_eligible_target`" in prompt
+        and "exact non-success disposition" in normalized_prompt
+        and "does not complete the hourly comment floor" in normalized_prompt
+        and "owning loop must trigger deterministic in-cycle" in normalized_prompt
+        and "source widening" in normalized_prompt
+        and "never lower the safety or quality rules" in normalized_prompt
+        and all(
+            forbidden in normalized_prompt
+            for forbidden in (
+                "stale", "promotional", "duplicate",
+                "author-cooloff-conflicting", "irrelevant", "low-value",
+            )
+        ),
+        "notification exhaustion can still escape as successful or low-quality",
     )
     require(
         "never carry a `card_sha256`" in prompt
