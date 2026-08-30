@@ -6948,6 +6948,117 @@ def _do_linkedin_unit1_prepare(arguments: dict) -> str:
             == final_samples[1]["target_state_digest"]
         )
 
+    def compile_barrier_exact(barrier: object, expected_result: str) -> bool:
+        barrier_keys = {
+            "result",
+            "compile_authorized",
+            "next_mutation_authorized",
+            "projection",
+            "refresh_policy",
+            "stable_cycles_required",
+            "stable_cycles_observed",
+            "semantic_authority_sha256",
+            "samples",
+        }
+        sample_keys = {
+            "sample",
+            "elapsed_ms",
+            "snapshot_revision",
+            "semantic_authority_sha256",
+            "matched_previous_authority",
+            "firefox_cache_invalidation",
+            "error",
+        }
+        if (
+            not isinstance(barrier, dict)
+            or set(barrier) != barrier_keys
+            or barrier.get("result") != expected_result
+            or barrier.get("projection")
+            != "revision_stripped_compiled_authority"
+            or barrier.get("refresh_policy")
+            not in {"invalidate_reacquire", "invalidate_reacquire_incomplete"}
+            or barrier.get("stable_cycles_required") != 2
+            or not isinstance(barrier.get("samples"), list)
+            or not barrier["samples"]
+        ):
+            return False
+        elapsed_ms = -1
+        for index, sample in enumerate(barrier["samples"], 1):
+            if (
+                not isinstance(sample, dict)
+                or set(sample) != sample_keys
+                or sample.get("sample") != index
+                or isinstance(sample.get("elapsed_ms"), bool)
+                or not isinstance(sample.get("elapsed_ms"), int)
+                or sample["elapsed_ms"] < elapsed_ms
+                or not isinstance(sample.get("matched_previous_authority"), bool)
+            ):
+                return False
+            elapsed_ms = sample["elapsed_ms"]
+            revision = sample.get("snapshot_revision")
+            authority = sample.get("semantic_authority_sha256")
+            error = sample.get("error")
+            cache_invalidation = sample.get("firefox_cache_invalidation")
+            read_miss = (
+                revision is None
+                and authority is None
+                and sample["matched_previous_authority"] is False
+                and isinstance(error, str)
+                and bool(error)
+                and cache_invalidation in {None, "recursive_success"}
+            )
+            compiled = (
+                isinstance(revision, str)
+                and re.fullmatch(r"[0-9a-f]{64}", revision) is not None
+                and isinstance(authority, str)
+                and re.fullmatch(r"[0-9a-f]{64}", authority) is not None
+                and error is None
+                and cache_invalidation == "recursive_success"
+            )
+            if not read_miss and not compiled:
+                return False
+        if expected_result == "TIMEOUT":
+            return (
+                barrier.get("compile_authorized") is False
+                and barrier.get("next_mutation_authorized") is False
+                and barrier.get("stable_cycles_observed") in {0, 1}
+                and barrier.get("semantic_authority_sha256") is None
+                and (
+                    (
+                        barrier.get("refresh_policy") == "invalidate_reacquire"
+                        and all(
+                            sample.get("firefox_cache_invalidation")
+                            == "recursive_success"
+                            for sample in barrier["samples"]
+                        )
+                    )
+                    or (
+                        barrier.get("refresh_policy")
+                        == "invalidate_reacquire_incomplete"
+                        and any(
+                            sample.get("firefox_cache_invalidation")
+                            != "recursive_success"
+                            for sample in barrier["samples"]
+                        )
+                    )
+                )
+            )
+        final_samples = barrier["samples"][-2:]
+        authority = barrier.get("semantic_authority_sha256")
+        return (
+            len(final_samples) == 2
+            and barrier.get("compile_authorized") is True
+            and barrier.get("next_mutation_authorized") is False
+            and barrier.get("stable_cycles_observed") == 2
+            and barrier.get("refresh_policy") == "invalidate_reacquire"
+            and isinstance(authority, str)
+            and re.fullmatch(r"[0-9a-f]{64}", authority) is not None
+            and all(sample.get("error") is None for sample in final_samples)
+            and final_samples[0]["semantic_authority_sha256"] == authority
+            and final_samples[1]["semantic_authority_sha256"] == authority
+            and final_samples[1]["matched_previous_authority"] is True
+        )
+
     if context.get("tool_profile") != _LINKEDIN_UNIT1_PREPARE_TOOL_PROFILE:
         return terminal_refusal(
             "linkedin_unit1_prepare requires the linkedin-unit1-prepare profile"
@@ -7209,6 +7320,7 @@ def _do_linkedin_unit1_prepare(arguments: dict) -> str:
                 "phase_receipt",
                 "private_input",
                 "initial_observation_timeout",
+                "compile_observation_timeout",
             }
         ):
             return terminal_refusal(
@@ -7229,11 +7341,28 @@ def _do_linkedin_unit1_prepare(arguments: dict) -> str:
                 "LinkedIn initial Notifications observation did not settle; "
                 f"barrier_sha256={linkedin_prepare_sha256(barrier)}"
             )
+        if result["kind"] == "compile_observation_timeout":
+            barrier = result.get("compile_observation_barrier")
+            if (
+                not sequence["receipts"]
+                or set(result)
+                != {"schema", "kind", "compile_observation_barrier"}
+                or not compile_barrier_exact(barrier, "TIMEOUT")
+            ):
+                return terminal_refusal(
+                    "LinkedIn chained preparation timeout evidence is invalid"
+                )
+            return terminal_refusal(
+                "LinkedIn chained preparation observation did not settle; "
+                f"barrier_sha256={linkedin_prepare_sha256(barrier)}"
+            )
         if result["kind"] == "action_card":
             initial = not sequence["receipts"]
             expected_result_keys = {"schema", "kind", "card", "runtime_card"}
             if initial:
                 expected_result_keys.add("initial_observation_barrier")
+            else:
+                expected_result_keys.add("compile_observation_barrier")
             if set(result) != expected_result_keys:
                 return terminal_refusal(
                     "LinkedIn Unit 1 preparation action card result is invalid"
@@ -7241,6 +7370,7 @@ def _do_linkedin_unit1_prepare(arguments: dict) -> str:
             card = result.get("card")
             runtime_card = result.get("runtime_card")
             initial_barrier = result.get("initial_observation_barrier")
+            compile_barrier = result.get("compile_observation_barrier")
             card_sha256 = card.get("card_sha256") if isinstance(card, dict) else None
             if (
                 not isinstance(runtime_card, dict)
@@ -7255,6 +7385,10 @@ def _do_linkedin_unit1_prepare(arguments: dict) -> str:
                         card.get("phase") != "notifications_navigation"
                         or not initial_barrier_exact(initial_barrier, "PASS")
                     )
+                )
+                or (
+                    not initial
+                    and not compile_barrier_exact(compile_barrier, "PASS")
                 )
             ):
                 return terminal_refusal(
@@ -7300,8 +7434,16 @@ def _do_linkedin_unit1_prepare(arguments: dict) -> str:
                 "phase": receipt["phase"],
                 "receipt_sha256": receipt["receipt_sha256"],
             })
-        if set(result) != {"schema", "kind", "result"} or not isinstance(
-            result.get("result"), dict
+        if (
+            set(result)
+            != {"schema", "kind", "result", "compile_observation_barrier"}
+            or not compile_barrier_exact(
+                result.get("compile_observation_barrier"),
+                "PASS",
+            )
+            or not isinstance(
+                result.get("result"), dict
+            )
         ):
             return terminal_refusal(
                 "LinkedIn Unit 1 preparation private input result is invalid"
