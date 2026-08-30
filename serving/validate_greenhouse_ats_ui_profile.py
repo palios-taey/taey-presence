@@ -21,7 +21,7 @@ SERVING_ROOT = REPO_ROOT / "serving"
 SOMA_PROXY = SERVING_ROOT / "soma_proxy.py"
 SOURCE = SOMA_PROXY.read_text(encoding="utf-8")
 TREE = ast.parse(SOURCE, filename=str(SOMA_PROXY))
-REQUIRED_HANDS_COMMIT = "4171a6cc700128d0d9d1107e8a91221a8ea6a1c1"
+REQUIRED_HANDS_COMMIT = "d241e1a4c5238dcadca2c112765fa584516e68f9"
 
 
 def require(condition: bool, message: str) -> None:
@@ -562,6 +562,11 @@ def main() -> int:
         SOURCE.count('@app.post("/v1/greenhouse-ats/one-action")') == 1,
         "direct one-action route is missing or duplicated",
     )
+    require(
+        'os.environ.get("TAEY_GREENHOUSE_ATS_LEASE_SECRET"' not in SOURCE
+        and "GREENHOUSE_ATS_LEASE_SECRET =" not in SOURCE,
+        "Presence still loads the Greenhouse lease secret from its environment",
+    )
 
     runtime_source = source_function("_greenhouse_ats_runtime")
     for token in (
@@ -572,6 +577,8 @@ def main() -> int:
         "TAEY_GREENHOUSE_ATS_AT_SPI_BUS_FILE",
         "uuid.UUID(GREENHOUSE_ATS_HANDS_INCARNATION_ID)",
         "GREENHOUSE_ATS_HANDS_INCARNATION_ID != hands_incarnation_id",
+        "GREENHOUSE_ATS_CREDENTIALS_DIRECTORY",
+        "GREENHOUSE_ATS_LEASE_CREDENTIAL_NAME",
     ):
         require(token in runtime_source, f"runtime lost exact binding {token}")
     require(
@@ -580,7 +587,8 @@ def main() -> int:
     )
     runtime_namespace = {
         "GREENHOUSE_ATS_BINDING": "greenhouse=:17",
-        "GREENHOUSE_ATS_LEASE_SECRET": "5" * 64,
+        "GREENHOUSE_ATS_CREDENTIALS_DIRECTORY": "",
+        "GREENHOUSE_ATS_LEASE_CREDENTIAL_NAME": "greenhouse-ats-lease-secret",
         "GREENHOUSE_ATS_HANDS_COMMIT": REQUIRED_HANDS_COMMIT,
         "GREENHOUSE_ATS_REQUIRED_HANDS_COMMIT": REQUIRED_HANDS_COMMIT,
         "GREENHOUSE_ATS_HANDS_INCARNATION_ID": "hands-greenhouse-prod",
@@ -635,7 +643,10 @@ def main() -> int:
     for token in (
         '"--transaction-fd"',
         '"--expected-transaction-sha256"',
-        'pass_fds=(action_fd,)',
+        'pass_fds=(action_fd, lease_fd)',
+        '"ATS_ONE_ACTION_LEASE_SECRET_FD"',
+        'drive_env.pop("TAEY_GREENHOUSE_ATS_LEASE_SECRET", None)',
+        'drive_env.pop("ATS_ONE_ACTION_LEASE_SECRET", None)',
         '"ATS_ONE_ACTION_RECEIPT_ROOT"',
         '"ATS_PRESENCE_INCARNATION_ID"',
         'uuid.UUID(hex=str(context["process_generation"]))',
@@ -645,6 +656,10 @@ def main() -> int:
         require(token in action_source, f"adapter lost containment token {token}")
     require('"--transaction",' not in action_source, "adapter retained path execution")
     require("action_path" not in action_source, "operate can still resolve a private path")
+    require(
+        '"ATS_ONE_ACTION_LEASE_SECRET":' not in action_source,
+        "adapter retained secret-valued child environment transport",
+    )
     sample_source = source_function("_greenhouse_ats_samples_prove")
     for token in (
         'samples[-2:]',
@@ -679,14 +694,42 @@ def main() -> int:
         "_TRACE_ID_RE": re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$"),
         "GREENHOUSE_ATS_HANDS_COMMIT": REQUIRED_HANDS_COMMIT,
         "GREENHOUSE_ATS_FIREFOX_PID": "12345",
-        "GREENHOUSE_ATS_LEASE_SECRET": "5" * 64,
         "GREENHOUSE_ATS_HANDS_INCARNATION_ID": "00000000-0000-4000-8000-000000000010",
         "canonical_json_bytes": canonical_bytes,
         "hashlib": hashlib,
         "os": os,
+        "Path": Path,
         "re": re,
+        "stat": stat,
         "uuid": uuid,
     }
+    open_lease = load_function(
+        "_open_greenhouse_ats_lease_credential", action_namespace
+    )
+    action_namespace["_open_greenhouse_ats_lease_credential"] = open_lease
+    with tempfile.TemporaryDirectory(prefix="greenhouse-ats-credential-validator-") as temp:
+        credential_path = Path(temp) / "greenhouse-ats-lease-secret"
+        credential_path.write_text("5" * 64, encoding="ascii")
+        os.chmod(credential_path, 0o400)
+        credential_fd = open_lease(credential_path)
+        require(
+            os.pread(credential_fd, 65, 0) == b"5" * 64,
+            "exact credential descriptor bytes changed",
+        )
+        os.close(credential_fd)
+        os.chmod(credential_path, 0o600)
+        with patch.object(os, "close", wraps=os.close) as close:
+            try:
+                open_lease(credential_path)
+            except RuntimeError as exc:
+                require(
+                    str(exc)
+                    == "Greenhouse ATS lease credential failed descriptor validation",
+                    "mutable credential failed with the wrong stop reason",
+                )
+            else:
+                raise AssertionError("mutable 0600 lease credential was accepted")
+            require(close.call_count == 1, "refused lease credential descriptor leaked")
     close_pending = load_function("_close_greenhouse_ats_pending", action_namespace)
     samples_prove = load_function("_greenhouse_ats_samples_prove", action_namespace)
     surface_capsule_proves = load_function(
@@ -900,6 +943,9 @@ def main() -> int:
 
     with tempfile.TemporaryDirectory(prefix="greenhouse-ats-presence-") as temp:
         root = Path(temp)
+        lease_path = root / "greenhouse-ats-lease-secret"
+        lease_path.write_text("5" * 64, encoding="ascii")
+        os.chmod(lease_path, 0o400)
         frozen_action = write_private_transaction(root)
         resolver_namespace["GREENHOUSE_ATS_PRIVATE_ROOT"] = str(root)
         action_namespace["_resolve_greenhouse_ats_private_manifest"] = resolve_manifest
@@ -908,6 +954,7 @@ def main() -> int:
             "python": "/usr/bin/python3",
             "runner": "/public/run_ats_greenhouse_one_action.py",
             "bus": "unix:path=/run/user/1000/at-spi/bus_0",
+            "lease_credential_path": str(lease_path),
             "receipt_root": str(root),
             "timeout": 180,
         }
@@ -929,7 +976,17 @@ def main() -> int:
         active["tool_round"] = 2
         def execute_held_inode(*args: object, **kwargs: object) -> SimpleNamespace:
             inherited = kwargs.get("pass_fds")
-            require(inherited == (held_fd,), "subprocess did not inherit exactly the held fd")
+            require(
+                isinstance(inherited, tuple)
+                and len(inherited) == 2
+                and inherited[0] == held_fd,
+                "subprocess did not inherit exactly the action and lease fds",
+            )
+            lease_fd = inherited[1]
+            require(
+                os.pread(lease_fd, 65, 0) == b"5" * 64,
+                "subprocess did not inherit the exact lease credential inode",
+            )
             child_env = kwargs.get("env")
             require(
                 isinstance(child_env, dict)
@@ -943,11 +1000,23 @@ def main() -> int:
                 "Hands incarnation was not forwarded as its canonical UUID",
             )
             require(
+                child_env.get("ATS_ONE_ACTION_LEASE_SECRET_FD") == str(lease_fd)
+                and "ATS_ONE_ACTION_LEASE_SECRET" not in child_env
+                and "TAEY_GREENHOUSE_ATS_LEASE_SECRET" not in child_env,
+                "Presence leaked a secret value or failed to bind the lease descriptor",
+            )
+            require(
                 os.pread(held_fd, 4 * 1024 * 1024, 0) == original_raw,
                 "operate did not retain the observe-time inode bytes",
             )
             return success_result(frozen_action)
-        with patch.object(subprocess, "run", side_effect=execute_held_inode) as run:
+        with patch.dict(
+            os.environ,
+            {
+                "TAEY_GREENHOUSE_ATS_LEASE_SECRET": "legacy-parent-secret",
+                "ATS_ONE_ACTION_LEASE_SECRET": "legacy-child-secret",
+            },
+        ), patch.object(subprocess, "run", side_effect=execute_held_inode) as run:
             operated = json.loads(do_action({
                 "display": ":17",
                 "action": "operate",
@@ -997,6 +1066,13 @@ def main() -> int:
             pass
         else:
             raise AssertionError("spent action fd remained open after operate")
+        lease_fd = run.call_args.kwargs["pass_fds"][1]
+        try:
+            os.fstat(lease_fd)
+        except OSError:
+            pass
+        else:
+            raise AssertionError("spent lease credential fd remained open after operate")
         RequestContext.value = {}
 
         action_path.unlink()
@@ -1061,6 +1137,9 @@ def main() -> int:
         prefix="greenhouse-ats-inherited-options-presence-"
     ) as temp:
         root = Path(temp)
+        lease_path = root / "greenhouse-ats-lease-secret"
+        lease_path.write_text("5" * 64, encoding="ascii")
+        os.chmod(lease_path, 0o400)
         frozen_observe = write_private_transaction(root, "observe_form")
         resolver_namespace["GREENHOUSE_ATS_PRIVATE_ROOT"] = str(root)
         action_namespace["_resolve_greenhouse_ats_private_manifest"] = resolve_manifest
@@ -1069,6 +1148,7 @@ def main() -> int:
             "python": "/usr/bin/python3",
             "runner": "/public/run_ats_greenhouse_one_action.py",
             "bus": "unix:path=/run/user/1000/at-spi/bus_0",
+            "lease_credential_path": str(lease_path),
             "receipt_root": str(root),
             "timeout": 180,
         }
@@ -1099,6 +1179,9 @@ def main() -> int:
 
     with tempfile.TemporaryDirectory(prefix="greenhouse-ats-options-presence-") as temp:
         root = Path(temp)
+        lease_path = root / "greenhouse-ats-lease-secret"
+        lease_path.write_text("5" * 64, encoding="ascii")
+        os.chmod(lease_path, 0o400)
         frozen_options = write_private_transaction(root, "open_combo")
         resolver_namespace["GREENHOUSE_ATS_PRIVATE_ROOT"] = str(root)
         action_namespace["_resolve_greenhouse_ats_private_manifest"] = resolve_manifest
@@ -1107,6 +1190,7 @@ def main() -> int:
             "python": "/usr/bin/python3",
             "runner": "/public/run_ats_greenhouse_one_action.py",
             "bus": "unix:path=/run/user/1000/at-spi/bus_0",
+            "lease_credential_path": str(lease_path),
             "receipt_root": str(root),
             "timeout": 180,
         }
@@ -1140,6 +1224,9 @@ def main() -> int:
 
     with tempfile.TemporaryDirectory(prefix="greenhouse-ats-submit-presence-") as temp:
         root = Path(temp)
+        lease_path = root / "greenhouse-ats-lease-secret"
+        lease_path.write_text("5" * 64, encoding="ascii")
+        os.chmod(lease_path, 0o400)
         frozen_submit = write_private_transaction(root, "submit")
         resolver_namespace["GREENHOUSE_ATS_PRIVATE_ROOT"] = str(root)
         action_namespace["_resolve_greenhouse_ats_private_manifest"] = resolve_manifest
@@ -1148,6 +1235,7 @@ def main() -> int:
             "python": "/usr/bin/python3",
             "runner": "/public/run_ats_greenhouse_one_action.py",
             "bus": "unix:path=/run/user/1000/at-spi/bus_0",
+            "lease_credential_path": str(lease_path),
             "receipt_root": str(root),
             "timeout": 180,
         }
@@ -1223,6 +1311,14 @@ def main() -> int:
     require(
         "_close_greenhouse_ats_pending" in source_function("chat_completions"),
         "outer request cleanup no longer closes a pending action fd",
+    )
+    credential_dropin = (
+        SERVING_ROOT / "systemd" / "taey-greenhouse-ats-credential.conf.example"
+    ).read_text(encoding="utf-8")
+    require(
+        credential_dropin
+        == "[Service]\nLoadCredential=greenhouse-ats-lease-secret:/absolute/private/greenhouse-ats-lease-secret\n",
+        "public Greenhouse credential drop-in drifted",
     )
     print("greenhouse ATS isolated one-action Presence profile: PASS")
     return 0
