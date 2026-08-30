@@ -31,6 +31,7 @@ class RequestRecorder(BaseHTTPRequestHandler):
     requests: list[dict[str, object]] = []
     next_status = 200
     next_ok: bool | None = None
+    next_success_state = "action_receipted"
 
     def do_POST(self) -> None:
         length = int(self.headers.get("Content-Length", "0"))
@@ -53,10 +54,24 @@ class RequestRecorder(BaseHTTPRequestHandler):
                 "action": "operate",
                 "greenhouse_ats_sequence": {
                     "state": (
-                        "action_succeeded"
+                        self.__class__.next_success_state
                         if response_ok
                         else "refused"
-                    )
+                    ),
+                    **(
+                        {
+                            "postcondition_proven": True,
+                            "receipt_event_hash": "c" * 64,
+                            "hands_result_sha256": "d" * 64,
+                            "hands_state": "action_ready",
+                            "mutation_count": 0,
+                            "hands_next_mutation_authorized": True,
+                            "next_mutation_authorized": False,
+                            "surface_capsule": {"schema": "bounded-test-capsule"},
+                        }
+                        if response_ok
+                        else {}
+                    ),
                 },
             },
             separators=(",", ":"),
@@ -267,6 +282,7 @@ def main() -> int:
     RequestRecorder.requests = []
     RequestRecorder.next_status = 200
     RequestRecorder.next_ok = None
+    RequestRecorder.next_success_state = "action_receipted"
     server = ThreadingHTTPServer(("127.0.0.1", 0), RequestRecorder)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -329,6 +345,23 @@ def main() -> int:
                 "200 endpoint refusal was retried",
             )
             output = root / "outputs" / "greenhouse-canary" / "endpoint-refusal"
+            require_private_file(output / "headers.txt", 0o600)
+            require_private_file(output / "response.json", 0o600)
+
+        with tempfile.TemporaryDirectory(prefix="greenhouse-observe-contract-") as temporary:
+            root = Path(temporary) / "private"
+            root.mkdir(mode=0o700)
+            root.chmod(0o700)
+            RequestRecorder.next_status = 200
+            RequestRecorder.next_ok = True
+            RequestRecorder.next_success_state = "unexpected_success"
+            mismatched = run_launcher(root, endpoint, "contract-mismatch")
+            require(mismatched.returncode != 0, "200 contract mismatch was accepted")
+            require(
+                len(RequestRecorder.requests) == 4,
+                "200 contract mismatch was retried",
+            )
+            output = root / "outputs" / "greenhouse-canary" / "contract-mismatch"
             require_private_file(output / "headers.txt", 0o600)
             require_private_file(output / "response.json", 0o600)
     finally:

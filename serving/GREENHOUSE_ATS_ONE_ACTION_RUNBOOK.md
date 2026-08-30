@@ -30,8 +30,9 @@ Presence, canonical JSON and digest binding, owner-only directory and file
 modes, `O_EXCL` collision refusal, symlink refusal, immutable-file birth/change
 time agreement where the filesystem reports birth time, one exact local POST,
 private response capture, and no retry after either a collision or an HTTP
-failure. It uses generated identities and a local synthetic endpoint; it does
-not touch a browser or production private data.
+failure. A `200` refusal or malformed observe receipt is also terminal. The gate
+uses generated identities and a local synthetic endpoint; it does not touch a
+browser or production private data.
 
 ## One fresh production observe
 

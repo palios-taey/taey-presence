@@ -6,6 +6,7 @@ import http.client
 import json
 import os
 from pathlib import Path
+import re
 import stat
 from urllib.parse import urlsplit
 
@@ -14,6 +15,7 @@ import greenhouse_ats_observe_publisher as publisher
 
 _ENDPOINT_PATH = "/v1/greenhouse-ats/one-action"
 _MAX_RESPONSE_BYTES = 4 * 1024 * 1024
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 
 class GreenhouseObserveLaunchError(RuntimeError):
@@ -191,6 +193,7 @@ def launch_one_observe(arguments: argparse.Namespace) -> int:
             raise GreenhouseObserveLaunchError(
                 "one-action endpoint returned a non-object"
             )
+        sequence = result.get("greenhouse_ats_sequence")
         if (
             set(result) != {
                 "ok",
@@ -201,7 +204,30 @@ def launch_one_observe(arguments: argparse.Namespace) -> int:
             or result.get("ok") is not True
             or result.get("display") != arguments.display
             or result.get("action") != "operate"
-            or not isinstance(result.get("greenhouse_ats_sequence"), dict)
+            or not isinstance(sequence, dict)
+            or set(sequence)
+            != {
+                "state",
+                "postcondition_proven",
+                "receipt_event_hash",
+                "hands_result_sha256",
+                "hands_state",
+                "mutation_count",
+                "hands_next_mutation_authorized",
+                "next_mutation_authorized",
+                "surface_capsule",
+            }
+            or sequence.get("state") != "action_receipted"
+            or sequence.get("postcondition_proven") is not True
+            or _SHA256.fullmatch(str(sequence.get("receipt_event_hash") or ""))
+            is None
+            or _SHA256.fullmatch(str(sequence.get("hands_result_sha256") or ""))
+            is None
+            or sequence.get("hands_state") != "action_ready"
+            or sequence.get("mutation_count") != 0
+            or sequence.get("hands_next_mutation_authorized") is not True
+            or sequence.get("next_mutation_authorized") is not False
+            or not isinstance(sequence.get("surface_capsule"), dict)
         ):
             raise GreenhouseObserveLaunchError(
                 "one-action endpoint returned a refusal or contract mismatch"
