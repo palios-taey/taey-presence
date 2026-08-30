@@ -414,6 +414,10 @@ For other model families, set the parsers your model expects.
 | `TAEY_TURN_LEASE_SECS` | `120` | active-turn lease; expiry is archived as an abandoned turn |
 | `TAEY_TURN_HEARTBEAT_SECS` | `30` | lease-renewal interval, capped at one-third of the lease |
 | `TAEY_DRIVE_CHAT_CAPTURE_ROOT` | *(empty → `drive_chat` refused)* | private write-once evidence root; required before any UI action |
+| `TAEY_GREENHOUSE_ATS_PRIVATE_ROOT` | *(empty → Greenhouse refused)* | owner-controlled nonsymlink `0700` root for immutable actions, manifests, and private launcher outputs |
+| `TAEY_GREENHOUSE_ATS_HANDS_ROOT` | *(empty → Greenhouse refused)* | canonical clean public Hands deployment containing the reviewed one-action runner |
+| `TAEY_GREENHOUSE_ATS_BINDING` | *(empty → Greenhouse refused)* | exact `greenhouse=:N` production display binding |
+| `TAEY_GREENHOUSE_ATS_HANDS_COMMIT` | *(empty → Greenhouse refused)* | exact reviewed Hands commit; the manifest and deployed checkout must match it |
 | `TAEYS_HANDS_ROOT` | *(empty → LinkedIn tools refused)* | absolute path to a committed public `palios-taey/taeys-hands` checkout |
 | `TAEY_UI_ACTION_BINDINGS` | *(empty → `ui_action` refused)* | trusted comma-separated platform/display bindings; first qualified form is `linkedin=:N` |
 | `TAEY_UI_DRIVE_PYTHON` | `/home/mira/taeys-env-sys/bin/python` | interpreter for the public one-action Hands adapter; production should set an explicit deployed path |
@@ -458,6 +462,11 @@ paths, URLs, and account details. Never commit it or feed it to a public receipt
 builder. A missing or unsafe root refuses the action before mutation; a
 result-finalization failure terminalizes the turn so Taey cannot continue
 without its evidence.
+
+The Greenhouse lane has a separate deterministic producer and direct one-action
+launcher. Follow
+[GREENHOUSE_ATS_ONE_ACTION_RUNBOOK.md](GREENHOUSE_ATS_ONE_ACTION_RUNBOOK.md);
+never hand-create or reuse its private manifest/action pair.
 
 The `manual-chat-ui-send` profile is the structurally narrowed SEND-phase
 surface for Gemini displays `:4` and `:22`. Its model-facing `drive_chat`
