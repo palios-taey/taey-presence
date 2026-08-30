@@ -520,15 +520,20 @@ roots must already exist as owner-controlled nonsymlink directories, mode
 Start preparation with one fresh identity:
 
 ```bash
-curl --fail-with-body --silent --show-error \
-  -H 'Content-Type: application/json' \
-  -H 'X-Taey-Seat-Id: taey-revenue-1' \
-  -H 'X-Taey-Event-Id: linkedin-unit1-001' \
-  -H 'X-Taey-Correlation-Id: linkedin-unit1-001' \
-  -H 'X-Taey-Tool-Profile: linkedin-unit1-prepare' \
-  --data-binary '{"model":"SERVED_MODEL_ID","stream":false,"chat_template_kwargs":{"enable_thinking":false},"messages":[{"role":"user","content":"Prepare the frozen LinkedIn Unit 1 transaction on display :18. Continue only through the injected profile until final_bundle_published or the first failure."}]}' \
-  http://127.0.0.1:8765/v1/chat/completions
+TAEY_LINKEDIN_UNIT1_ARTIFACT_ROOT=/srv/taey/private/linkedin-unit1-runs \
+TAEY_LINKEDIN_UNIT1_SEAT_ID=taey-revenue-1 \
+TAEY_LINKEDIN_UNIT1_EVENT_ID=linkedin-unit1-001 \
+TAEY_LINKEDIN_UNIT1_CORRELATION_ID=linkedin-unit1-001 \
+TAEY_LINKEDIN_UNIT1_MODEL=SERVED_MODEL_ID \
+TAEY_LINKEDIN_UNIT1_DISPLAY=:18 \
+serving/launch_linkedin_unit1_prepare.sh
 ```
+
+The artifact root must already be an owner-controlled nonsymlink `0700`
+directory. The launcher sets `umask 077` before creating anything, refuses an
+existing or symlinked identity directory, creates that directory as `0700`,
+and creates `headers.txt` plus `response.json` as `0600` before invoking curl.
+Those files remain private even if the caller inherited a permissive umask.
 
 Presence enforces `chat_template_kwargs.enable_thinking=false` on every upstream
 generation round in this preparation profile, even when a caller requests `true`.
