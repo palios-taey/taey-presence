@@ -406,13 +406,22 @@ def main() -> int:
         '"initial_observation_barrier": initial_observation_barrier',
         'initial_observation_barrier.get("compile_authorized") is not True',
         'initial_observation_barrier.get("next_mutation_authorized")',
+        "preparation_compile_observation_contract()",
+        "invalidate_preparation_observation_cache()",
+        "preparation_compiled_authority_sha256(observed_result)",
+        '"projection": "revision_stripped_compiled_authority"',
+        '"kind": "compile_observation_timeout"',
+        '"compile_observation_barrier": compile_observation_barrier',
+        "except (RuntimeError, ValueError) as exc:",
         "result = compile_preparation_step(",
     ):
         require(required in compile_source, f"initial barrier wiring lost {required}")
     require(
         compile_source.count("_revenue_snapshot(deps)") == 1
         and compile_source.index("stable_observation(")
-        < compile_source.index("result = compile_preparation_step("),
+        < compile_source.index(
+            "if not receipts:\n            result = compile_preparation_step("
+        ),
         "initial compile does not consume only the barrier-proven snapshot",
     )
     for token in (
@@ -452,6 +461,10 @@ def main() -> int:
         'initial_barrier_exact(barrier, "TIMEOUT")',
         'initial_barrier_exact(initial_barrier, "PASS")',
         'expected_result_keys.add("initial_observation_barrier")',
+        'result["kind"] == "compile_observation_timeout"',
+        'compile_barrier_exact(barrier, "TIMEOUT")',
+        'compile_barrier_exact(compile_barrier, "PASS")',
+        '"compile_observation_barrier"',
         'card.get("phase") != "notifications_navigation"',
         '{"initial_observation_barrier": initial_barrier}',
     ):
@@ -482,6 +495,91 @@ def main() -> int:
             "exec",
         ),
         barrier_namespace,
+    )
+    compile_barrier_functions = [
+        node
+        for node in ast.walk(handler_tree)
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "compile_barrier_exact"
+    ]
+    require(
+        len(compile_barrier_functions) == 1,
+        "compile barrier consumer is not exact",
+    )
+    compile_barrier_namespace = {"re": re}
+    exec(
+        compile(
+            ast.fix_missing_locations(
+                ast.Module(body=compile_barrier_functions, type_ignores=[])
+            ),
+            "<compile_barrier_exact>",
+            "exec",
+        ),
+        compile_barrier_namespace,
+    )
+    compile_barrier_exact = compile_barrier_namespace["compile_barrier_exact"]
+    authority = "a" * 64
+    stale_then_stable = {
+        "result": "PASS",
+        "compile_authorized": True,
+        "next_mutation_authorized": False,
+        "projection": "revision_stripped_compiled_authority",
+        "refresh_policy": "invalidate_reacquire",
+        "stable_cycles_required": 2,
+        "stable_cycles_observed": 2,
+        "semantic_authority_sha256": authority,
+        "samples": [
+            {
+                "sample": 1,
+                "elapsed_ms": 1,
+                "snapshot_revision": None,
+                "semantic_authority_sha256": None,
+                "matched_previous_authority": False,
+                "firefox_cache_invalidation": None,
+                "error": "UiDriveError: detached AT-SPI node",
+            },
+            {
+                "sample": 2,
+                "elapsed_ms": 202,
+                "snapshot_revision": "1" * 64,
+                "semantic_authority_sha256": authority,
+                "matched_previous_authority": False,
+                "firefox_cache_invalidation": "recursive_success",
+                "error": None,
+            },
+            {
+                "sample": 3,
+                "elapsed_ms": 403,
+                "snapshot_revision": "2" * 64,
+                "semantic_authority_sha256": authority,
+                "matched_previous_authority": True,
+                "firefox_cache_invalidation": "recursive_success",
+                "error": None,
+            },
+        ],
+    }
+    require(
+        compile_barrier_exact(stale_then_stable, "PASS"),
+        "stale-first-read then two exact semantic samples did not pass",
+    )
+    changed_authority = json.loads(json.dumps(stale_then_stable))
+    changed_authority["samples"][-1]["semantic_authority_sha256"] = "b" * 64
+    require(
+        not compile_barrier_exact(changed_authority, "PASS"),
+        "two different semantic compile authorities passed",
+    )
+    timeout_barrier = {
+        **stale_then_stable,
+        "result": "TIMEOUT",
+        "compile_authorized": False,
+        "refresh_policy": "invalidate_reacquire_incomplete",
+        "stable_cycles_observed": 0,
+        "semantic_authority_sha256": None,
+        "samples": stale_then_stable["samples"][:1],
+    }
+    require(
+        compile_barrier_exact(timeout_barrier, "TIMEOUT"),
+        "read-only compile timeout did not retain zero authority",
     )
     initial_barrier_exact = barrier_namespace["initial_barrier_exact"]
     timeout_sample = {

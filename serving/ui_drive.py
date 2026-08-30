@@ -1531,10 +1531,121 @@ def _linkedin_unit1_prepare_compile(
             PREPARATION_RECEIPT_SCHEMA,
             PREPARATION_RESULT_SCHEMA,
             compile_preparation_step,
+            invalidate_preparation_observation_cache,
+            preparation_compile_observation_contract,
+            preparation_compiled_authority_sha256,
         )
 
         if receipts:
-            snapshot = _revenue_snapshot(deps)
+            observation_contract = preparation_compile_observation_contract()
+            stable_cycles_required = observation_contract["stable_cycles"]
+            interval_seconds = observation_contract["interval_ms"] / 1000.0
+            started_at = time.monotonic()
+            deadline_at = started_at + (
+                observation_contract["timeout_ms"] / 1000.0
+            )
+            stable_cycles_observed = 0
+            previous_authority_sha256: str | None = None
+            samples: list[dict[str, Any]] = []
+            snapshot = None
+            result = None
+            while time.monotonic() < deadline_at:
+                sample_number = len(samples) + 1
+                cache_invalidation = None
+                try:
+                    cache_invalidation = (
+                        invalidate_preparation_observation_cache()
+                    )
+                    observed_snapshot = _revenue_snapshot(deps)
+                    observed_revision = _snapshot_revision(
+                        observed_snapshot,
+                        scope="base",
+                    )
+                    observed_result = compile_preparation_step(
+                        observed_snapshot,
+                        observed_revision,
+                        preparation,
+                        receipts,
+                    )
+                    observed_authority_sha256 = (
+                        preparation_compiled_authority_sha256(observed_result)
+                    )
+                except (RuntimeError, ValueError) as exc:
+                    stable_cycles_observed = 0
+                    previous_authority_sha256 = None
+                    samples.append({
+                        "sample": sample_number,
+                        "elapsed_ms": int((time.monotonic() - started_at) * 1000),
+                        "snapshot_revision": None,
+                        "semantic_authority_sha256": None,
+                        "matched_previous_authority": False,
+                        "firefox_cache_invalidation": cache_invalidation,
+                        "error": f"{type(exc).__name__}: {exc}",
+                    })
+                else:
+                    matched_previous = (
+                        previous_authority_sha256 == observed_authority_sha256
+                    )
+                    stable_cycles_observed = (
+                        stable_cycles_observed + 1 if matched_previous else 1
+                    )
+                    previous_authority_sha256 = observed_authority_sha256
+                    samples.append({
+                        "sample": sample_number,
+                        "elapsed_ms": int((time.monotonic() - started_at) * 1000),
+                        "snapshot_revision": observed_revision,
+                        "semantic_authority_sha256": observed_authority_sha256,
+                        "matched_previous_authority": matched_previous,
+                        "firefox_cache_invalidation": cache_invalidation,
+                        "error": None,
+                    })
+                    snapshot = observed_snapshot
+                    result = observed_result
+                    if stable_cycles_observed >= stable_cycles_required:
+                        break
+                remaining = deadline_at - time.monotonic()
+                if remaining > 0:
+                    time.sleep(min(interval_seconds, remaining))
+            compile_observation_barrier = {
+                "result": (
+                    "PASS"
+                    if stable_cycles_observed >= stable_cycles_required
+                    else "TIMEOUT"
+                ),
+                "compile_authorized": (
+                    stable_cycles_observed >= stable_cycles_required
+                ),
+                "next_mutation_authorized": False,
+                "projection": "revision_stripped_compiled_authority",
+                "refresh_policy": (
+                    "invalidate_reacquire"
+                    if samples
+                    and all(
+                        sample["firefox_cache_invalidation"]
+                        == "recursive_success"
+                        for sample in samples
+                    )
+                    else "invalidate_reacquire_incomplete"
+                ),
+                "stable_cycles_required": stable_cycles_required,
+                "stable_cycles_observed": stable_cycles_observed,
+                "semantic_authority_sha256": (
+                    previous_authority_sha256
+                    if stable_cycles_observed >= stable_cycles_required
+                    else None
+                ),
+                "samples": samples,
+            }
+            if compile_observation_barrier["result"] == "TIMEOUT":
+                return {
+                    "schema": "taey_linkedin_unit1_preparation_compiled_step_v1",
+                    "kind": "compile_observation_timeout",
+                    "compile_observation_barrier": compile_observation_barrier,
+                }
+            if not isinstance(snapshot, Snapshot) or not isinstance(result, dict):
+                raise UiDriveError(
+                    "LinkedIn preparation compile barrier passed without one result"
+                )
         else:
             manual = _manual_ui_module(deps.platform)
             stable_observation = (
@@ -1597,12 +1708,13 @@ def _linkedin_unit1_prepare_compile(
                 raise UiDriveError(
                     "LinkedIn initial preparation observation did not prove compile"
                 )
-        result = compile_preparation_step(
-            snapshot,
-            _snapshot_revision(snapshot, scope="base"),
-            preparation,
-            receipts,
-        )
+        if not receipts:
+            result = compile_preparation_step(
+                snapshot,
+                _snapshot_revision(snapshot, scope="base"),
+                preparation,
+                receipts,
+            )
     except Exception as exc:
         raise UiDriveError(f"LinkedIn Unit 1 preparation compile failed: {exc}") from exc
     if result.get("schema") == PREPARATION_ACTION_CARD_SCHEMA:
@@ -1614,6 +1726,8 @@ def _linkedin_unit1_prepare_compile(
         }
         if initial_observation_barrier is not None:
             compiled["initial_observation_barrier"] = initial_observation_barrier
+        else:
+            compiled["compile_observation_barrier"] = compile_observation_barrier
         return compiled
     if initial_observation_barrier is not None:
         raise UiDriveError(
@@ -1630,6 +1744,7 @@ def _linkedin_unit1_prepare_compile(
             "schema": "taey_linkedin_unit1_preparation_compiled_step_v1",
             "kind": "private_input",
             "result": result,
+            "compile_observation_barrier": compile_observation_barrier,
         }
     raise UiDriveError("LinkedIn Unit 1 preparation compiler returned an unknown result")
 
