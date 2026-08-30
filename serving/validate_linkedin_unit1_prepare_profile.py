@@ -628,15 +628,46 @@ def main() -> int:
     )
     operate_source = source_function(drive, "_linkedin_unit1_prepare_operate")
     compile_source = source_function(drive, "_linkedin_unit1_prepare_compile")
+    deadline_source = source_function(drive, "_revenue_observation_deadline")
+    activate_source = source_function(drive, "_revenue_activate")
+    scroll_source = source_function(drive, "_revenue_scroll_into_view")
     primitive_timeout = ast.literal_eval(
         assignment(drive, "_LINKEDIN_UNIT1_PREPARE_PRIMITIVE_TIMEOUT_SECS")
     )
+    child_return_margin = ast.literal_eval(
+        assignment(
+            drive,
+            "_LINKEDIN_UNIT1_PREPARE_CHILD_RETURN_MARGIN_SECS",
+        )
+    )
+    child_deadline_env = ast.literal_eval(
+        assignment(drive, "_LINKEDIN_UNIT1_PREPARE_CHILD_DEADLINE_ENV")
+    )
     require(
         primitive_timeout == 240
+        and child_return_margin == 15
+        and child_deadline_env
+        == "TAEY_LINKEDIN_UNIT1_PREPARE_CHILD_DEADLINE_MONOTONIC"
         and transport_timeout - primitive_timeout == 60
         and "timeout=_LINKEDIN_UNIT1_PREPARE_PRIMITIVE_TIMEOUT_SECS"
         in operate_source,
         "preparation timeout stack lost its exact bounded margin",
+    )
+    require(
+        "primitive_deadline = time.monotonic() + (" in operate_source
+        and "_LINKEDIN_UNIT1_PREPARE_CHILD_RETURN_MARGIN_SECS"
+        in operate_source
+        and "primitive_env[" in operate_source
+        and "_LINKEDIN_UNIT1_PREPARE_CHILD_DEADLINE_ENV" in operate_source
+        and "env=primitive_env" in operate_source,
+        "preparation child does not receive its bounded return deadline",
+    )
+    require(
+        "math.isfinite(deadline)" in deadline_source
+        and "return min(deadline, now + LOCK_TTL_DEFAULT)" in deadline_source
+        and "_revenue_observation_deadline()" in activate_source
+        and "_revenue_observation_deadline()" in scroll_source,
+        "preparation action paths do not consume the bounded child deadline",
     )
     require(
         '"kind": "phase_receipt"' in compile_source
