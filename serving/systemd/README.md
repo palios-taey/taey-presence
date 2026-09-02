@@ -90,4 +90,3 @@ a single canary seat (e.g. `python3 serving/manage_council_seats.py replace --se
 **Status:** units captured from the verified-running fleet config 2026-07-22. The install
 substitution above is documented, not yet run from this repo end-to-end — that gets verified
 on the next real Thor stand-up (production is the oracle), then this note is updated.
-
