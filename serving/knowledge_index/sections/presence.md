@@ -170,10 +170,23 @@ production status, which is exactly a new artifact commit.
   },
   "entry_doc": "serving/SEAT.md",
   "artifact_paths": [
+    "serving/council_prompt_receipt.py",
+    "serving/council_prompts/adversarial-failure.md",
+    "serving/council_prompts/context-memory.md",
+    "serving/council_prompts/control-acceptance.md",
+    "serving/council_prompts/evidence-reality.md",
+    "serving/council_prompts/options-alternatives.md",
+    "serving/council_prompts/scope-intent.md",
+    "serving/council_prompts/shared.md",
+    "serving/council_prompts/systems-dependencies.md",
+    "serving/council_seats.json",
     "serving/SEAT.md",
     "serving/gates_manifest.json",
+    "serving/manage_council_seats.py",
     "serving/seat_liveness.py",
-    "serving/taey_council_seat.py"
+    "serving/taey_council_seat.py",
+    "serving/taey_seat.py",
+    "serving/validate_council_prompt_receipt_producer.py"
   ],
   "bootstrap": {
     "cmd": "python3 serving/taey_council_seat.py",

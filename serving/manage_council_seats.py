@@ -18,6 +18,7 @@ from typing import Any
 
 import redis
 
+import council_prompt_receipt as prompt_producer
 
 SERVING_ROOT = Path(__file__).resolve().parent
 REPO_ROOT = SERVING_ROOT.parent
@@ -31,15 +32,6 @@ LEGACY_TERMINAL_ROUND = "dcm-20260817T014529Z-9b0dbd7863d5"
 LEGACY_TERMINAL_LEDGER_SHA256 = "24b6899841603b8173e7a329e135273520f9f77aaac9171020b82c1ad9bfb367"
 LEGACY_TERMINAL_SOURCE_SHA256 = "3894dafb71b74ed8b65c842ea91cd6d90896f6651d2500f3f24807f142aaa7c8"
 LEGACY_TERMINAL_REQUEST_COUNT = 13
-CANONICAL_ROLES = {
-    "taey-council-1": "context-memory",
-    "taey-council-2": "evidence-reality",
-    "taey-council-3": "systems-dependencies",
-    "taey-council-4": "adversarial-failure",
-    "taey-council-5": "scope-intent",
-    "taey-council-6": "options-alternatives",
-    "taey-council-7": "control-acceptance",
-}
 _READ_REGISTRATION_LUA = """
 local value = redis.call('GET', KEYS[1])
 if not value then
@@ -55,17 +47,8 @@ return 0
 """
 
 
-class CouncilConfigError(RuntimeError):
-    pass
-
-
-@dataclass(frozen=True)
-class SeatConfig:
-    seat_id: str
-    role_id: str
-    conversation_id: str
-    shared_prompt: Path
-    role_prompt: Path
+CouncilConfigError = prompt_producer.CouncilManifestError
+SeatConfig = prompt_producer.SeatConfig
 
 
 @dataclass(frozen=True)
@@ -75,81 +58,8 @@ class LegacyTerminalPlan:
     requests: tuple[dict[str, Any], ...]
 
 
-def _required_string(value: Any, field_name: str) -> str:
-    normalized = str(value or "").strip()
-    if not normalized:
-        raise CouncilConfigError(f"{field_name} must be a non-empty string")
-    return normalized
-
-
-def _prompt_path(manifest_path: Path, value: Any, field_name: str) -> Path:
-    relative = Path(_required_string(value, field_name))
-    if relative.is_absolute():
-        raise CouncilConfigError(f"{field_name} must be relative to the manifest")
-    resolved = (manifest_path.parent / relative).resolve()
-    if not resolved.is_file():
-        raise CouncilConfigError(f"{field_name} is not a file: {resolved}")
-    if not resolved.read_text(encoding="utf-8").strip():
-        raise CouncilConfigError(f"{field_name} is empty: {resolved}")
-    return resolved
-
-
 def load_manifest(manifest_path: Path) -> list[SeatConfig]:
-    try:
-        document = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise CouncilConfigError(f"cannot read manifest {manifest_path}: {exc}") from exc
-    if not isinstance(document, dict):
-        raise CouncilConfigError("manifest root must be an object")
-    if document.get("schema_version") != 1:
-        raise CouncilConfigError("manifest schema_version must be 1")
-    if document.get("contract") != "taey-local-council-seats/v1":
-        raise CouncilConfigError(
-            "manifest contract must be taey-local-council-seats/v1"
-        )
-    shared_prompt = _prompt_path(
-        manifest_path,
-        document.get("shared_prompt"),
-        "shared_prompt",
-    )
-    raw_seats = document.get("seats")
-    if not isinstance(raw_seats, list):
-        raise CouncilConfigError("manifest seats must be an array")
-    seats: list[SeatConfig] = []
-    seen_conversations: set[str] = set()
-    for index, raw_seat in enumerate(raw_seats):
-        if not isinstance(raw_seat, dict):
-            raise CouncilConfigError(f"seats[{index}] must be an object")
-        seat_id = _required_string(raw_seat.get("seat_id"), f"seats[{index}].seat_id")
-        role_id = _required_string(raw_seat.get("role_id"), f"seats[{index}].role_id")
-        conversation_id = _required_string(
-            raw_seat.get("conversation_id"),
-            f"seats[{index}].conversation_id",
-        )
-        if conversation_id == "main" or conversation_id in seen_conversations:
-            raise CouncilConfigError(
-                f"conversation_id must be unique and private: {conversation_id}"
-            )
-        seen_conversations.add(conversation_id)
-        seats.append(
-            SeatConfig(
-                seat_id=seat_id,
-                role_id=role_id,
-                conversation_id=conversation_id,
-                shared_prompt=shared_prompt,
-                role_prompt=_prompt_path(
-                    manifest_path,
-                    raw_seat.get("role_prompt"),
-                    f"seats[{index}].role_prompt",
-                ),
-            )
-        )
-    actual_roles = {seat.seat_id: seat.role_id for seat in seats}
-    if actual_roles != CANONICAL_ROLES:
-        raise CouncilConfigError(
-            f"manifest seat/role mapping differs from canonical mapping: {actual_roles}"
-        )
-    return seats
+    return list(prompt_producer.load_manifest(manifest_path).seats)
 
 
 def _sessions_root() -> Path:
@@ -168,6 +78,7 @@ def _seat_environment(seat: SeatConfig, sessions_root: Path) -> dict[str, str]:
         "TAEY_COUNCIL_ROLE_ID": seat.role_id,
         "TAEY_CONVERSATION_ID": seat.conversation_id,
         "TAEY_EXECUTIVE_EVENT_LOG": str(event_log),
+        "TAEY_COUNCIL_MANIFEST_PATH": str(seat.manifest_path),
         "TAEY_COUNCIL_SHARED_PROMPT_PATH": str(seat.shared_prompt),
         "TAEY_COUNCIL_ROLE_PROMPT_PATH": str(seat.role_prompt),
         "TAEY_SEAT_PROXY": os.environ.get(
@@ -1218,7 +1129,14 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "command",
-        choices=("validate", "render", "launch", "replace", "status"),
+        choices=(
+            "validate",
+            "render",
+            "prompt-contracts",
+            "launch",
+            "replace",
+            "status",
+        ),
     )
     parser.add_argument(
         "--manifest",
@@ -1246,6 +1164,18 @@ def main() -> int:
             )
         elif args.command == "render":
             print(json.dumps(render(seats), indent=2))
+        elif args.command == "prompt-contracts":
+            manifest = prompt_producer.load_manifest(args.manifest.resolve())
+            print(
+                json.dumps(
+                    [
+                        prompt_producer.prompt_contract_receipt(manifest, seat)
+                        for seat in manifest.seats
+                    ],
+                    indent=2,
+                    ensure_ascii=False,
+                )
+            )
         elif args.command == "launch":
             launch(seats, args.reconcile_terminal_round)
         elif args.command == "replace":
