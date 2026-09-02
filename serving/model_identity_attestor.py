@@ -59,10 +59,13 @@ def canonical_sha256(value: Any) -> str:
     return "sha256:" + hashlib.sha256(canonical_json_bytes(value)).hexdigest()
 
 
+HASH_CHUNK_BYTES = 8 * 1024 * 1024
+
+
 def file_sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
-        while chunk := handle.read(8 * 1024 * 1024):
+        while chunk := handle.read(HASH_CHUNK_BYTES):
             digest.update(chunk)
     return digest.hexdigest()
 
@@ -111,64 +114,80 @@ def immutable_regular_files(root: Path) -> list[Path]:
     return artifact_fence(root)[0]
 
 
-def parse_seal(root: Path, paths: list[Path]) -> None:
+def canonical_seal_expected(
+    root: Path, paths: list[Path]
+) -> dict[str, str]:
     seal = root / SEAL_NAME
     if seal not in paths:
         raise AttestationError(f"artifact is missing {SEAL_NAME}")
-    sealed_paths: set[str] = set()
+    expected: dict[str, str] = {}
     for line in seal.read_text(encoding="utf-8").splitlines():
         match = re.fullmatch(r"([0-9a-f]{64})  (.+)", line)
         if match is None:
             raise AttestationError(f"{SEAL_NAME} contains a non-canonical line")
-        name = match.group(2)
+        digest, name = match.group(1), match.group(2)
         if name.startswith("./"):
             name = name[2:]
         candidate = Path(name)
-        if candidate.is_absolute() or ".." in candidate.parts or name in sealed_paths:
+        if candidate.is_absolute() or ".." in candidate.parts or name in expected:
             raise AttestationError(f"{SEAL_NAME} contains an unsafe or duplicate path")
-        sealed_paths.add(name)
+        expected[name] = digest
     actual_paths = {
         path.relative_to(root).as_posix()
         for path in paths
         if path.name != SEAL_NAME or path.parent != root
     }
-    if sealed_paths != actual_paths:
+    if set(expected) != actual_paths:
         raise AttestationError(f"{SEAL_NAME} does not cover the exact artifact file set")
-    result = subprocess.run(
-        ["sha256sum", "--strict", "--quiet", "-c", SEAL_NAME],
-        cwd=root,
-        text=True,
-        capture_output=True,
-        timeout=1800,
-        check=False,
-    )
-    if result.returncode != 0:
-        detail = (result.stderr or result.stdout).strip()
-        raise AttestationError(f"artifact seal verification failed: {detail}")
+    return expected
+
+
+def sealed_file_digests(
+    root: Path, paths: list[Path], expected: dict[str, str]
+) -> dict[str, str]:
+    """One HASH_CHUNK_BYTES read per regular file. Verify sealed digests."""
+    digests: dict[str, str] = {}
+    for path in paths:
+        relative = path.relative_to(root).as_posix()
+        digest = file_sha256(path)
+        expected_digest = expected.get(relative)
+        if expected_digest is not None and digest != expected_digest:
+            raise AttestationError(f"artifact seal verification failed: {relative}")
+        digests[relative] = digest
+    return digests
+
+
+def parse_seal(root: Path, paths: list[Path]) -> None:
+    sealed_file_digests(root, paths, canonical_seal_expected(root, paths))
 
 
 def artifact_identity(
     root: Path, manifest_name: str
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     paths, fence_before = artifact_fence(root)
-    parse_seal(root, paths)
+    expected = canonical_seal_expected(root, paths)
     manifest_path = root / manifest_name
     if manifest_path not in paths:
         raise AttestationError(f"artifact manifest is missing: {manifest_name}")
+    digests = sealed_file_digests(root, paths, expected)
     aggregate = hashlib.sha256()
     for path in paths:
-        relative = "./" + path.relative_to(root).as_posix()
-        aggregate.update(f"{file_sha256(path)}  {relative}\n".encode("utf-8"))
+        relative = path.relative_to(root).as_posix()
+        aggregate.update(
+            f"{digests[relative]}  ./{relative}\n".encode("utf-8")
+        )
     paths_after, fence_after = artifact_fence(root)
     if paths_after != paths or fence_after != fence_before:
         raise AttestationError("artifact identity changed while it was being hashed")
+    seal_relative = SEAL_NAME
+    manifest_relative = manifest_path.relative_to(root).as_posix()
     return {
         "artifact_file_count": len(paths),
         "artifact_fence_sha256": canonical_sha256(fence_before),
-        "artifact_seal_sha256": "sha256:" + file_sha256(root / SEAL_NAME),
+        "artifact_seal_sha256": "sha256:" + digests[seal_relative],
         "host_tree_read_only": True,
         "model_manifest_file": manifest_name,
-        "model_manifest_sha256": "sha256:" + file_sha256(manifest_path),
+        "model_manifest_sha256": "sha256:" + digests[manifest_relative],
         "model_content_sha256": "sha256:" + aggregate.hexdigest(),
         "seal_contract": "taey-complete-artifact-sha256sum/v1",
         "symlink_count": 0,
