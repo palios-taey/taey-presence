@@ -96,21 +96,21 @@ python3 serving/manage_council_seats.py validate
 python3 serving/manage_council_seats.py render
 ```
 
-Then point every seat at the same attributable proxy/model used by Main Taey and
-launch the user units:
+Point every seat at the attributable worker proxy/model selected for concurrent
+council inference and launch the user units:
 
 ```bash
-export TAEY_SEAT_PROXY=http://127.0.0.1:8766/v1/chat/completions
+export TAEY_SEAT_PROXY=http://127.0.0.1:8767/v1/chat/completions
 python3 serving/manage_council_seats.py launch
 python3 serving/manage_council_seats.py status
 ```
 
-The shared proxy route is the model authority. `TAEY_MODEL` remains a request
+The configured proxy route is the model authority. `TAEY_MODEL` remains a request
 compatibility selector when explicitly supplied, but `soma_proxy.py` removes it
-before forwarding to its single loaded vLLM model. Promoting a new release through
-`promote_main_model.sh` therefore moves Main and all seven supporting seats
-together; seat identities, prompts, inboxes, and histories do not need to be
-rebuilt or restarted for each release.
+before forwarding to its single loaded vLLM model. Main and the council worker
+proxy are separate serving paths and must each be verified against their exact
+deployed model content. Seat identities, prompts, inboxes, and histories remain
+independent of those model deployments.
 
 `launch` refuses to proceed if any canonical council tmux session already exists;
 it never restarts or adopts an unknown process. `launch` writes one generated
@@ -126,8 +126,8 @@ Each inference request also carries a runtime-issued `evidence_registry` contain
 the fixed role-contract hash, attributable current fleet-message IDs, and the IDs of
 prior successful outcomes in that seat's durable history. The strict response schema
 and the post-generation validator both restrict `evidence_refs` to those exact
-identifiers. An unregistered reference fails the turn, requeues its claimed mail, and
-is never acknowledged as a successful contribution.
+identifiers. An unregistered reference terminalizes that immutable request and
+is never requeued or acknowledged as a successful contribution.
 
 The launcher starts `taey_council_seat.py`; it does not branch Main's
 `taey_seat.py` runtime. At startup, a supporting seat atomically publishes
@@ -136,7 +136,64 @@ The launcher starts `taey_council_seat.py`; it does not branch Main's
 first-wake gap without making the compatibility boolean authoritative. The same
 atomic transition publishes a generation-specific `seat_registration`; the
 launcher requires a new identity-matched generation before it reports a seat
-started, so stale `idle` state cannot certify a dead or prior process.
+started. By default, the registration is a five-second lease refreshed once per
+second by that exact process generation. Startup first publishes
+`readiness=recovering`; only successful durable claim recovery can compare-swap
+that exact lease to `readiness=ready`. A dead seat therefore expires
+automatically, an older generation cannot refresh a replacement generation's
+lease, and council dispatch validates all seven ready generation leases before
+it enqueues any request. Stale `idle` state cannot certify a dead, recovering,
+or prior process.
+
+Before that atomic enqueue, the coordinator fsyncs the exact request-body
+digest and all seven process generations. Recovery accepts only zero dispatch
+tokens or all seven; a partial token set fails the round. A prior revision with
+zero tokens and no durable seat start is recorded as never dispatched and is
+not sent after supersession. An all-seven prior revision is drained without a
+second enqueue. Any durable seat start with missing dispatch tokens is an
+identity-loss failure. Durable wave results and reveal packets replay in
+canonical seat order, and already recorded seat, wave, and reveal events are
+validated instead of appended again.
+
+Claims use generation-specific processing lists. After a crash, the next live
+generation does not requeue or re-infer a request pinned to the dead process.
+Recovery covers both old processing claims and stale generation-bound requests
+that remained queued before claim. It writes a durable
+`dead_generation_terminal` receipt, acknowledges only that older request under
+its current guarded lease, and causes the wave to fail immediately. The receipt
+says `inference_state=not_started` only when no durable attempt exists; otherwise
+it says `side_effect_uncertain` and never claims that inference was skipped. An
+ambiguous inference outcome terminalizes the entire immutable council round
+before any newer prompt revision can dispatch. Reaching the bounded wave
+timeout without a durable seat outcome is also side-effect uncertainty, so it
+full-stops instead of synthesizing partial work. A proxy, schema, or
+contribution-validation failure similarly writes one
+`council_generation_terminal_failure`, acknowledges that immutable seat
+request, and records a failed seat; it is never requeued for another inference.
+Only `side_effect_uncertain` full-stops the wave and round. A
+`completed_invalid` seat result may be synthesized with the other valid seat
+contributions. Neo4j DCM becomes the terminal authority when the
+public graph adapter is enabled; JSONL remains the current durable handoff
+record during this migration step.
+
+This is a fail-closed registration transition. A coordinator running this
+revision rejects the older permanent registration shape. Reconcile outstanding
+processing and inbox identities before replacing an older seat process, then
+run `python3 serving/manage_council_seats.py replace` from that revision and
+require `status` to report `registration_live=true`, `readiness=ready`, and a
+positive TTL for every seat before opening a council round. `launch` remains for
+inactive seats and does not adopt
+or restart an already-running process. Both commands refuse nonterminal inbox,
+processing, active-turn, or active-round state. `replace` accepts an all-active
+or mixed unit set so it is also the deterministic re-entry path after a partial
+lifecycle failure; it stops all seven, rechecks terminal state, removes only each
+stopped generation's exact registration value, and starts all seven from the
+committed environment. A new manager may reclaim a surviving lifecycle fence
+only when the local `/proc` identity proves its prior manager process is dead.
+An exact, non-expiring, process-identity-owned Redis lifecycle fence makes
+atomic wave enqueue and council claims fail closed for either launch or
+replacement; the fence is compare-deleted only after all seven new leases pass
+and terminal state is rechecked.
 
 ## Running a fleet: deploy, swap models, and the checks that gate each step
 

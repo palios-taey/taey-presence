@@ -207,13 +207,15 @@ Main UI prompt ──► durable round ledger ──► seven fleet-notify inbox
 | `taey:soma:*` (gpu_busy, latency_ms, *_tokens, …) | soma proxy | individual generation metrics and global open-turn projection |
 | `taey:<seat>:inbox` | fleet-notify senders | FIFO inter-session mail (`LPUSH`, oldest consumed from the right) |
 | `taey:<seat>:notifications`, `taey:notify:<seat>:orch` | fleet monitors/orchestrator | auxiliary FIFO delivery queues |
-| `taey:<seat>:processing:<source>` | `taey_seat.py` | claimed but not yet durably completed mail; recovered on restart |
+| `taey:<seat>:processing:<source>` | `taey_seat.py` | Main-seat claimed delivery; recovered by the Main-seat policy |
+| `taey:<council-seat>:processing:<source>:<process_generation>` | `taey_council_seat.py` | council delivery owned by one immutable process generation; a later generation terminalizes an incomplete older claim without inference |
 | `taey:<seat>:active_turns`, `:turn_starts`, `:turn_context` | soma proxy | leased, identity-keyed open turns and their lineage |
 | `taey:<seat>:idle`, `:turns_open`, `:turn_started`, `:last_activity` | soma proxy | compatibility projections derived atomically from open-turn membership |
-| `taey:<seat>:seat_registration` | `taey_council_seat.py` | latest supporting-seat process generation, immutable role identity, private transcript, prompt-contract hash, and startup timestamp |
+| `taey:<seat>:seat_registration` | `taey_council_seat.py` | expiring lease for the live supporting-seat process generation, immutable role identity, private transcript, prompt-contract hash, and startup timestamp |
 | `taey:soma:active_turns`, `taey:soma:gpu_busy` | soma proxy | global leased open-turn membership and its boolean projection |
 | `taey:dcm:native:conversation:<conversation>:active_round` | native council transport | the one open durable round projected for a UI conversation |
 | `taey:dcm:native:round:<round>:dispatched` | native council transport | idempotent seat/revision/phase dispatch tokens; expires after terminal projection |
+| `taey:dcm:native:seat_replacement` | council launcher | non-expiring, process-identity-owned, compare-deleted lifecycle fence that blocks atomic wave enqueue and council claims during seven-seat launch or replacement; a later manager may reclaim it only after proving the recorded local process is dead |
 
 ### Dashboard endpoints
 

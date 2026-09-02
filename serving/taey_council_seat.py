@@ -7,6 +7,7 @@ import json
 import os
 import re
 import sys
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -32,6 +33,8 @@ RESPONSE_CONTRACT = "taey-council-contribution/v1"
 ROLE_CONTRACT_REVISION = 1
 DEFAULT_PROMPT_REVISION = 1
 DEFAULT_IDLE_POLL_SECONDS = 0.25
+DEFAULT_LIVENESS_TTL_SECONDS = 5
+DEFAULT_LIVENESS_REFRESH_SECONDS = 1.0
 PROCESS_GENERATION = uuid.uuid4().hex
 CONTRIBUTION_FIELDS = (
     "schema_version",
@@ -68,10 +71,22 @@ ROLE_BY_SEAT = {
 }
 
 _REGISTER_AT_REST_LUA = """
+if redis.call('EXISTS', KEYS[6]) == 1 then
+    return redis.error_reply('a live council seat generation is already registered')
+end
+local expected_types = {'zset', 'string', 'string', 'string', 'set', 'string'}
+for index = 1, #KEYS do
+    local key_type = redis.call('TYPE', KEYS[index])['ok']
+    if key_type ~= 'none' and key_type ~= expected_types[index] then
+        return redis.error_reply(
+            'council liveness key type mismatch index=' .. index
+        )
+    end
+end
 local count = redis.call('ZCARD', KEYS[1])
 redis.call('SET', KEYS[2], count)
 redis.call('SADD', KEYS[5], ARGV[1])
-redis.call('SET', KEYS[6], ARGV[2])
+redis.call('SET', KEYS[6], ARGV[2], 'EX', ARGV[3])
 if count == 0 then
     redis.call('SET', KEYS[3], '1')
     redis.call('DEL', KEYS[4])
@@ -79,6 +94,56 @@ else
     redis.call('DEL', KEYS[3])
 end
 return count
+"""
+_PROMOTE_READY_REGISTRATION_LUA = """
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then
+    return 0
+end
+redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[3])
+return 1
+"""
+_REFRESH_REGISTRATION_LUA = """
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then
+    return 0
+end
+return redis.call('EXPIRE', KEYS[1], ARGV[2])
+"""
+_MUTATE_OWNED_CLAIM_LUA = """
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then
+    return redis.error_reply('seat process generation is not current')
+end
+local removed = redis.call('LREM', KEYS[2], 1, ARGV[2])
+if removed == 1 and ARGV[3] == 'requeue' then
+    if ARGV[4] == 'LEFT' then
+        redis.call('LPUSH', KEYS[3], ARGV[2])
+    else
+        redis.call('RPUSH', KEYS[3], ARGV[2])
+    end
+end
+return removed
+"""
+_CLAIM_STALE_GENERATION_LUA = """
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then
+    return redis.error_reply('seat process generation is not current')
+end
+local queued = redis.call('LRANGE', KEYS[2], 0, -1)
+for _, raw in ipairs(queued) do
+    local decoded, payload = pcall(cjson.decode, raw)
+    if decoded and type(payload) == 'table'
+       and payload['type'] == 'council_request'
+       and tostring(payload['expected_process_generation'] or '') ~= ARGV[2] then
+        local removed = redis.call('LREM', KEYS[2], 1, raw)
+        if removed == 1 then
+            if ARGV[3] == 'LEFT' then
+                redis.call('LPUSH', KEYS[3], raw)
+            else
+                redis.call('RPUSH', KEYS[3], raw)
+            end
+            return raw
+        end
+    end
+end
+return nil
 """
 
 
@@ -154,10 +219,29 @@ def _validate_seat_contract() -> str:
 class CouncilEventStore(executive.EventStore):
     def __init__(self, path: Path, max_turns: int, seat_contract: str):
         self.seat_contract = seat_contract
+        self.attempted_message_ids: set[str] = set()
         self.prompt_contract_sha256 = hashlib.sha256(
             seat_contract.encode("utf-8")
         ).hexdigest()
         super().__init__(path, max_turns)
+        for event in self._read_events():
+            if event.get("event_type") == "turn_attempt":
+                self.attempted_message_ids.update(
+                    str(message_id)
+                    for message_id in event.get("message_ids") or []
+                )
+            if (
+                event.get("event_type") == "turn_outcome"
+                and event.get("kind")
+                in {
+                    "dead_generation_terminal",
+                    "council_generation_terminal_failure",
+                }
+            ):
+                self.completed_message_ids.update(
+                    str(message_id)
+                    for message_id in event.get("message_ids") or []
+                )
 
     def messages_for(self, prompt: str) -> list[dict[str, str]]:
         contract = (
@@ -380,9 +464,11 @@ def _validated_contribution(
 def _ack_non_actionable_claims(
     claims: list[executive.ClaimedMessage],
     *,
-    inbox: executive.ReliableInbox,
+    inbox: CouncilReliableInbox,
     store: CouncilEventStore,
+    liveness: SeatRegistrationLease,
 ) -> str:
+    liveness.assert_healthy()
     prompt = executive._format_claims(claims)
     reply = executive._format_non_actionable_reply(claims)
     event_id, correlation_id = executive._lineage(claims)
@@ -411,6 +497,7 @@ def _ack_non_actionable_claims(
         conversation_visible=False,
         **fields,
     )
+    liveness.assert_healthy()
     inbox.acknowledge(claims)
     store.completed_message_ids.update(message_ids)
     return reply
@@ -419,11 +506,13 @@ def _ack_non_actionable_claims(
 def _run_turn(
     text: str,
     *,
-    inbox: executive.ReliableInbox,
+    inbox: CouncilReliableInbox,
     store: CouncilEventStore,
     proxy: executive.ProxyClient,
+    liveness: SeatRegistrationLease,
     claims: list[executive.ClaimedMessage] | None = None,
 ) -> str:
+    liveness.assert_healthy()
     claims = inbox.claim_available() if claims is None else list(claims)
     claims, skipped_claims = executive._split_actionable_claims(claims)
     skipped_reply = ""
@@ -432,12 +521,27 @@ def _run_turn(
             skipped_claims,
             inbox=inbox,
             store=store,
+            liveness=liveness,
         )
     if not claims and executive._POINTER_RE.match(text):
         if skipped_reply:
             return skipped_reply
         inbox.release_pointer()
         return "[taey-council-seat] pointer contained no pending messages"
+    for claim in claims:
+        expected_generation = claim.payload.get("expected_process_generation")
+        if claim.payload.get("type") != "council_request":
+            raise executive.SeatFailure(
+                f"unsupported actionable council message type "
+                f"{claim.payload.get('type')!r} msg_id={claim.message_id}"
+            )
+        if expected_generation != PROCESS_GENERATION:
+            raise SeatGenerationLost(
+                f"council request expected process generation "
+                f"{expected_generation or '<missing>'}, current generation is "
+                f"{PROCESS_GENERATION}"
+            )
+    liveness.assert_healthy()
     event_id, correlation_id = executive._lineage(claims)
     lineage = _response_lineage(
         claims,
@@ -471,7 +575,9 @@ def _run_turn(
         prompt=prompt,
         **lineage,
     )
+    inference_state = "side_effect_uncertain"
     try:
+        liveness.assert_healthy()
         result = proxy.ask(
             prompt,
             event_id=event_id,
@@ -479,6 +585,8 @@ def _run_turn(
             messages=store.messages_for(prompt),
             response_format=_contribution_response_format(lineage),
         )
+        inference_state = "completed_invalid"
+        liveness.assert_healthy()
         contribution = _validated_contribution(result.reply, lineage)
         reply = json.dumps(
             contribution,
@@ -504,6 +612,8 @@ def _run_turn(
             conversation_visible=False,
             **lineage,
         )
+    except SeatGenerationLost:
+        raise
     except Exception as exc:
         try:
             store.append(
@@ -514,16 +624,23 @@ def _run_turn(
                 message_ids=message_ids,
                 prompt=prompt,
                 error=f"{type(exc).__name__}: {exc}",
+                kind="council_generation_terminal_failure",
+                skipped_inference=False,
+                inference_state=inference_state,
                 context_visible=False,
                 conversation_visible=False,
                 **lineage,
             )
-            inbox.requeue(claims)
+            liveness.assert_healthy()
+            inbox.acknowledge(claims)
+            store.completed_message_ids.update(message_ids)
         except Exception as recovery_exc:
             raise executive.SeatFailure(
-                f"turn failed ({exc}); durable recovery failed ({recovery_exc})"
+                f"turn failed ({exc}); durable terminalization failed "
+                f"({recovery_exc})"
             ) from recovery_exc
         raise
+    liveness.assert_healthy()
     store.remember_outcome(prompt, reply, message_ids)
     inbox.acknowledge(claims)
     return reply
@@ -547,16 +664,305 @@ def _idle_poll_seconds() -> float:
     return value
 
 
+def _liveness_timing() -> tuple[int, float]:
+    raw_ttl = os.environ.get(
+        "TAEY_COUNCIL_LIVENESS_TTL_SECONDS",
+        str(DEFAULT_LIVENESS_TTL_SECONDS),
+    )
+    raw_refresh = os.environ.get(
+        "TAEY_COUNCIL_LIVENESS_REFRESH_SECONDS",
+        str(DEFAULT_LIVENESS_REFRESH_SECONDS),
+    )
+    try:
+        ttl_seconds = int(raw_ttl)
+        refresh_seconds = float(raw_refresh)
+    except ValueError as exc:
+        raise executive.SeatFailure(
+            "TAEY_COUNCIL_LIVENESS_TTL_SECONDS must be an integer and "
+            "TAEY_COUNCIL_LIVENESS_REFRESH_SECONDS must be a number"
+        ) from exc
+    if ttl_seconds < 2:
+        raise executive.SeatFailure(
+            "TAEY_COUNCIL_LIVENESS_TTL_SECONDS must be at least 2"
+        )
+    if refresh_seconds <= 0 or refresh_seconds >= ttl_seconds:
+        raise executive.SeatFailure(
+            "TAEY_COUNCIL_LIVENESS_REFRESH_SECONDS must be greater than 0 "
+            "and less than TAEY_COUNCIL_LIVENESS_TTL_SECONDS"
+        )
+    return ttl_seconds, refresh_seconds
+
+
+class SeatGenerationLost(executive.SeatFailure):
+    pass
+
+
+class SeatRegistrationLease:
+    def __init__(
+        self,
+        client: redis.Redis,
+        registration_key: str,
+        registration: str,
+        ttl_seconds: int,
+        refresh_seconds: float,
+    ):
+        self.client = client
+        self.registration_key = registration_key
+        self.registration = registration
+        self.ttl_seconds = ttl_seconds
+        self.refresh_seconds = refresh_seconds
+        self._stop = threading.Event()
+        self._failure: Exception | None = None
+        self._thread = threading.Thread(
+            target=self._refresh_loop,
+            name=f"{executive.SESSION}-liveness",
+            daemon=True,
+        )
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=self.refresh_seconds + 1.0)
+
+    def assert_healthy(self) -> None:
+        if self._failure is not None:
+            raise SeatGenerationLost(
+                f"seat registration lease failed: {self._failure}"
+            ) from self._failure
+        if not self._thread.is_alive() and not self._stop.is_set():
+            raise SeatGenerationLost(
+                "seat registration lease refresher stopped unexpectedly"
+            )
+        try:
+            current_registration = self.client.get(self.registration_key)
+        except Exception as exc:
+            raise SeatGenerationLost(
+                f"seat registration lease cannot be verified: {exc}"
+            ) from exc
+        if current_registration != self.registration:
+            raise SeatGenerationLost(
+                "seat registration lease is expired or owned by another generation"
+            )
+
+    def _refresh_loop(self) -> None:
+        while not self._stop.wait(self.refresh_seconds):
+            try:
+                renewed = int(
+                    self.client.eval(
+                        _REFRESH_REGISTRATION_LUA,
+                        1,
+                        self.registration_key,
+                        self.registration,
+                        self.ttl_seconds,
+                    )
+                )
+                if renewed != 1:
+                    raise SeatGenerationLost(
+                        "registration was expired or replaced by another generation"
+                    )
+            except Exception as exc:
+                self._failure = exc
+                return
+
+
+class CouncilReliableInbox(executive.ReliableInbox):
+    def __init__(
+        self,
+        client: redis.Redis,
+        store: CouncilEventStore,
+        registration_key: str,
+        registration: str,
+    ):
+        super().__init__(
+            client,
+            store,
+            processing_generation=PROCESS_GENERATION,
+            claim_guard=(registration_key, registration),
+            claim_block_key=(
+                f"{executive.KEY_PREFIX}:dcm:native:seat_replacement"
+            ),
+        )
+        self.registration_key = registration_key
+        self.registration = registration
+
+    def _mutate_owned_claim(
+        self,
+        claim: executive.ClaimedMessage,
+        action: str,
+    ) -> int:
+        return int(
+            self.client.eval(
+                _MUTATE_OWNED_CLAIM_LUA,
+                3,
+                self.registration_key,
+                claim.source.processing_key,
+                claim.source.queue_key,
+                self.registration,
+                claim.raw,
+                action,
+                claim.source.requeue_side,
+            )
+        )
+
+    def _ack(self, claim: executive.ClaimedMessage) -> None:
+        if self._mutate_owned_claim(claim, "ack") != 1:
+            raise executive.SeatFailure(
+                f"ack lost generation-owned claim source={claim.source.name} "
+                f"msg_id={claim.message_id}"
+            )
+
+    def _requeue(self, claim: executive.ClaimedMessage) -> None:
+        if self._mutate_owned_claim(claim, "requeue") != 1:
+            raise executive.SeatFailure(
+                f"requeue lost generation-owned claim source={claim.source.name} "
+                f"msg_id={claim.message_id}"
+            )
+
+    def _terminalize_dead_generation(
+        self,
+        claim: executive.ClaimedMessage,
+    ) -> None:
+        payload = claim.payload
+        request_id = executive._safe_trace_id(
+            payload.get("request_id")
+            or payload.get("event_id")
+            or claim.message_id,
+            claim.message_id,
+        )
+        correlation_id = executive._safe_trace_id(
+            payload.get("correlation_id")
+            or payload.get("round_id")
+            or request_id,
+            request_id,
+        )
+        try:
+            prompt_revision = int(payload.get("prompt_revision") or 1)
+        except (TypeError, ValueError):
+            prompt_revision = 1
+        dead_generation = str(
+            payload.get("expected_process_generation") or "legacy-unbound"
+        )
+        inference_attempted = claim.message_id in self.store.attempted_message_ids
+        self.store.append(
+            "turn_outcome",
+            ok=False,
+            event_id=request_id,
+            correlation_id=correlation_id,
+            message_ids=[claim.message_id],
+            request_id=request_id,
+            council_run_id=payload.get("council_run_id"),
+            round_id=payload.get("round_id"),
+            prompt_revision=prompt_revision,
+            seat_id=executive.SESSION,
+            role_id=ROLE_ID,
+            process_generation=dead_generation,
+            recovered_by_process_generation=PROCESS_GENERATION,
+            kind="dead_generation_terminal",
+            skipped_inference=not inference_attempted,
+            inference_state=(
+                "side_effect_uncertain" if inference_attempted else "not_started"
+            ),
+            error=(
+                "request owner generation terminated after a durable inference "
+                "attempt but before a durable outcome"
+                if inference_attempted
+                else "request owner generation terminated before inference"
+            ),
+            context_visible=False,
+            conversation_visible=False,
+        )
+        self._ack(claim)
+        self.store.completed_message_ids.add(claim.message_id)
+
+    def _claim_stale_queued_request(
+        self,
+        source: executive.QueueSpec,
+    ) -> executive.ClaimedMessage | None:
+        raw = self.client.eval(
+            _CLAIM_STALE_GENERATION_LUA,
+            3,
+            self.registration_key,
+            source.queue_key,
+            source.processing_key,
+            self.registration,
+            PROCESS_GENERATION,
+            source.processing_side,
+        )
+        if raw is None:
+            return None
+        payload, message_id = executive._decode_message(raw)
+        return executive.ClaimedMessage(source, raw, payload, message_id)
+
+    def recover(self) -> dict[str, int]:
+        terminalized = 0
+        acknowledged = 0
+        current_processing_keys = {
+            source.name: source.processing_key for source in self.queues
+        }
+        for source in executive.QUEUES:
+            candidate_keys = {
+                source.processing_key,
+                *self.client.scan_iter(match=f"{source.processing_key}:*"),
+            }
+            candidate_keys.discard(current_processing_keys[source.name])
+            for processing_key in sorted(candidate_keys):
+                raws = list(self.client.lrange(processing_key, 0, -1))
+                if source.processing_side == "RIGHT":
+                    raws.reverse()
+                owned_source = executive.QueueSpec(
+                    name=source.name,
+                    queue_key=source.queue_key,
+                    processing_key=processing_key,
+                    source_side=source.source_side,
+                    processing_side=source.processing_side,
+                    requeue_side=source.requeue_side,
+                )
+                for raw in raws:
+                    payload, message_id = executive._decode_message(raw)
+                    claim = executive.ClaimedMessage(
+                        owned_source,
+                        raw,
+                        payload,
+                        message_id,
+                    )
+                    if message_id in self.store.completed_message_ids:
+                        self._ack(claim)
+                        acknowledged += 1
+                    else:
+                        self._terminalize_dead_generation(claim)
+                        terminalized += 1
+        for source in self.queues:
+            while True:
+                stale_claim = self._claim_stale_queued_request(source)
+                if stale_claim is None:
+                    break
+                if stale_claim.message_id in self.store.completed_message_ids:
+                    self._ack(stale_claim)
+                    acknowledged += 1
+                else:
+                    self._terminalize_dead_generation(stale_claim)
+                    terminalized += 1
+        self.client.delete(executive.POINTER_BACKOFF_KEY)
+        return {
+            "terminalized": terminalized,
+            "acknowledged": acknowledged,
+        }
+
+
 def _claimed_pointer_text(claims: list[executive.ClaimedMessage]) -> str:
     return f"[NOTIFY] You have {len(claims)} messages"
 
 
 def _serve_next_inbox_turn(
     *,
-    inbox: executive.ReliableInbox,
+    inbox: CouncilReliableInbox,
     store: CouncilEventStore,
     proxy: executive.ProxyClient,
+    liveness: SeatRegistrationLease,
 ) -> str | None:
+    liveness.assert_healthy()
     claims = inbox.claim_available()
     if not claims:
         return None
@@ -565,26 +971,31 @@ def _serve_next_inbox_turn(
         inbox=inbox,
         store=store,
         proxy=proxy,
+        liveness=liveness,
         claims=claims,
     )
 
 
 def _serve_inbox_loop(
     *,
-    inbox: executive.ReliableInbox,
+    inbox: CouncilReliableInbox,
     store: CouncilEventStore,
     proxy: executive.ProxyClient,
+    liveness: SeatRegistrationLease,
     poll_seconds: float,
     idle_sleep: Callable[[float], None] = time.sleep,
     max_turns: int | None = None,
 ) -> int:
     completed_turns = 0
     while True:
+        liveness.assert_healthy()
         reply = _serve_next_inbox_turn(
             inbox=inbox,
             store=store,
             proxy=proxy,
+            liveness=liveness,
         )
+        liveness.assert_healthy()
         if reply is None:
             idle_sleep(poll_seconds)
             continue
@@ -597,26 +1008,34 @@ def _serve_inbox_loop(
 def _register_at_rest_liveness(
     client: redis.Redis,
     store: CouncilEventStore,
-) -> int:
+    ttl_seconds: int,
+) -> tuple[int, str, str]:
     prefix = f"{executive.KEY_PREFIX}:{executive.SESSION}"
-    registration = json.dumps(
-        {
-            "schema_version": 1,
-            "seat_id": executive.SESSION,
-            "seat_kind": "council",
-            "role_id": ROLE_ID,
-            "conversation_id": executive.CONVERSATION_ID,
-            "event_log": str(executive.EVENT_LOG),
-            "process_generation": PROCESS_GENERATION,
-            "role_contract_revision": ROLE_CONTRACT_REVISION,
-            "prompt_contract_sha256": store.prompt_contract_sha256,
-            "response_contract": RESPONSE_CONTRACT,
-            "pid": os.getpid(),
-            "registered_at": time.time(),
-        },
+    registered_at = time.time()
+    registration_fields = {
+        "schema_version": 1,
+        "seat_id": executive.SESSION,
+        "seat_kind": "council",
+        "role_id": ROLE_ID,
+        "conversation_id": executive.CONVERSATION_ID,
+        "event_log": str(executive.EVENT_LOG),
+        "process_generation": PROCESS_GENERATION,
+        "role_contract_revision": ROLE_CONTRACT_REVISION,
+        "prompt_contract_sha256": store.prompt_contract_sha256,
+        "response_contract": RESPONSE_CONTRACT,
+        "liveness_ttl_seconds": ttl_seconds,
+        "pid": os.getpid(),
+        "registered_at": registered_at,
+    }
+    provisional_registration = json.dumps(
+        {**registration_fields, "readiness": "recovering"},
         separators=(",", ":"),
     )
-    return int(
+    ready_registration = json.dumps(
+        {**registration_fields, "readiness": "ready"},
+        separators=(",", ":"),
+    )
+    active_turns = int(
         client.eval(
             _REGISTER_AT_REST_LUA,
             6,
@@ -627,22 +1046,24 @@ def _register_at_rest_liveness(
             f"{executive.KEY_PREFIX}:soma:seat_ids",
             f"{prefix}:seat_registration",
             executive.SESSION,
-            registration,
+            provisional_registration,
+            ttl_seconds,
         )
     )
+    return active_turns, provisional_registration, ready_registration
 
 
 def main() -> int:
     try:
         seat_contract = _validate_seat_contract()
+        ttl_seconds, refresh_seconds = _liveness_timing()
+        poll_seconds = _idle_poll_seconds()
         store = CouncilEventStore(
             executive.EVENT_LOG,
             executive.MAX_TURNS,
             seat_contract,
         )
         client = executive._redis_client()
-        inbox = executive.ReliableInbox(client, store)
-        recovery = inbox.recover()
         store.append(
             "seat_started",
             seat_id=executive.SESSION,
@@ -654,8 +1075,61 @@ def main() -> int:
             response_contract=RESPONSE_CONTRACT,
             conversation_visible=False,
         )
-        active_turns = _register_at_rest_liveness(client, store)
-        poll_seconds = _idle_poll_seconds()
+        active_turns, provisional_registration, ready_registration = (
+            _register_at_rest_liveness(
+                client,
+                store,
+                ttl_seconds,
+            )
+        )
+        registration_key = (
+            f"{executive.KEY_PREFIX}:{executive.SESSION}:seat_registration"
+        )
+        recovery_liveness = SeatRegistrationLease(
+            client,
+            registration_key,
+            provisional_registration,
+            ttl_seconds,
+            refresh_seconds,
+        )
+        recovery_liveness.start()
+        recovery_inbox = CouncilReliableInbox(
+            client,
+            store,
+            registration_key,
+            provisional_registration,
+        )
+        recovery = recovery_inbox.recover()
+        recovery_liveness.assert_healthy()
+        recovery_liveness.stop()
+        promoted = int(
+            client.eval(
+                _PROMOTE_READY_REGISTRATION_LUA,
+                1,
+                registration_key,
+                provisional_registration,
+                ready_registration,
+                ttl_seconds,
+            )
+        )
+        if promoted != 1:
+            raise SeatGenerationLost(
+                "provisional registration was lost before ready promotion"
+            )
+        liveness = SeatRegistrationLease(
+            client,
+            registration_key,
+            ready_registration,
+            ttl_seconds,
+            refresh_seconds,
+        )
+        liveness.start()
+        inbox = CouncilReliableInbox(
+            client,
+            store,
+            registration_key,
+            ready_registration,
+        )
     except Exception as exc:
         print(
             f"[taey-council-seat] FATAL startup: "
@@ -673,20 +1147,24 @@ def main() -> int:
     )
     proxy = executive.ProxyClient()
     try:
-        return _serve_inbox_loop(
-            inbox=inbox,
-            store=store,
-            proxy=proxy,
-            poll_seconds=poll_seconds,
-        )
-    except Exception as exc:
-        print(
-            f"[taey-council-seat] FATAL turn: "
-            f"{type(exc).__name__}: {exc}",
-            file=sys.stderr,
-            flush=True,
-        )
-        return 1
+        try:
+            return _serve_inbox_loop(
+                inbox=inbox,
+                store=store,
+                proxy=proxy,
+                liveness=liveness,
+                poll_seconds=poll_seconds,
+            )
+        except Exception as exc:
+            print(
+                f"[taey-council-seat] FATAL turn: "
+                f"{type(exc).__name__}: {exc}",
+                file=sys.stderr,
+                flush=True,
+            )
+            return 1
+    finally:
+        liveness.stop()
 
 
 if __name__ == "__main__":
