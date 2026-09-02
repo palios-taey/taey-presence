@@ -2,10 +2,21 @@
 """Mechanical contract: anti-forgery validator for council session recovery outcomes."""
 from __future__ import annotations
 
+import importlib.util
 import json
 import sys
 from pathlib import Path
+from types import ModuleType
 from unittest.mock import MagicMock
+
+# Install import-only stubs if dependencies are absent in CI runner
+if importlib.util.find_spec("redis") is None:
+    redis_stub = ModuleType("redis")
+    redis_stub.Redis = object
+    sys.modules["redis"] = redis_stub
+
+if importlib.util.find_spec("taey_adapter") is None:
+    sys.modules["taey_adapter"] = ModuleType("taey_adapter")
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -463,7 +474,43 @@ def main() -> int:
     )
     print("PASS: Injected inference_state on ordinary failure (failed) cannot override local derivation")
 
-    print("\n=== COUNCIL RECOVERY ANTI-FORGERY VALIDATION: PASS ===")
+    # 13. Mismatched / stale DCM wave missing session_failure is rejected (fails closed)
+    stale_wave_missing_failure = dict(wave_fixture)
+    stale_wave_missing_failure["session_failure"] = None
+    adapter_mock.mesh.read_wave = MagicMock(return_value=stale_wave_missing_failure)
+    transport.redis.lrange.return_value = [json.dumps(valid_claimed).encode("utf-8")]
+    try:
+        transport._matching_outcome(seat_1, request=req_1)
+        require(False, "Stale DCM missing session_failure was not rejected")
+    except native_council.CouncilTransportFailure:
+        print("PASS: Stale DCM missing session_failure rejected (fails closed)")
+
+    # 14. Mismatched / stale DCM wave with mismatched session_failure_sha256 is rejected
+    stale_wave_mismatched_sha = dict(wave_fixture)
+    stale_wave_mismatched_sha["session_failure_sha256"] = "sha256:" + "0" * 64
+    adapter_mock.mesh.read_wave = MagicMock(return_value=stale_wave_mismatched_sha)
+    transport.redis.lrange.return_value = [json.dumps(valid_claimed).encode("utf-8")]
+    try:
+        transport._matching_outcome(seat_1, request=req_1)
+        require(False, "Stale DCM with mismatched failure digest was not rejected")
+    except native_council.CouncilTransportFailure:
+        print("PASS: Stale DCM with mismatched failure digest rejected (fails closed)")
+
+    # 15. Mismatched / stale DCM wave with close_outcome != session_failed is rejected
+    stale_wave_wrong_outcome = dict(wave_fixture)
+    stale_wave_wrong_outcome["close_outcome"] = "incomplete_round"
+    adapter_mock.mesh.read_wave = MagicMock(return_value=stale_wave_wrong_outcome)
+    transport.redis.lrange.return_value = [json.dumps(valid_claimed).encode("utf-8")]
+    try:
+        transport._matching_outcome(seat_1, request=req_1)
+        require(False, "Stale DCM with wrong close_outcome was not rejected")
+    except native_council.CouncilTransportFailure:
+        print("PASS: Stale DCM with wrong close_outcome rejected (fails closed)")
+
+    # Reset wave mock
+    adapter_mock.mesh.read_wave = MagicMock(return_value=wave_fixture)
+
+    print("\n=== COUNCIL RECOVERY ANTI-FORGERY & MISMATCH VALIDATION: PASS ===")
     return 0
 
 
