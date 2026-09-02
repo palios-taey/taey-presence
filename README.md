@@ -100,6 +100,10 @@ FastAPI dashboard renders all of it.
   The public Neo4j DCM session is the deliberation authority: Main reserves each
   role request there before Redis delivery, seats commit there before Redis
   acknowledgement, and Main reads the committed contribution before advancing.
+  A completed round publishes its DCM final before the UI outcome; a failed
+  round atomically fails the DCM session and closes any active graph wave before
+  its UI failure is projected. Terminal projection retries reuse the immutable
+  failure identity rather than leaving an open session behind.
   Append-only 0600 JSONL retains UI projection and recovery diagnostics only.
   Production acceptance remains a separate gate.
 - **Live, UI-safe council ledger** — open rounds stream seat-started, status,
@@ -191,6 +195,7 @@ Main UI prompt ──► public Neo4j DCM session/wave ──reserve──► Re
                                Main graph read ◄──── Redis receipt┘
                                       │
                          Main-only synthesis ──► DCM final ──► UI
+                           round failure ──► DCM failed ──► UI
 ```
 
 ### Redis keys (the contract)
