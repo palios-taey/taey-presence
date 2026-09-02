@@ -9,7 +9,7 @@ WorkingDirectory=@TAEY_ROOT@
 EnvironmentFile=@TAEY_ROOT@/serving/run/council-seat-%i.env
 Environment=HOME=@TAEY_HOME@
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/usr/bin/python3 -u serving/taey_council_seat.py
+ExecStart=@TAEY_VENV@/bin/python -u serving/taey_council_seat.py
 StandardOutput=journal
 StandardError=journal
 Restart=on-failure
