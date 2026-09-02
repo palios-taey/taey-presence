@@ -36,20 +36,24 @@
 #      have done that.
 #
 # Usage:
-#   ./deploy_thor.sh --check  <user@host> [taey-root]   # verify only, mutates nothing
-#   ./deploy_thor.sh          <user@host> [taey-root]   # install, no restart
-#   ./deploy_thor.sh --restart --model-path /path <user@host> [root]
+#   ./deploy_thor.sh --check --authority-id host-authority \
+#     <user@host> [taey-root]                           # verify only, mutates nothing
+#   ./deploy_thor.sh --authority-id host-authority \
+#     <user@host> [taey-root]                           # install, no restart
+#   ./deploy_thor.sh --restart --model-path /path --served-name id \
+#     --authority-id host-authority <user@host> [root]
 #
 # Exit: 0 = in sync / deployed. 1 = drift found (--check) or deploy failed.
 set -euo pipefail
 
-CHECK=0; RESTART=0; MODEL_PATH=""; SERVED_NAME=""; KEEP_NAME=0; NAME_EXPLICIT=0
+CHECK=0; RESTART=0; MODEL_PATH=""; SERVED_NAME=""; AUTHORITY_ID=""; KEEP_NAME=0; NAME_EXPLICIT=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --check)       CHECK=1; shift ;;
     --restart)     RESTART=1; shift ;;
     --model-path)  MODEL_PATH="${2:?--model-path needs a value}"; shift 2 ;;
     --served-name) SERVED_NAME="${2:?--served-name needs a value}"; NAME_EXPLICIT=1; shift 2 ;;
+    --authority-id) AUTHORITY_ID="${2:?--authority-id needs a value}"; shift 2 ;;
     --keep-served-name) KEEP_NAME=1; shift ;;
     -h|--help)     sed -n '2,40p' "$0"; exit 0 ;;
     *)             break ;;
@@ -60,20 +64,83 @@ TARGET="${1:?usage: deploy_thor.sh [--check] [--restart] [--model-path P] <user@
 ROOT="${2:-}"
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 UNIT_SRC="${REPO}/serving/systemd/taey-ep3.service"
-FILES=(serving/vllm_serve.sh bin/gpu-cleanup.sh)
+ATTESTOR_UNIT_SRC="${REPO}/serving/systemd/taey-model-identity-attestor.service"
 
 [ -r "$UNIT_SRC" ] || { echo "FATAL: missing $UNIT_SRC" >&2; exit 1; }
-for f in "${FILES[@]}"; do
-  [ -r "${REPO}/${f}" ] || { echo "FATAL: missing ${REPO}/${f} — the repo cannot deploy what it does not carry" >&2; exit 1; }
-done
+[ -r "$ATTESTOR_UNIT_SRC" ] || { echo "FATAL: missing $ATTESTOR_UNIT_SRC" >&2; exit 1; }
 
 # Derive TAEY_ROOT from the node's own installed unit when not given, so we adopt the layout
 # already in use rather than imposing a new one and leaving two copies behind.
 if [ -z "$ROOT" ]; then
   ROOT=$(ssh "$TARGET" "systemctl cat taey-ep3 2>/dev/null | sed -n 's|^ExecStartPre=\(/.*\)/bin/gpu-cleanup.sh.*|\1|p' | head -1" || true)
-  ROOT="${ROOT:-\$HOME/palios-taey}"
+  if [ -z "$ROOT" ]; then
+    REMOTE_HOME=$(ssh "$TARGET" 'printf "%s" "$HOME"')
+    [ -n "$REMOTE_HOME" ] || { echo "FATAL: target home directory is unavailable" >&2; exit 1; }
+    ROOT="${REMOTE_HOME}/palios-taey"
+  fi
 fi
+case "$ROOT" in
+  /*) ;;
+  *) echo "FATAL: taey-root must be an absolute target path" >&2; exit 1 ;;
+esac
 echo "[deploy] target=${TARGET} root=${ROOT} repo=$(cd "$REPO" && git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+
+LIVE_MODEL_PATH=$(ssh "$TARGET" "systemctl show taey-ep3 -p Environment --value 2>/dev/null | xargs -n1 | sed -n 's/^TAEY_MODEL_PATH=//p' | head -1" || true)
+LIVE_SERVED_NAME=$(ssh "$TARGET" "systemctl show taey-ep3 -p Environment --value 2>/dev/null | xargs -n1 | sed -n 's/^TAEY_SERVED_NAME=//p' | head -1" || true)
+LIVE_AUTHORITY_ID=$(ssh "$TARGET" "sudo sed -n 's/^TAEY_MODEL_IDENTITY_AUTHORITY_ID=//p' /etc/taey/model-identity-attestor.env 2>/dev/null | head -1" || true)
+if [ -z "$MODEL_PATH" ]; then
+  MODEL_PATH="$LIVE_MODEL_PATH"
+  [ -n "$MODEL_PATH" ] && echo "[deploy] preserving served model: ${MODEL_PATH}"
+fi
+if [ -z "$SERVED_NAME" ]; then
+  SERVED_NAME="$LIVE_SERVED_NAME"
+  [ -n "$SERVED_NAME" ] && echo "[deploy] preserving served id: ${SERVED_NAME}"
+fi
+if [ -z "$AUTHORITY_ID" ]; then
+  AUTHORITY_ID="$LIVE_AUTHORITY_ID"
+  [ -n "$AUTHORITY_ID" ] && echo "[deploy] preserving model identity authority: ${AUTHORITY_ID}"
+fi
+[ -n "$SERVED_NAME" ] || { echo "FATAL: no served name exists on the node. Pass --served-name." >&2; exit 1; }
+[ -n "$AUTHORITY_ID" ] || { echo "FATAL: no model identity authority exists on the node. Pass --authority-id." >&2; exit 1; }
+[[ "$AUTHORITY_ID" =~ ^[a-z0-9][a-z0-9-]{0,63}$ ]] \
+  || { echo "FATAL: model identity authority is invalid" >&2; exit 1; }
+if [ -n "$SERVED_NAME" ]; then
+  [[ "$SERVED_NAME" =~ ^[A-Za-z0-9._-]+([[:space:]][A-Za-z0-9._-]+)*$ ]] \
+    || { echo "FATAL: served names contain unsupported characters" >&2; exit 1; }
+  echo "[deploy] served id: ${SERVED_NAME}"
+fi
+TRUST_FILE="serving/trust/${AUTHORITY_ID}.pub.pem"
+FILES=(serving/vllm_serve.sh serving/model_identity_attestor.py serving/model_identity_status.py serving/seal_model_artifact.py "$TRUST_FILE" bin/gpu-cleanup.sh)
+for f in "${FILES[@]}"; do
+  [ -r "${REPO}/${f}" ] || { echo "FATAL: missing ${REPO}/${f} — the repo cannot deploy what it does not carry" >&2; exit 1; }
+done
+
+EP3_RENDERED=$(mktemp)
+ATTESTOR_RENDERED=$(mktemp)
+cleanup_rendered_units() {
+  rm -f "$EP3_RENDERED" "$ATTESTOR_RENDERED"
+}
+trap cleanup_rendered_units EXIT
+
+render_unit() {
+  local source="$1"
+  local destination="$2"
+  sed -e "s|@TAEY_ROOT@|${ROOT}|g" -e "s|@TAEY_MODEL_PATH@|${MODEL_PATH}|g" "$source" > "$destination"
+  if [ -n "$SERVED_NAME" ]; then
+    sed -i -e "s|^Environment=.*TAEY_SERVED_NAME=.*|Environment=\"TAEY_SERVED_NAME=${SERVED_NAME}\"|" "$destination"
+    grep -Fq "Environment=\"TAEY_SERVED_NAME=${SERVED_NAME}\"" "$destination" \
+      || { echo "FATAL: served-name substitution did not land" >&2; exit 1; }
+  fi
+  if grep -q '@TAEY_' "$destination"; then
+    echo "FATAL: unsubstituted placeholder remains in a unit" >&2
+    exit 1
+  fi
+}
+
+if [ -n "$MODEL_PATH" ]; then
+  render_unit "$UNIT_SRC" "$EP3_RENDERED"
+  render_unit "$ATTESTOR_UNIT_SRC" "$ATTESTOR_RENDERED"
+fi
 
 # ---------- drift report: compare what the node RUNS against what the repo HOLDS ----------
 # Compares the path systemd actually exec's, not the path we assume it exec's. Those differed
@@ -103,6 +170,23 @@ for f in "${FILES[@]}"; do
   if [ -z "$lm" ]; then echo "  DRIFT ${f} ABSENT at ${ROOT}/${f}"; drift=1
   elif [ "$lm" != "$rm_" ]; then echo "  DRIFT ${f} differs (live ${lm:0:8} vs repo ${rm_:0:8})"; drift=1; fi
 done
+if [ -n "$MODEL_PATH" ]; then
+  compare_unit() {
+    local name="$1"
+    local rendered="$2"
+    live_sha=$(ssh "$TARGET" "sha256sum '/etc/systemd/system/${name}' 2>/dev/null | cut -d' ' -f1" || true)
+    expected_sha=$(sha256sum "$rendered" | cut -d' ' -f1)
+    if [ -z "$live_sha" ]; then
+      echo "  DRIFT ${name} ABSENT"
+      drift=1
+    elif [ "$live_sha" != "$expected_sha" ]; then
+      echo "  DRIFT ${name} differs (live ${live_sha:0:8} vs repo ${expected_sha:0:8})"
+      drift=1
+    fi
+  }
+  compare_unit taey-ep3.service "$EP3_RENDERED"
+  compare_unit taey-model-identity-attestor.service "$ATTESTOR_RENDERED"
+fi
 # Word this precisely. This compares the INSTALLED unit and the files on disk against the repo.
 # It does NOT prove the RUNNING process was started from them — a process that exec'd an older
 # copy keeps running it until restart. Claiming "the node runs this" would be true of the config
@@ -114,27 +198,6 @@ if [ "$CHECK" -eq 1 ]; then
 fi
 
 # ---------- install ----------
-# Preserve the served model unless explicitly overridden. A deploy that quietly repointed the
-# model would change production behaviour while reporting only that files were copied.
-if [ -z "$MODEL_PATH" ]; then
-  # --value is load-bearing. Without it systemctl prints `Environment=TAEY_MODEL_PATH=... VAR=...`
-  # as ONE line, so the first whitespace-split token is `Environment=TAEY_MODEL_PATH=/path` and an
-  # anchored ^TAEY_MODEL_PATH= match silently finds nothing. --value emits the bare assignments.
-  MODEL_PATH=$(ssh "$TARGET" "systemctl show taey-ep3 -p Environment --value 2>/dev/null | tr ' ' '\n' | sed -n 's/^TAEY_MODEL_PATH=//p' | head -1" || true)
-  [ -n "$MODEL_PATH" ] && echo "[deploy] preserving served model: ${MODEL_PATH}"
-fi
-
-# PRESERVE THE SERVED ID TOO. The unit template hardcodes Environment=TAEY_SERVED_NAME=ep3, so
-# without this a plain deploy — one intended only to push a launcher change — SILENTLY REVERTS the
-# served id back to the template value. Observed 2026-07-27: Thor1 had been deliberately renamed to
-# a candidate id so stale ep3 callers would 404; a later deploy carrying an unrelated change put it
-# back to 'ep3' while the weights stayed the candidate's, recreating the exact alias trap the
-# --served-name gate below exists to prevent. The gate guarded the artifact/name relationship and
-# the deploy path went around it. Preserve the node's value; require a flag to change it.
-if [ -z "$SERVED_NAME" ]; then
-  SERVED_NAME=$(ssh "$TARGET" "systemctl show taey-ep3 -p Environment --value 2>/dev/null | tr ' ' '\n' | sed -n 's/^TAEY_SERVED_NAME=//p' | head -1" || true)
-  [ -n "$SERVED_NAME" ] && echo "[deploy] preserving served id: ${SERVED_NAME}"
-fi
 [ -n "$MODEL_PATH" ] || { echo "FATAL: no TAEY_MODEL_PATH on the node and none given. Pass --model-path." >&2; exit 1; }
 
 # ---------- the alias gate: changing WEIGHTS forces a decision about the served NAME ----------
@@ -150,53 +213,57 @@ fi
 # point) or say --keep-served-name to assert that every caller of that id SHOULD move to the new
 # weights. Both are legitimate; silently inheriting the old name is not.
 if [ -n "$MODEL_PATH" ]; then
-  cur_path=$(ssh "$TARGET" "systemctl show taey-ep3 -p Environment --value 2>/dev/null | tr ' ' '\n' | sed -n 's/^TAEY_MODEL_PATH=//p' | head -1" || true)
-  cur_name=$(ssh "$TARGET" "systemctl show taey-ep3 -p Environment --value 2>/dev/null | tr ' ' '\n' | sed -n 's/^TAEY_SERVED_NAME=//p' | head -1" || true)
   # Test NAME_EXPLICIT, not emptiness. The preservation step above fills SERVED_NAME from the
   # node, so an emptiness test here would ALWAYS be false and this gate would never fire again —
   # the preservation fix silently disabled the guard it sits next to. Caught by a pre-window
   # precondition check, not by the edit that caused it.
-  if [ -n "$cur_path" ] && [ "$cur_path" != "$MODEL_PATH" ] && [ "$NAME_EXPLICIT" -eq 0 ] && [ "$KEEP_NAME" -eq 0 ]; then
+  if [ -n "$LIVE_MODEL_PATH" ] && [ "$LIVE_MODEL_PATH" != "$MODEL_PATH" ] && [ "$NAME_EXPLICIT" -eq 0 ] && [ "$KEEP_NAME" -eq 0 ]; then
     cat >&2 <<EOF
 FATAL: this deploy changes the served ARTIFACT but not the served NAME.
-         artifact: ${cur_path}
+         artifact: ${LIVE_MODEL_PATH}
                ->  ${MODEL_PATH}
-         served id stays: '${cur_name:-ep3}'
-  A client addressing '${cur_name:-ep3}' would then receive DIFFERENT WEIGHTS with HTTP 200 and no
+         served id stays: '${LIVE_SERVED_NAME:-ep3}'
+  A client addressing '${LIVE_SERVED_NAME:-ep3}' would then receive DIFFERENT WEIGHTS with HTTP 200 and no
   indication anything changed. Decide the name explicitly:
     --served-name <new-id>   stale callers get a clean 404 — use this while a node serves a
                              CANDIDATE that differs from its peers
-    --keep-served-name       you assert every caller of '${cur_name:-ep3}' should move to the new
+    --keep-served-name       you assert every caller of '${LIVE_SERVED_NAME:-ep3}' should move to the new
                              weights — use this for a fleet-wide promotion
 EOF
     exit 1
   fi
 fi
-[ -n "$SERVED_NAME" ] && echo "[deploy] served id: ${SERVED_NAME}"
-
-ssh "$TARGET" "mkdir -p '${ROOT}/serving' '${ROOT}/bin'"
+ssh "$TARGET" "mkdir -p '${ROOT}/serving/trust' '${ROOT}/bin'"
 for f in "${FILES[@]}"; do
   scp -q "${REPO}/${f}" "${TARGET}:${ROOT}/${f}"
-  ssh "$TARGET" "chmod +x '${ROOT}/${f}'"
+  case "$f" in
+    *.pem) ssh "$TARGET" "chmod 0644 '${ROOT}/${f}'" ;;
+    *) ssh "$TARGET" "chmod +x '${ROOT}/${f}'" ;;
+  esac
   echo "[deploy] installed ${f}"
 done
 
-tmp=$(mktemp)
-sed -e "s|@TAEY_ROOT@|${ROOT}|g" -e "s|@TAEY_MODEL_PATH@|${MODEL_PATH}|g" "$UNIT_SRC" > "$tmp"
-# Apply an explicit served-id override into the unit's env block.
-if [ -n "$SERVED_NAME" ]; then
-  sed -i -e "s|^Environment=TAEY_SERVED_NAME=.*|Environment=TAEY_SERVED_NAME=${SERVED_NAME}|" "$tmp"
-  grep -q "TAEY_SERVED_NAME=${SERVED_NAME}" "$tmp" || { echo "FATAL: served-name substitution did not land" >&2; rm -f "$tmp"; exit 1; }
-fi
-grep -q '@TAEY_' "$tmp" && { echo "FATAL: unsubstituted placeholder remains in the unit" >&2; rm -f "$tmp"; exit 1; }
-scp -q "$tmp" "${TARGET}:/tmp/taey-ep3.service"; rm -f "$tmp"
-ssh "$TARGET" "sudo install -m644 /tmp/taey-ep3.service /etc/systemd/system/taey-ep3.service && rm -f /tmp/taey-ep3.service && sudo systemctl daemon-reload"
-echo "[deploy] unit installed + daemon-reload"
+scp -q "$EP3_RENDERED" "${TARGET}:/tmp/taey-ep3.service"
+scp -q "$ATTESTOR_RENDERED" "${TARGET}:/tmp/taey-model-identity-attestor.service"
+ssh "$TARGET" "sudo install -m644 /tmp/taey-ep3.service /etc/systemd/system/taey-ep3.service && sudo install -m644 /tmp/taey-model-identity-attestor.service /etc/systemd/system/taey-model-identity-attestor.service && rm -f /tmp/taey-ep3.service /tmp/taey-model-identity-attestor.service && sudo systemctl daemon-reload"
+echo "[deploy] serve + model-identity units installed + daemon-reload"
 
 if [ "$RESTART" -eq 1 ]; then
+  ssh "$TARGET" "sudo test -s /etc/taey/model-identity-attestor.env && sudo test -s /etc/taey/model-identity-attestor.key && sudo test -s '${MODEL_PATH}/ARTIFACT_SHA256SUMS'" \
+    || { echo "FATAL: restart requires the attestor environment, private key, and artifact seal" >&2; exit 1; }
   echo "[deploy] restarting — you asserted consumers are quiesced"
   ssh "$TARGET" "sudo systemctl restart taey-ep3"
-  ssh "$TARGET" "systemctl is-active taey-ep3" | sed 's/^/[deploy] service: /'
+  ready=0
+  status_output=""
+  for _attempt in $(seq 1 400); do
+    if status_output=$(ssh "$TARGET" "sudo '${ROOT}/serving/model_identity_status.py' --environment-file /etc/taey/model-identity-attestor.env --host-local --served-name '${SERVED_NAME}'" 2>&1); then
+      echo "$status_output"
+      ready=1
+      break
+    fi
+    sleep 5
+  done
+  [ "$ready" -eq 1 ] || { echo "FATAL: model identity publication did not become ready: ${status_output}" >&2; exit 1; }
 else
   echo "[deploy] NOT restarting. The running service still serves from the copy it exec'd."
   echo "[deploy] New files take effect on the next restart. Before that restart, run:"

@@ -26,6 +26,9 @@
 # point at your local model path. See serving/SERVING.md.
 set -euo pipefail
 
+exec 9>/run/taey-model-artifact-seal.lock
+flock -s -n 9 || { echo "[vLLM] model artifact sealing is in progress" >&2; exit 1; }
+
 MODEL_PATH="${TAEY_MODEL_PATH:?set TAEY_MODEL_PATH to the full path of your HF model directory}"
 MODELS_DIR="${TAEY_MODELS_DIR:-$(dirname "${MODEL_PATH}")}"
 CACHE_DIR="${TAEY_CACHE_DIR:-$HOME/.cache}"
@@ -55,6 +58,8 @@ MAX_MODEL_LEN="${TAEY_MAX_MODEL_LEN:-16384}"
 # A pre-quantized checkpoint carries its own quantization_config and needs no value here.
 QUANTIZATION="${TAEY_QUANTIZATION:-}"
 VLLM_IMAGE="${VLLM_IMAGE:-ghcr.io/nvidia-ai-iot/vllm@sha256:b587dd56b4cb076209ad5156a626ac75f5a976d0e8e7d1e6a9fccd56d1bd65e8}"
+SERVE_LAUNCHER_SHA256="$(sha256sum "${BASH_SOURCE[0]}" | cut -d' ' -f1)"
+SERVE_INVOCATION_ID="${INVOCATION_ID:?systemd INVOCATION_ID is required}"
 
 echo "[vLLM] Serving model: ${MODEL_PATH}"
 echo "[vLLM] Served names:  ${SERVED_NAMES[*]}"
@@ -131,6 +136,8 @@ exec docker run \
   --runtime nvidia \
   --network host \
   --ipc=host \
+  --label "palios.taey.serve-launcher-sha256=${SERVE_LAUNCHER_SHA256}" \
+  --label "palios.taey.systemd-invocation-id=${SERVE_INVOCATION_ID}" \
   --ulimit memlock=-1 \
   --ulimit stack=67108864 \
   --health-cmd="curl -sf http://localhost:${VLLM_PORT}/v1/models || exit 1" \
@@ -138,7 +145,7 @@ exec docker run \
   --health-timeout=10s \
   --health-retries=3 \
   --health-start-period=600s \
-  -v "${MODELS_DIR}:/models" \
+  -v "${MODELS_DIR}:/models:ro" \
   -v "${CACHE_DIR}/vllm-compile:/root/.cache/vllm-compile" \
   -v "${CACHE_DIR}/triton:/root/.triton/cache" \
   -v "${CACHE_DIR}/vllm:/root/.cache/vllm" \

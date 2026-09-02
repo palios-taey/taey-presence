@@ -6,6 +6,7 @@ implementation; do not fork these into another repo or hand-edit them on a node.
 | unit | role | port |
 |---|---|---|
 | `taey-ep3.service` | vLLM serve of ep3 (docker, digest-pinned via `vllm_serve.sh`) | 8000 |
+| `taey-model-identity-attestor.service` | short-lived serving-owned model identity receipt | n/a |
 | `taey-soma-proxy.service` | persona injection + latency feedback + tool surface | 8765 |
 | `taey-seat.service` | supervised tmux executive seat and fleet-notify reader | n/a |
 | `taey-council-seat@.service` | supervised private supporting council seats | n/a |
@@ -35,6 +36,38 @@ sudo systemctl daemon-reload && sudo systemctl enable --now taey-ep3
 ```
 Private config (endpoints, keys) lives only in `@TAEY_ROOT@/.env` (referenced via
 `EnvironmentFile`), which is gitignored — it is never committed here.
+Before enabling the model identity attestor, install
+`model-identity-attestor.env.example` privately as
+`/etc/taey/model-identity-attestor.env`. Generate the Ed25519 private key on the serving host only:
+
+```bash
+sudo install -d -m 0700 /etc/taey
+sudo openssl genpkey -algorithm ED25519 -out /etc/taey/model-identity-attestor.key
+sudo chmod 0600 /etc/taey/model-identity-attestor.key
+sudo openssl pkey -in /etc/taey/model-identity-attestor.key -pubout \
+  -out /tmp/model-identity-attestor.pub.pem
+```
+
+Commit only that public PEM as `serving/trust/<authority-id>.pub.pem`; never copy the private key
+off the serving host. Before enabling, compare the DER SHA-256 from the private key's derived public
+half with the committed public file:
+
+```bash
+sudo openssl pkey -in /etc/taey/model-identity-attestor.key -pubout -outform DER | sha256sum
+openssl pkey -pubin -in serving/trust/<authority-id>.pub.pem -outform DER | sha256sum
+```
+
+Rotation is the same stopped-service procedure with a newly
+generated key and newly merged public PEM; never reuse a terminal model receipt across rotation.
+The attestor publishes only when the exact artifact has a
+complete verified `ARTIFACT_SHA256SUMS`, every artifact entry is non-writable and non-symlinked,
+the live `/models` bind is read-only, and Docker, systemd, and `/v1/models` agree. Its Redis value is
+stable for one exact serving process and expires if the attestor stops. The Redis key is transport;
+the receipt content is serving-host authority.
+Verify the live publication independently with
+`sudo python3 serving/model_identity_status.py --environment-file /etc/taey/model-identity-attestor.env --host-local --served-name "taey ep3"`; it re-derives the canonical
+receipt digest, verifies the serving-host signature against the committed public trust root,
+and reads the value plus remaining TTL atomically rather than importing the producer.
 Secrets used by the Greenhouse ATS one-action lane are not environment variables. Install the
 public `taey-greenhouse-ats-credential.conf.example` as a service drop-in after replacing its
 private source path. systemd exposes the credential through `CREDENTIALS_DIRECTORY`; Presence
