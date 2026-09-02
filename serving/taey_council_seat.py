@@ -2,10 +2,8 @@
 """Private supporting-seat runtime for Taey's seven-seat local council."""
 from __future__ import annotations
 
-import hashlib
 import json
 import os
-import re
 import sys
 import threading
 import time
@@ -15,6 +13,7 @@ from typing import Any, Callable
 
 import redis
 
+import council_prompt_receipt as prompt_producer
 import taey_seat as executive
 
 
@@ -27,48 +26,22 @@ ROLE_PROMPT_VALUE = os.environ.get(
     "TAEY_COUNCIL_ROLE_PROMPT_PATH",
     "",
 ).strip()
+MANIFEST_VALUE = os.environ.get(
+    "TAEY_COUNCIL_MANIFEST_PATH",
+    str(Path(__file__).resolve().with_name("council_seats.json")),
+).strip()
 SHARED_PROMPT_PATH = Path(SHARED_PROMPT_VALUE).expanduser()
 ROLE_PROMPT_PATH = Path(ROLE_PROMPT_VALUE).expanduser()
-RESPONSE_CONTRACT = "taey-council-contribution/v1"
-ROLE_CONTRACT_REVISION = 1
+MANIFEST_PATH = Path(MANIFEST_VALUE).expanduser()
+RESPONSE_CONTRACT = prompt_producer.RESPONSE_CONTRACT
+ROLE_CONTRACT_REVISION = prompt_producer.ROLE_CONTRACT_REVISION
 DEFAULT_PROMPT_REVISION = 1
 DEFAULT_IDLE_POLL_SECONDS = 0.25
 DEFAULT_LIVENESS_TTL_SECONDS = 5
 DEFAULT_LIVENESS_REFRESH_SECONDS = 1.0
 PROCESS_GENERATION = uuid.uuid4().hex
-CONTRIBUTION_FIELDS = (
-    "schema_version",
-    "seat_id",
-    "role_id",
-    "status",
-    "prompt_revision",
-    "observations",
-    "inferences",
-    "unknowns",
-    "evidence_refs",
-    "concerns",
-    "questions",
-    "recommendation",
-    "confidence",
-)
-CONTRIBUTION_LIST_FIELDS = (
-    "observations",
-    "inferences",
-    "unknowns",
-    "evidence_refs",
-    "concerns",
-    "questions",
-)
-_COUNCIL_SEAT_RE = re.compile(r"^taey-council-[1-7]$")
-ROLE_BY_SEAT = {
-    "taey-council-1": "context-memory",
-    "taey-council-2": "evidence-reality",
-    "taey-council-3": "systems-dependencies",
-    "taey-council-4": "adversarial-failure",
-    "taey-council-5": "scope-intent",
-    "taey-council-6": "options-alternatives",
-    "taey-council-7": "control-acceptance",
-}
+CONTRIBUTION_FIELDS = prompt_producer.CONTRIBUTION_FIELDS
+CONTRIBUTION_LIST_FIELDS = prompt_producer.CONTRIBUTION_LIST_FIELDS
 
 _REGISTER_AT_REST_LUA = """
 if redis.call('EXISTS', KEYS[6]) == 1 then
@@ -147,53 +120,34 @@ return nil
 """
 
 
-def _read_prompt_file(value: str, path: Path, env_name: str) -> str:
-    if not value:
-        raise executive.SeatFailure(f"{env_name} is required")
-    if not path.is_file():
-        raise executive.SeatFailure(f"{env_name} is not a readable file: {path}")
-    content = path.read_text(encoding="utf-8").strip()
-    if not content:
-        raise executive.SeatFailure(f"{env_name} is empty: {path}")
-    return content
-
-
-def _seat_role_contract() -> str:
-    shared_prompt = _read_prompt_file(
-        SHARED_PROMPT_VALUE,
-        SHARED_PROMPT_PATH,
-        "TAEY_COUNCIL_SHARED_PROMPT_PATH",
-    )
-    role_prompt = _read_prompt_file(
-        ROLE_PROMPT_VALUE,
-        ROLE_PROMPT_PATH,
-        "TAEY_COUNCIL_ROLE_PROMPT_PATH",
-    )
-    return (
-        f"Immutable runtime identity: seat_id={executive.SESSION}; "
-        f"role_id={ROLE_ID}; response_contract={RESPONSE_CONTRACT}; "
-        f"role_contract_revision={ROLE_CONTRACT_REVISION}.\n\n"
-        f"{shared_prompt}\n\n{role_prompt}"
-    )
-
-
-def _validate_seat_contract() -> str:
-    if not _COUNCIL_SEAT_RE.fullmatch(executive.SESSION):
+def _validate_seat_contract() -> tuple[
+    prompt_producer.CouncilManifest,
+    prompt_producer.SeatConfig,
+    str,
+]:
+    try:
+        manifest = prompt_producer.load_manifest(MANIFEST_PATH)
+        seat = prompt_producer.seat_for(manifest, executive.SESSION)
+    except prompt_producer.CouncilManifestError as exc:
+        raise executive.SeatFailure(str(exc)) from exc
+    if ROLE_ID != seat.role_id:
         raise executive.SeatFailure(
-            "TAEY_SESSION_NAME must be taey-council-1 through taey-council-7"
-        )
-    expected_role = ROLE_BY_SEAT[executive.SESSION]
-    if ROLE_ID != expected_role:
-        raise executive.SeatFailure(
-            f"{executive.SESSION} requires TAEY_COUNCIL_ROLE_ID={expected_role}, "
+            f"{executive.SESSION} requires TAEY_COUNCIL_ROLE_ID={seat.role_id}, "
             f"got {ROLE_ID or '<empty>'}"
         )
-    expected_conversation = f"council-{expected_role}"
-    if executive.CONVERSATION_ID != expected_conversation:
+    if executive.CONVERSATION_ID != seat.conversation_id:
         raise executive.SeatFailure(
             f"{executive.SESSION} requires "
-            f"TAEY_CONVERSATION_ID={expected_conversation}, "
+            f"TAEY_CONVERSATION_ID={seat.conversation_id}, "
             f"got {executive.CONVERSATION_ID}"
+        )
+    if not SHARED_PROMPT_VALUE or SHARED_PROMPT_PATH.resolve() != seat.shared_prompt:
+        raise executive.SeatFailure(
+            "TAEY_COUNCIL_SHARED_PROMPT_PATH must match the manifest shared_prompt"
+        )
+    if not ROLE_PROMPT_VALUE or ROLE_PROMPT_PATH.resolve() != seat.role_prompt:
+        raise executive.SeatFailure(
+            "TAEY_COUNCIL_ROLE_PROMPT_PATH must match the manifest role_prompt"
         )
     if executive.EVENT_LOG.name != f"{executive.SESSION}.jsonl":
         raise executive.SeatFailure(
@@ -213,16 +167,31 @@ def _validate_seat_contract() -> str:
         raise executive.SeatFailure(
             f"council event-log directory is group/world accessible: {parent}"
         )
-    return _seat_role_contract()
+    return manifest, seat, prompt_producer.seat_role_contract(seat)
 
 
 class CouncilEventStore(executive.EventStore):
-    def __init__(self, path: Path, max_turns: int, seat_contract: str):
+    def __init__(
+        self,
+        path: Path,
+        max_turns: int,
+        manifest: prompt_producer.CouncilManifest,
+        seat: prompt_producer.SeatConfig,
+        seat_contract: str,
+    ):
+        self.manifest = manifest
+        self.seat = seat
         self.seat_contract = seat_contract
         self.attempted_message_ids: set[str] = set()
-        self.prompt_contract_sha256 = hashlib.sha256(
-            seat_contract.encode("utf-8")
-        ).hexdigest()
+        self.prompt_contract_sha256 = prompt_producer.text_sha256(
+            seat_contract
+        ).removeprefix("sha256:")
+        self.dcm_v2_prompt_contract_receipt = (
+            prompt_producer.prompt_contract_receipt(manifest, seat)
+        )
+        self.dcm_v2_prompt_contract_sha256 = (
+            self.dcm_v2_prompt_contract_receipt["prompt_contract_sha256"]
+        )
         super().__init__(path, max_turns)
         for event in self._read_events():
             if event.get("event_type") == "turn_attempt":
@@ -244,13 +213,8 @@ class CouncilEventStore(executive.EventStore):
                 )
 
     def messages_for(self, prompt: str) -> list[dict[str, str]]:
-        contract = (
-            "[COUNCIL ROLE CONTRACT]\n"
-            f"{self.seat_contract}\n"
-            "[/COUNCIL ROLE CONTRACT]"
-        )
         return [
-            {"role": "system", "content": contract},
+            prompt_producer.system_message(self.seat),
             {"role": "user", "content": prompt},
         ]
 
@@ -258,8 +222,11 @@ class CouncilEventStore(executive.EventStore):
         self,
         claims: list[executive.ClaimedMessage],
         event_id: str,
+        prompt_contract_sha256: str | None = None,
     ) -> list[str]:
-        references = [f"role_contract:{self.prompt_contract_sha256}"]
+        references = [
+            f"role_contract:{prompt_contract_sha256 or self.prompt_contract_sha256}"
+        ]
         if claims:
             references.extend(
                 "fleet_message:"
@@ -276,6 +243,7 @@ def _response_lineage(
     event_id: str,
     correlation_id: str,
     prompt_contract_sha256: str,
+    request_contract: str | None = None,
 ) -> dict[str, Any]:
     payload = claims[0].payload if len(claims) == 1 else {}
     request_id = executive._safe_trace_id(
@@ -305,6 +273,11 @@ def _response_lineage(
         "prompt_revision": normalized_revision,
         "prompt_contract_sha256": prompt_contract_sha256,
     }
+    if request_contract is not None:
+        lineage["request_contract"] = request_contract
+        lineage["model_identity_receipt_sha256"] = payload[
+            "model_identity_receipt_sha256"
+        ]
     for field_name in ("council_run_id", "round_id"):
         value = payload.get(field_name)
         if value:
@@ -315,23 +288,70 @@ def _response_lineage(
     return lineage
 
 
+def _request_contract(
+    claims: list[executive.ClaimedMessage],
+    store: CouncilEventStore,
+) -> tuple[str | None, str]:
+    explicit = [
+        claim for claim in claims if claim.payload.get("request_contract") is not None
+    ]
+    if not explicit:
+        return None, store.prompt_contract_sha256
+    if len(claims) != 1 or len(explicit) != 1:
+        raise executive.SeatFailure(
+            "an explicit council request contract requires exactly one claimed message"
+        )
+    payload = explicit[0].payload
+    if payload.get("request_contract") != prompt_producer.DCM_REQUEST_CONTRACT:
+        raise executive.SeatFailure(
+            "unsupported council request_contract: "
+            f"{payload.get('request_contract')!r}"
+        )
+    if payload.get("prompt_contract_sha256") != (
+        store.dcm_v2_prompt_contract_sha256
+    ):
+        raise executive.SeatFailure(
+            "v2 prompt_contract_sha256 does not match the produced seat contract"
+        )
+    model_identity = payload.get("model_identity_receipt_sha256")
+    if (
+        not isinstance(model_identity, str)
+        or not model_identity.startswith("sha256:")
+        or len(model_identity) != 71
+        or any(character not in "0123456789abcdef" for character in model_identity[7:])
+    ):
+        raise executive.SeatFailure(
+            "v2 model_identity_receipt_sha256 must be sha256:<64 lowercase hex>"
+        )
+    return prompt_producer.DCM_REQUEST_CONTRACT, store.dcm_v2_prompt_contract_sha256
+
+
 def _prompt_for(
     text: str,
     claims: list[executive.ClaimedMessage],
     lineage: dict[str, Any],
 ) -> str:
+    field_names = [
+        "seat_id",
+        "role_id",
+        "request_id",
+        "response_contract",
+        "prompt_revision",
+        "evidence_registry",
+        "council_run_id",
+        "round_id",
+    ]
+    if lineage.get("request_contract") == prompt_producer.DCM_REQUEST_CONTRACT:
+        field_names.extend(
+            (
+                "request_contract",
+                "prompt_contract_sha256",
+                "model_identity_receipt_sha256",
+            )
+        )
     request_contract = {
         field_name: lineage[field_name]
-        for field_name in (
-            "seat_id",
-            "role_id",
-            "request_id",
-            "response_contract",
-            "prompt_revision",
-            "evidence_registry",
-            "council_run_id",
-            "round_id",
-        )
+        for field_name in field_names
         if field_name in lineage
     }
     return (
@@ -342,40 +362,15 @@ def _prompt_for(
     )
 
 
-def _contribution_response_format(lineage: dict[str, Any]) -> dict[str, Any]:
-    properties: dict[str, Any] = {
-        "schema_version": {"type": "integer", "const": 1},
-        "seat_id": {"type": "string", "const": executive.SESSION},
-        "role_id": {"type": "string", "const": ROLE_ID},
-        "status": {"type": "string", "minLength": 1},
-        "prompt_revision": {
-            "type": "integer",
-            "const": lineage["prompt_revision"],
-        },
-        "recommendation": {"type": "string", "minLength": 1},
-        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
-    }
-    for field_name in CONTRIBUTION_LIST_FIELDS:
-        item_schema: dict[str, Any] = {"type": "string", "minLength": 1}
-        if field_name == "evidence_refs":
-            item_schema["enum"] = lineage["evidence_registry"]
-        properties[field_name] = {
-            "type": "array",
-            "items": item_schema,
-        }
-    return {
-        "type": "json_schema",
-        "json_schema": {
-            "name": "taey_council_contribution_v1",
-            "strict": True,
-            "schema": {
-                "type": "object",
-                "properties": properties,
-                "required": list(CONTRIBUTION_FIELDS),
-                "additionalProperties": False,
-            },
-        },
-    }
+def _contribution_response_format(
+    lineage: dict[str, Any],
+    seat: prompt_producer.SeatConfig,
+) -> dict[str, Any]:
+    return prompt_producer.response_format(
+        seat,
+        lineage["prompt_revision"],
+        lineage["evidence_registry"],
+    )
 
 
 def _validated_contribution(
@@ -543,15 +538,38 @@ def _run_turn(
             )
     liveness.assert_healthy()
     event_id, correlation_id = executive._lineage(claims)
+    request_contract, prompt_contract_sha256 = _request_contract(claims, store)
     lineage = _response_lineage(
         claims,
         event_id,
         correlation_id,
-        store.prompt_contract_sha256,
+        prompt_contract_sha256,
+        request_contract,
     )
-    lineage["evidence_registry"] = store.evidence_registry(claims, event_id)
+    lineage["evidence_registry"] = store.evidence_registry(
+        claims,
+        event_id,
+        prompt_contract_sha256,
+    )
     prompt = _prompt_for(text, claims, lineage)
     message_ids = [claim.message_id for claim in claims]
+    messages = store.messages_for(prompt)
+    contribution_format = _contribution_response_format(lineage, store.seat)
+    model_request = proxy.model_request_body(messages, contribution_format)
+    producer_receipt = None
+    if request_contract == prompt_producer.DCM_REQUEST_CONTRACT:
+        try:
+            producer_receipt = prompt_producer.model_request_receipt(
+                manifest=store.manifest,
+                seat=store.seat,
+                lineage=lineage,
+                model_request=model_request,
+                claims=claims,
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise executive.SeatFailure(
+                f"cannot produce v2 model-request receipt: {exc}"
+            ) from exc
     store.append(
         "council_ingress",
         event_id=event_id,
@@ -566,15 +584,17 @@ def _run_turn(
         conversation_visible=False,
         **lineage,
     )
-    store.append(
-        "turn_attempt",
-        attempt_id=uuid.uuid4().hex,
-        event_id=event_id,
-        correlation_id=correlation_id,
-        message_ids=message_ids,
-        prompt=prompt,
+    attempt_fields: dict[str, Any] = {
+        "attempt_id": uuid.uuid4().hex,
+        "event_id": event_id,
+        "correlation_id": correlation_id,
+        "message_ids": message_ids,
+        "prompt": prompt,
         **lineage,
-    )
+    }
+    if producer_receipt is not None:
+        attempt_fields["model_request_producer_receipt"] = producer_receipt
+    store.append("turn_attempt", **attempt_fields)
     inference_state = "side_effect_uncertain"
     try:
         liveness.assert_healthy()
@@ -582,8 +602,8 @@ def _run_turn(
             prompt,
             event_id=event_id,
             correlation_id=correlation_id,
-            messages=store.messages_for(prompt),
-            response_format=_contribution_response_format(lineage),
+            messages=messages,
+            response_format=contribution_format,
         )
         inference_state = "completed_invalid"
         liveness.assert_healthy()
@@ -1022,6 +1042,8 @@ def _register_at_rest_liveness(
         "process_generation": PROCESS_GENERATION,
         "role_contract_revision": ROLE_CONTRACT_REVISION,
         "prompt_contract_sha256": store.prompt_contract_sha256,
+        "dcm_v2_prompt_contract_sha256": store.dcm_v2_prompt_contract_sha256,
+        "prompt_contract_producer_state": "self_asserted_unverified",
         "response_contract": RESPONSE_CONTRACT,
         "liveness_ttl_seconds": ttl_seconds,
         "pid": os.getpid(),
@@ -1055,12 +1077,14 @@ def _register_at_rest_liveness(
 
 def main() -> int:
     try:
-        seat_contract = _validate_seat_contract()
+        manifest, seat, seat_contract = _validate_seat_contract()
         ttl_seconds, refresh_seconds = _liveness_timing()
         poll_seconds = _idle_poll_seconds()
         store = CouncilEventStore(
             executive.EVENT_LOG,
             executive.MAX_TURNS,
+            manifest,
+            seat,
             seat_contract,
         )
         client = executive._redis_client()
@@ -1072,6 +1096,10 @@ def main() -> int:
             process_generation=PROCESS_GENERATION,
             role_contract_revision=ROLE_CONTRACT_REVISION,
             prompt_contract_sha256=store.prompt_contract_sha256,
+            dcm_v2_prompt_contract_sha256=(
+                store.dcm_v2_prompt_contract_sha256
+            ),
+            prompt_contract_producer_state="self_asserted_unverified",
             response_contract=RESPONSE_CONTRACT,
             conversation_visible=False,
         )

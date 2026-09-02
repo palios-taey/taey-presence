@@ -94,7 +94,14 @@ Validate and inspect the exact runtime configuration before launching:
 ```bash
 python3 serving/manage_council_seats.py validate
 python3 serving/manage_council_seats.py render
+python3 serving/manage_council_seats.py prompt-contracts
 ```
+
+`prompt-contracts` deterministically renders one producer-only artifact per manifest
+seat. Each artifact binds the exact wrapped system message, response-schema template,
+all role prompt sources in manifest order, and the shared prompt as the final static
+source. Its `producer_state=self_asserted_unverified` is deliberate: a later independent
+component must rederive the contract before any DCM v2 request may use it as authority.
 
 Point every seat at the attributable worker proxy/model selected for concurrent
 council inference and launch the user units:
@@ -128,6 +135,14 @@ prior successful outcomes in that seat's durable history. The strict response sc
 and the post-generation validator both restrict `evidence_refs` to those exact
 identifiers. An unregistered reference terminalizes that immutable request and
 is never requeued or acknowledged as a successful contribution.
+
+An explicitly opted-in `taey-native-dcm-request/v2` seat request additionally writes a
+`taey-council-model-request-producer-receipt/v1` into its durable `turn_attempt` before
+inference. The receipt binds the exact ordered model messages, rendered response schema,
+ordered source-message digests, explicit no-attachment state, model selector, and the
+complete static prompt contract. Legacy council requests omit `request_contract` and
+retain their existing prompt, digest, and inference path. This producer receipt is not
+an authorization receipt and no DCM selector consumes it in this release.
 
 The launcher starts `taey_council_seat.py`; it does not branch Main's
 `taey_seat.py` runtime. At startup, a supporting seat atomically publishes
