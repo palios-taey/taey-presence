@@ -1,0 +1,26 @@
+# Serving-host authority for the short-lived Taey model identity receipt.
+[Unit]
+Description=Taey serving model identity attestor
+BindsTo=taey-ep3.service
+After=taey-ep3.service network-online.target
+PartOf=taey-ep3.service
+
+[Service]
+Type=simple
+User=root
+Environment=TAEY_MODEL_PATH=@TAEY_MODEL_PATH@
+Environment="TAEY_SERVED_NAME=ep3"
+Environment=VLLM_PORT=8000
+Environment=TAEY_MODEL_IDENTITY_MANIFEST=model.safetensors.index.json
+EnvironmentFile=/etc/taey/model-identity-attestor.env
+LoadCredential=model-identity-signing-key:/etc/taey/model-identity-attestor.key
+ExecStart=/usr/bin/python3 @TAEY_ROOT@/serving/model_identity_attestor.py
+TimeoutStartSec=1800
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=taey-model-identity-attestor
+
+[Install]
+WantedBy=multi-user.target

@@ -283,6 +283,9 @@ dashboard/native_council.py     Durable local-seat DCM round, revision, ledger, 
                                 critique, failure, and synthesis transport.
 dashboard/static/               index.html (v2 UI), console.html, hmm.html.
 serving/vllm_serve.sh           Serve a model on Jetson Thor via the pinned NVIDIA vLLM image.
+serving/model_identity_attestor.py
+                                Publish the short-lived serving-owned DCM model identity receipt.
+serving/model_identity_status.py Verify the live receipt and remaining Redis lease.
 serving/soma_proxy.py           OpenAI-compatible proxy: persona injection + soma + tools.
 serving/taey_seat.py            Durable tmux fleet seat: claim/outcome/ack + event-log recovery.
 serving/taey_council_seat.py    Isolated private runtime for seven supporting council seats.

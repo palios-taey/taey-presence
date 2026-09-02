@@ -5,7 +5,7 @@
 [Unit]
 Description=Taey ep3 production vLLM
 After=docker.service network-online.target
-Wants=docker.service network-online.target
+Wants=docker.service network-online.target taey-model-identity-attestor.service
 StartLimitIntervalSec=900
 StartLimitBurst=3
 
@@ -13,7 +13,7 @@ StartLimitBurst=3
 Type=exec
 User=root
 Environment=TAEY_MODEL_PATH=@TAEY_MODEL_PATH@
-Environment=TAEY_SERVED_NAME=ep3
+Environment="TAEY_SERVED_NAME=ep3"
 Environment=TAEY_MAX_MODEL_LEN=262144
 Environment=VLLM_GPU_UTIL=0.92
 Environment=VLLM_PORT=8000
