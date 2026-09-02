@@ -689,6 +689,20 @@ class ExecutiveInbox(ReliableInbox):
 
 
 class ProxyClient:
+    @staticmethod
+    def model_request_body(
+        messages: list[dict[str, str]],
+        response_format: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        request_body: dict[str, Any] = {
+            "model": MODEL,
+            "messages": messages,
+            "chat_template_kwargs": {"enable_thinking": False},
+        }
+        if response_format is not None:
+            request_body["response_format"] = response_format
+        return request_body
+
     def ask(
         self,
         prompt: str,
@@ -698,13 +712,7 @@ class ProxyClient:
         messages: list[dict[str, str]],
         response_format: dict[str, Any] | None = None,
     ) -> ProxyResult:
-        request_body: dict[str, Any] = {
-            "model": MODEL,
-            "messages": messages,
-            "chat_template_kwargs": {"enable_thinking": False},
-        }
-        if response_format is not None:
-            request_body["response_format"] = response_format
+        request_body = self.model_request_body(messages, response_format)
         body = json.dumps(request_body).encode("utf-8")
         request = urllib.request.Request(
             PROXY_URL,
