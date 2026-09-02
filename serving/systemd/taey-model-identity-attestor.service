@@ -16,14 +16,12 @@ EnvironmentFile=/etc/taey/model-identity-attestor.env
 LoadCredential=model-identity-signing-key:/etc/taey/model-identity-attestor.key
 ExecStart=/usr/bin/python3 @TAEY_ROOT@/serving/model_identity_attestor.py
 TimeoutStartSec=1800
-# HASH_CHUNK_BYTES=8388608 in model_identity_attestor.file_sha256.
-# Observed stopped-cgroup MemoryPeak=7733358592 with MemoryMax=infinity during
-# two full scans of a 55586117875-byte artifact (page cache, not the hasher).
-# MemoryHigh=16*HASH_CHUNK=128M and MemoryMax=32*HASH_CHUNK=256M sit above the
-# fixed buffer plus interpreter/fence metadata and force reclaim.
+# Bound the hasher working set (8MiB chunk + interpreter). SwapMax=0 so Max
+# is the real cgroup-v2 ceiling.
 MemoryAccounting=yes
 MemoryHigh=128M
 MemoryMax=256M
+MemorySwapMax=0
 Restart=on-failure
 RestartSec=10
 StandardOutput=journal

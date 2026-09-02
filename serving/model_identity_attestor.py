@@ -145,7 +145,6 @@ def canonical_seal_expected(
 def sealed_file_digests(
     root: Path, paths: list[Path], expected: dict[str, str]
 ) -> dict[str, str]:
-    """One HASH_CHUNK_BYTES read per regular file. Verify sealed digests."""
     digests: dict[str, str] = {}
     for path in paths:
         relative = path.relative_to(root).as_posix()
