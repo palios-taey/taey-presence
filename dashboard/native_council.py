@@ -65,17 +65,68 @@ _RESERVED_EVENT_FIELDS = frozenset(
     }
 )
 _ENQUEUE_LUA = """
-if redis.call('SADD', KEYS[1], ARGV[1]) == 0 then
-    return 0
+local seat_count = tonumber(ARGV[1])
+local dispatch_type = redis.call('TYPE', KEYS[1])['ok']
+if dispatch_type ~= 'none' and dispatch_type ~= 'set' then
+    return redis.error_reply('council dispatch identity key is not a set')
 end
-redis.call('LPUSH', KEYS[2], ARGV[2])
-return 1
+if redis.call('EXISTS', KEYS[2]) == 1 then
+    return redis.error_reply('council seat replacement is in progress')
+end
+for index = 1, seat_count do
+    local registration_key = KEYS[2 + index]
+    local expected_registration = ARGV[1 + index]
+    if redis.call('GET', registration_key) ~= expected_registration
+       or redis.call('TTL', registration_key) <= 0 then
+        return redis.error_reply(
+            'seat registration changed before atomic wave enqueue index=' .. index
+        )
+    end
+    local inbox_key = KEYS[2 + seat_count + index]
+    local inbox_type = redis.call('TYPE', inbox_key)['ok']
+    if inbox_type ~= 'none' and inbox_type ~= 'list' then
+        return redis.error_reply(
+            'council inbox key is not a list index=' .. index
+        )
+    end
+end
+local results = {}
+for index = 1, seat_count do
+    local argument_index = 2 + seat_count + ((index - 1) * 2)
+    local token = ARGV[argument_index]
+    local encoded = ARGV[argument_index + 1]
+    local inbox_key = KEYS[2 + seat_count + index]
+    local enqueued = redis.call('SADD', KEYS[1], token)
+    if enqueued == 1 then
+        redis.call('LPUSH', inbox_key, encoded)
+    end
+    results[index] = enqueued
+end
+return results
 """
 _CLEAR_ACTIVE_LUA = """
 if redis.call('GET', KEYS[1]) == ARGV[1] then
     return redis.call('DEL', KEYS[1])
 end
 return 0
+"""
+_READ_LIVE_REGISTRATION_LUA = """
+local value = redis.call('GET', KEYS[1])
+if not value then
+    return {}
+end
+return {value, redis.call('TTL', KEYS[1])}
+"""
+_READ_DISPATCH_STATE_LUA = """
+local dispatch_type = redis.call('TYPE', KEYS[1])['ok']
+if dispatch_type ~= 'none' and dispatch_type ~= 'set' then
+    return redis.error_reply('council dispatch identity key is not a set')
+end
+local results = {}
+for index = 1, #ARGV do
+    results[index] = redis.call('SISMEMBER', KEYS[1], ARGV[index])
+end
+return results
 """
 
 SynthesizeCallback = Callable[
@@ -490,6 +541,72 @@ class RoundLedger:
 
         return self._append_with("round_completed", fields_for)
 
+    def append_failed(
+        self,
+        expected_revision: int,
+        **fields: Any,
+    ) -> dict[str, Any]:
+        def fields_for(events: list[dict[str, Any]]) -> dict[str, Any]:
+            if any(
+                event.get("event_type") in _TERMINAL_EVENTS
+                for event in events
+            ):
+                raise CouncilTransportFailure(
+                    f"round {self.round_id} is already terminal"
+                )
+            latest_revision = max(
+                (
+                    int(event.get("prompt_revision") or 0)
+                    for event in events
+                    if event.get("event_type")
+                    in {"round_opened", "user_amendment"}
+                ),
+                default=0,
+            )
+            if latest_revision != expected_revision:
+                raise CouncilRevisionSuperseded(
+                    expected_revision,
+                    latest_revision,
+                )
+            return fields
+
+        return self._append_with("round_failed", fields_for)
+
+    def append_failed_current(
+        self,
+        failed_work_revision: int,
+        **fields: Any,
+    ) -> dict[str, Any]:
+        if "prompt_revision" in fields or "failed_work_revision" in fields:
+            raise CouncilTransportFailure(
+                "current-revision failure fields cannot override revision identity"
+            )
+
+        def fields_for(events: list[dict[str, Any]]) -> dict[str, Any]:
+            if any(
+                event.get("event_type") in _TERMINAL_EVENTS
+                for event in events
+            ):
+                raise CouncilTransportFailure(
+                    f"round {self.round_id} is already terminal"
+                )
+            latest_revision = max(
+                (
+                    int(event.get("prompt_revision") or 0)
+                    for event in events
+                    if event.get("event_type")
+                    in {"round_opened", "user_amendment"}
+                ),
+                default=0,
+            )
+            return {
+                **fields,
+                "prompt_revision": latest_revision,
+                "failed_work_revision": failed_work_revision,
+            }
+
+        return self._append_with("round_failed", fields_for)
+
     def events(self, after_sequence: int = 0) -> list[dict[str, Any]]:
         events = _read_jsonl(self.path)
         self._validate_events(events)
@@ -812,6 +929,7 @@ class NativeCouncilTransport:
         request_id: str,
         round_id: str,
         prompt_revision: int,
+        expected_process_generation: str,
     ) -> dict[str, Any] | None:
         matching: dict[str, Any] | None = None
         for event in _read_jsonl(self._seat_log(seat)):
@@ -821,6 +939,13 @@ class NativeCouncilTransport:
                 and str(event.get("round_id") or "") == round_id
                 and int(event.get("prompt_revision") or 0) == prompt_revision
             ):
+                if (
+                    event.get("process_generation")
+                    != expected_process_generation
+                ):
+                    raise CouncilTransportFailure(
+                        f"{seat.seat_id} outcome process generation mismatch"
+                    )
                 matching = event
         return matching
 
@@ -884,59 +1009,142 @@ class NativeCouncilTransport:
             + "\n[/TAEY-NATIVE DCM REQUEST]"
         )
 
+    def _wave_requests(
+        self,
+        *,
+        ledger: RoundLedger,
+        phase: str,
+        prompt_revision: int,
+        registrations: dict[str, dict[str, Any]],
+    ) -> dict[str, dict[str, Any]]:
+        return {
+            seat.seat_id: {
+                "seat_id": seat.seat_id,
+                "role_id": seat.role_id,
+                "message_id": self._message_id(
+                    ledger.round_id,
+                    prompt_revision,
+                    phase,
+                    seat,
+                ),
+                "request_id": self._request_id(
+                    ledger.round_id,
+                    prompt_revision,
+                    phase,
+                    seat,
+                ),
+                "expected_process_generation": registrations[seat.seat_id][
+                    "process_generation"
+                ],
+            }
+            for seat in COUNCIL_SEATS
+        }
+
+    def _dispatch_state(
+        self,
+        *,
+        ledger: RoundLedger,
+        phase: str,
+        prompt_revision: int,
+    ) -> list[bool]:
+        tokens = [
+            f"{prompt_revision}:{phase}:{seat.seat_id}"
+            for seat in COUNCIL_SEATS
+        ]
+        raw_state = self.redis.eval(
+            _READ_DISPATCH_STATE_LUA,
+            1,
+            self._dispatch_key(ledger.round_id),
+            *tokens,
+        )
+        if not isinstance(raw_state, list) or len(raw_state) != len(
+            COUNCIL_SEATS
+        ):
+            raise CouncilTransportFailure(
+                "council wave dispatch state returned an invalid result"
+            )
+        return [bool(int(value)) for value in raw_state]
+
     def _enqueue(
         self,
         *,
         ledger: RoundLedger,
-        seat: CouncilSeat,
         phase: str,
         prompt_revision: int,
         body: str,
-    ) -> dict[str, Any]:
-        message_id = self._message_id(
-            ledger.round_id,
-            prompt_revision,
-            phase,
-            seat,
+        registrations: dict[str, dict[str, Any]],
+    ) -> dict[str, dict[str, Any]]:
+        requests = self._wave_requests(
+            ledger=ledger,
+            phase=phase,
+            prompt_revision=prompt_revision,
+            registrations=registrations,
         )
-        request_id = self._request_id(
-            ledger.round_id,
-            prompt_revision,
-            phase,
-            seat,
-        )
-        payload = {
-            "from": "taey",
-            "type": "council_request",
-            "body": body,
-            "timestamp": time.time(),
-            "priority": "high",
-            "msg_id": message_id,
-            "event_id": request_id,
-            "correlation_id": ledger.round_id,
-            "request_id": request_id,
-            "council_run_id": ledger.round_id,
-            "round_id": ledger.round_id,
-            "prompt_revision": prompt_revision,
-            "round_phase": phase,
-        }
-        encoded = json.dumps(
-            payload,
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
-        token = f"{prompt_revision}:{phase}:{seat.seat_id}"
-        enqueued = int(
-            self.redis.eval(
-                _ENQUEUE_LUA,
-                2,
-                self._dispatch_key(ledger.round_id),
-                f"{self.key_prefix}:{seat.seat_id}:inbox",
-                token,
-                encoded,
+        encoded_requests: list[tuple[str, str]] = []
+        requested_at = time.time()
+        for seat in COUNCIL_SEATS:
+            request = requests[seat.seat_id]
+            payload = {
+                "from": "taey",
+                "type": "council_request",
+                "body": body,
+                "timestamp": requested_at,
+                "priority": "high",
+                "msg_id": request["message_id"],
+                "event_id": request["request_id"],
+                "correlation_id": ledger.round_id,
+                "request_id": request["request_id"],
+                "council_run_id": ledger.round_id,
+                "round_id": ledger.round_id,
+                "prompt_revision": prompt_revision,
+                "round_phase": phase,
+                "expected_process_generation": request[
+                    "expected_process_generation"
+                ],
+            }
+            encoded = json.dumps(
+                payload,
+                ensure_ascii=False,
+                separators=(",", ":"),
             )
+            token = f"{prompt_revision}:{phase}:{seat.seat_id}"
+            encoded_requests.append((token, encoded))
+        keys = [
+            self._dispatch_key(ledger.round_id),
+            f"{self.key_prefix}:dcm:native:seat_replacement",
+        ]
+        keys.extend(
+            f"{self.key_prefix}:{seat.seat_id}:seat_registration"
+            for seat in COUNCIL_SEATS
         )
-        if enqueued:
+        keys.extend(
+            f"{self.key_prefix}:{seat.seat_id}:inbox"
+            for seat in COUNCIL_SEATS
+        )
+        arguments: list[Any] = [len(COUNCIL_SEATS)]
+        arguments.extend(
+            registrations[seat.seat_id]["raw_registration"]
+            for seat in COUNCIL_SEATS
+        )
+        for token, encoded in encoded_requests:
+            arguments.extend((token, encoded))
+        enqueue_results = self.redis.eval(
+            _ENQUEUE_LUA,
+            len(keys),
+            *keys,
+            *arguments,
+        )
+        if not isinstance(enqueue_results, list) or len(enqueue_results) != len(
+            COUNCIL_SEATS
+        ):
+            raise CouncilTransportFailure(
+                "atomic council wave enqueue returned an invalid result"
+            )
+        for seat, raw_enqueued in zip(COUNCIL_SEATS, enqueue_results):
+            request = requests[seat.seat_id]
+            request["enqueued"] = bool(int(raw_enqueued))
+            if not request["enqueued"]:
+                continue
             try:
                 self.redis.xadd(
                     f"{self.key_prefix}:notify_trace",
@@ -947,7 +1155,7 @@ class NativeCouncilTransport:
                         "type": "council_request",
                         "frm": "taey",
                         "wall": f"{time.time():.3f}",
-                        "msg_id": message_id,
+                        "msg_id": request["message_id"],
                     },
                     maxlen=50000,
                     approximate=True,
@@ -957,15 +1165,55 @@ class NativeCouncilTransport:
                     "dispatch_trace_failed",
                     seat_id=seat.seat_id,
                     role_id=seat.role_id,
-                    message_id=message_id,
+                    message_id=request["message_id"],
                     error=f"{type(exc).__name__}: {exc}",
                 )
+        return requests
+
+    def _live_seat_registration(self, seat: CouncilSeat) -> dict[str, Any]:
+        registration_key = (
+            f"{self.key_prefix}:{seat.seat_id}:seat_registration"
+        )
+        snapshot = self.redis.eval(
+            _READ_LIVE_REGISTRATION_LUA,
+            1,
+            registration_key,
+        )
+        if not isinstance(snapshot, list) or len(snapshot) != 2:
+            raise CouncilTransportFailure(
+                f"{seat.seat_id} has no live generation registration"
+            )
+        raw_registration, raw_ttl = snapshot
+        try:
+            registration = json.loads(raw_registration)
+            ttl_seconds = int(raw_ttl)
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise CouncilTransportFailure(
+                f"{seat.seat_id} has an invalid generation registration"
+            ) from exc
+        if (
+            not isinstance(registration, dict)
+            or registration.get("schema_version") != 1
+            or registration.get("seat_id") != seat.seat_id
+            or registration.get("seat_kind") != "council"
+            or registration.get("role_id") != seat.role_id
+            or not registration.get("process_generation")
+            or registration.get("response_contract")
+            != "taey-council-contribution/v1"
+            or registration.get("readiness") != "ready"
+            or type(registration.get("pid")) is not int
+            or registration["pid"] <= 0
+            or type(registration.get("liveness_ttl_seconds")) is not int
+            or registration["liveness_ttl_seconds"] < 2
+            or ttl_seconds <= 0
+        ):
+            raise CouncilTransportFailure(
+                f"{seat.seat_id} generation registration is stale or mismatched"
+            )
         return {
-            "seat_id": seat.seat_id,
-            "role_id": seat.role_id,
-            "message_id": message_id,
-            "request_id": request_id,
-            "enqueued": bool(enqueued),
+            "process_generation": registration["process_generation"],
+            "ttl_seconds": ttl_seconds,
+            "raw_registration": raw_registration,
         }
 
     async def _dispatch_wave(
@@ -983,25 +1231,151 @@ class NativeCouncilTransport:
             prompt_revision=prompt_revision,
             revealed=revealed,
         )
-        ledger.append(
-            "wave_started",
+        body_sha256 = hashlib.sha256(body.encode("utf-8")).hexdigest()
+        matching_events = [
+            event
+            for event in ledger.events()
+            if event.get("event_type") == "wave_dispatch_prepared"
+            and event.get("phase") == phase
+            and int(event.get("prompt_revision") or 0) == prompt_revision
+        ]
+        if len(matching_events) > 1:
+            raise CouncilTransportFailure(
+                "council wave has multiple durable dispatch preparations"
+            )
+        terminal_wave_events = [
+            event
+            for event in ledger.events()
+            if event.get("event_type")
+            in {
+                "wave_completed",
+                "superseded_wave_drained",
+                "superseded_wave_drain_failed",
+                "superseded_wave_not_dispatched",
+            }
+            and event.get("phase") == phase
+            and int(event.get("prompt_revision") or 0) == prompt_revision
+        ]
+        if len(terminal_wave_events) > 1:
+            raise CouncilTransportFailure(
+                "council wave has multiple durable terminal states"
+            )
+        if terminal_wave_events and not matching_events:
+            raise CouncilTransportFailure(
+                "council wave terminal state has no durable dispatch preparation"
+            )
+        dispatch_state = self._dispatch_state(
+            ledger=ledger,
             phase=phase,
             prompt_revision=prompt_revision,
-            expected_seats=len(COUNCIL_SEATS),
         )
-        requests: dict[str, dict[str, Any]] = {}
-        for seat in COUNCIL_SEATS:
-            registration = self.redis.get(
-                f"{self.key_prefix}:{seat.seat_id}:seat_registration"
+        dispatched_count = sum(dispatch_state)
+        if dispatched_count not in {0, len(COUNCIL_SEATS)}:
+            raise CouncilTransportFailure(
+                "council wave has a partial atomic dispatch identity"
             )
-            request = self._enqueue(
+        if matching_events:
+            prepared = matching_events[0]
+            if prepared.get("body_sha256") != body_sha256:
+                raise CouncilTransportFailure(
+                    "durable council wave body does not match current prompt"
+                )
+            prepared_registrations = prepared.get("registrations")
+            if not isinstance(prepared_registrations, dict):
+                raise CouncilTransportFailure(
+                    "durable council wave registrations are invalid"
+                )
+            registrations: dict[str, dict[str, Any]] = {}
+            for seat in COUNCIL_SEATS:
+                registration = prepared_registrations.get(seat.seat_id)
+                if (
+                    not isinstance(registration, dict)
+                    or registration.get("role_id") != seat.role_id
+                    or not registration.get("process_generation")
+                    or not isinstance(registration.get("raw_registration"), str)
+                    or type(registration.get("ttl_seconds")) is not int
+                    or registration["ttl_seconds"] <= 0
+                ):
+                    raise CouncilTransportFailure(
+                        f"durable {seat.seat_id} wave registration is invalid"
+                    )
+                registrations[seat.seat_id] = registration
+        else:
+            if dispatched_count:
+                raise CouncilTransportFailure(
+                    "council wave was dispatched without durable preparation"
+                )
+            registrations = {
+                seat.seat_id: self._live_seat_registration(seat)
+                for seat in COUNCIL_SEATS
+            }
+            ledger.append(
+                "wave_dispatch_prepared",
+                phase=phase,
+                prompt_revision=prompt_revision,
+                body_sha256=body_sha256,
+                registrations={
+                    seat.seat_id: {
+                        "role_id": seat.role_id,
+                        **registrations[seat.seat_id],
+                    }
+                    for seat in COUNCIL_SEATS
+                },
+            )
+        if terminal_wave_events or dispatched_count == len(COUNCIL_SEATS):
+            requests = self._wave_requests(
                 ledger=ledger,
-                seat=seat,
+                phase=phase,
+                prompt_revision=prompt_revision,
+                registrations=registrations,
+            )
+            for request in requests.values():
+                request["enqueued"] = False
+        else:
+            requests = self._enqueue(
+                ledger=ledger,
                 phase=phase,
                 prompt_revision=prompt_revision,
                 body=body,
+                registrations=registrations,
             )
-            requests[seat.seat_id] = request
+        wave_started = [
+            event
+            for event in ledger.events()
+            if event.get("event_type") == "wave_started"
+            and event.get("phase") == phase
+            and int(event.get("prompt_revision") or 0) == prompt_revision
+        ]
+        if not wave_started:
+            ledger.append(
+                "wave_started",
+                phase=phase,
+                prompt_revision=prompt_revision,
+                expected_seats=len(COUNCIL_SEATS),
+            )
+        for seat in COUNCIL_SEATS:
+            request = requests[seat.seat_id]
+            existing_seat_started = [
+                event
+                for event in ledger.events()
+                if event.get("event_type") == "seat_started"
+                and event.get("phase") == phase
+                and int(event.get("prompt_revision") or 0) == prompt_revision
+                and event.get("seat_id") == seat.seat_id
+            ]
+            if existing_seat_started:
+                existing = existing_seat_started[-1]
+                if (
+                    existing.get("role_id") != seat.role_id
+                    or existing.get("request_id") != request["request_id"]
+                    or existing.get("message_id") != request["message_id"]
+                    or existing.get("process_generation")
+                    != request["expected_process_generation"]
+                ):
+                    raise CouncilTransportFailure(
+                        f"durable {seat.seat_id} dispatch identity mismatch"
+                    )
+                continue
             ledger.append(
                 "seat_started",
                 phase=phase,
@@ -1013,7 +1387,13 @@ class NativeCouncilTransport:
                 dispatch_state=(
                     "enqueued" if request["enqueued"] else "already_enqueued"
                 ),
-                registration_observed=registration is not None,
+                registration_observed=True,
+                process_generation=(
+                    registrations[seat.seat_id]["process_generation"]
+                ),
+                registration_ttl_seconds=(
+                    registrations[seat.seat_id]["ttl_seconds"]
+                ),
             )
         return requests
 
@@ -1024,6 +1404,7 @@ class NativeCouncilTransport:
         seat: CouncilSeat,
         phase: str,
         prompt_revision: int,
+        expected_process_generation: str,
         outcome: dict[str, Any],
     ) -> dict[str, Any]:
         contribution = outcome.get("contribution")
@@ -1035,64 +1416,113 @@ class NativeCouncilTransport:
             contribution.get("seat_id") != seat.seat_id
             or contribution.get("role_id") != seat.role_id
             or int(contribution.get("prompt_revision") or 0) != prompt_revision
+            or outcome.get("process_generation")
+            != expected_process_generation
         ):
             raise CouncilTransportFailure(
                 f"{seat.seat_id} contribution identity/revision mismatch"
             )
-        ledger.append(
+        self._append_wave_event_once(
+            ledger,
             "seat_status",
-            phase=phase,
-            prompt_revision=prompt_revision,
-            seat_id=seat.seat_id,
+            identity={
+                "phase": phase,
+                "prompt_revision": prompt_revision,
+                "seat_id": seat.seat_id,
+            },
             role_id=seat.role_id,
             status="completed",
+            process_generation=expected_process_generation,
             outcome_event_id=outcome.get("event_id"),
             proxy_turn_id=outcome.get("proxy_turn_id"),
         )
-        ledger.append(
+        self._append_wave_event_once(
+            ledger,
             "evidence",
-            phase=phase,
-            prompt_revision=prompt_revision,
-            seat_id=seat.seat_id,
+            identity={
+                "phase": phase,
+                "prompt_revision": prompt_revision,
+                "seat_id": seat.seat_id,
+            },
             role_id=seat.role_id,
             observations=contribution.get("observations") or [],
             unknowns=contribution.get("unknowns") or [],
             evidence_refs=contribution.get("evidence_refs") or [],
         )
-        ledger.append(
+        self._append_wave_event_once(
+            ledger,
             "hypothesis",
-            phase=phase,
-            prompt_revision=prompt_revision,
-            seat_id=seat.seat_id,
+            identity={
+                "phase": phase,
+                "prompt_revision": prompt_revision,
+                "seat_id": seat.seat_id,
+            },
             role_id=seat.role_id,
             inferences=contribution.get("inferences") or [],
             recommendation=contribution.get("recommendation") or "",
             confidence=contribution.get("confidence"),
         )
-        ledger.append(
-            "contribution",
-            phase=phase,
-            prompt_revision=prompt_revision,
-            seat_id=seat.seat_id,
-            role_id=seat.role_id,
-            outcome_event_id=outcome.get("event_id"),
-            contribution=contribution,
-        )
         if phase == "critique":
             concerns = contribution.get("concerns") or []
             unknowns = contribution.get("unknowns") or []
-            ledger.append(
+            self._append_wave_event_once(
+                ledger,
                 "dissent",
-                phase=phase,
-                prompt_revision=prompt_revision,
-                seat_id=seat.seat_id,
+                identity={
+                    "phase": phase,
+                    "prompt_revision": prompt_revision,
+                    "seat_id": seat.seat_id,
+                },
                 role_id=seat.role_id,
                 present=bool(concerns or unknowns),
                 concerns=concerns,
                 unknowns=unknowns,
                 recommendation=contribution.get("recommendation") or "",
             )
+        self._append_wave_event_once(
+            ledger,
+            "contribution",
+            identity={
+                "phase": phase,
+                "prompt_revision": prompt_revision,
+                "seat_id": seat.seat_id,
+            },
+            role_id=seat.role_id,
+            outcome_event_id=outcome.get("event_id"),
+            contribution=contribution,
+        )
         return contribution
+
+    def _append_wave_event_once(
+        self,
+        ledger: RoundLedger,
+        event_type: str,
+        *,
+        identity: dict[str, Any],
+        **fields: Any,
+    ) -> dict[str, Any]:
+        matches = [
+            event
+            for event in ledger.events()
+            if event.get("event_type") == event_type
+            and all(event.get(key) == value for key, value in identity.items())
+        ]
+        if len(matches) > 1:
+            raise CouncilTransportFailure(
+                f"council wave has duplicate {event_type} identity {identity}"
+            )
+        expected = {**identity, **fields}
+        if matches:
+            existing = matches[0]
+            mismatches = [
+                key for key, value in expected.items() if existing.get(key) != value
+            ]
+            if mismatches:
+                raise CouncilTransportFailure(
+                    f"durable {event_type} changed fields {mismatches}"
+                )
+            return existing
+        return ledger.append(event_type, **expected)
 
     async def _wait_wave(
         self,
@@ -1106,10 +1536,150 @@ class NativeCouncilTransport:
         pending = {seat.seat_id: seat for seat in COUNCIL_SEATS}
         contributions: list[dict[str, Any]] = []
         failures: list[dict[str, Any]] = []
-        retry_failures: dict[str, dict[str, Any]] = {}
-        observed_failed_outcomes: dict[str, tuple[Any, str]] = {}
         superseded_revision: int | None = None
         stale_seats: set[str] = set()
+        seat_order = {
+            seat.seat_id: index for index, seat in enumerate(COUNCIL_SEATS)
+        }
+        events = ledger.events()
+
+        def matching_events(event_type: str) -> list[dict[str, Any]]:
+            return [
+                event
+                for event in events
+                if event.get("event_type") == event_type
+                and event.get("phase") == phase
+                and int(event.get("prompt_revision") or 0) == prompt_revision
+            ]
+
+        contribution_events = matching_events("contribution")
+        failure_events = matching_events("seat_failed")
+        status_events = matching_events("seat_status")
+        for seat in COUNCIL_SEATS:
+            seat_contributions = [
+                event
+                for event in contribution_events
+                if event.get("seat_id") == seat.seat_id
+            ]
+            seat_failures = [
+                event
+                for event in failure_events
+                if event.get("seat_id") == seat.seat_id
+            ]
+            if len(seat_contributions) > 1 or len(seat_failures) > 1:
+                raise CouncilTransportFailure(
+                    f"durable {seat.seat_id} wave result is duplicated"
+                )
+            if seat_contributions and seat_failures:
+                raise CouncilTransportFailure(
+                    f"durable {seat.seat_id} wave result is contradictory"
+                )
+            if seat_contributions:
+                event = seat_contributions[0]
+                contribution = event.get("contribution")
+                seat_statuses = [
+                    status
+                    for status in status_events
+                    if status.get("seat_id") == seat.seat_id
+                ]
+                if (
+                    event.get("role_id") != seat.role_id
+                    or len(seat_statuses) != 1
+                    or seat_statuses[0].get("role_id") != seat.role_id
+                    or seat_statuses[0].get("status") != "completed"
+                    or seat_statuses[0].get("process_generation")
+                    != requests[seat.seat_id]["expected_process_generation"]
+                    or not isinstance(contribution, dict)
+                    or contribution.get("seat_id") != seat.seat_id
+                    or contribution.get("role_id") != seat.role_id
+                    or int(contribution.get("prompt_revision") or 0)
+                    != prompt_revision
+                ):
+                    raise CouncilTransportFailure(
+                        f"durable {seat.seat_id} contribution is invalid"
+                    )
+                contributions.append(contribution)
+                pending.pop(seat.seat_id)
+            elif seat_failures:
+                event = seat_failures[0]
+                if (
+                    event.get("role_id") != seat.role_id
+                    or event.get("process_generation")
+                    != requests[seat.seat_id][
+                        "expected_process_generation"
+                    ]
+                ):
+                    raise CouncilTransportFailure(
+                        f"durable {seat.seat_id} failure identity is invalid"
+                    )
+                failures.append(
+                    {
+                        "seat_id": seat.seat_id,
+                        "role_id": seat.role_id,
+                        "reason": str(event.get("reason") or "unknown failure"),
+                    }
+                )
+                pending.pop(seat.seat_id)
+                if event.get("inference_state") == "side_effect_uncertain":
+                    raise CouncilTransportFailure(
+                        f"{seat.seat_id} durable inference side effect is "
+                        "uncertain; the council round cannot continue"
+                    )
+        contributions.sort(key=lambda value: seat_order[str(value["seat_id"])])
+        failures.sort(key=lambda value: seat_order[str(value["seat_id"])])
+
+        terminal_wave_events = [
+            event
+            for event_type in (
+                "wave_completed",
+                "superseded_wave_drained",
+                "superseded_wave_drain_failed",
+                "superseded_wave_not_dispatched",
+            )
+            for event in matching_events(event_type)
+        ]
+        if len(terminal_wave_events) > 1:
+            raise CouncilTransportFailure(
+                "council wave has multiple durable terminal states"
+            )
+        if terminal_wave_events:
+            terminal_wave = terminal_wave_events[0]
+            if (
+                int(terminal_wave.get("contribution_count") or 0)
+                != len(contributions)
+                or int(terminal_wave.get("failure_count") or 0) != len(failures)
+            ):
+                raise CouncilTransportFailure(
+                    "durable council wave terminal counts do not match results"
+                )
+            if terminal_wave["event_type"] == "superseded_wave_drain_failed":
+                raise CouncilTransportFailure(
+                    f"superseded {phase} wave revision {prompt_revision} "
+                    "previously failed to drain"
+                )
+            return {
+                "superseded": terminal_wave["event_type"]
+                in {
+                    "superseded_wave_drained",
+                    "superseded_wave_not_dispatched",
+                },
+                "contributions": contributions,
+                "failures": failures,
+            }
+
+        wave_superseded_events = matching_events("wave_superseded")
+        if len(wave_superseded_events) > 1:
+            raise CouncilTransportFailure(
+                "council wave has duplicate supersession state"
+            )
+        if wave_superseded_events:
+            superseded_revision = int(
+                wave_superseded_events[0].get("latest_prompt_revision") or 0
+            )
+        stale_seats = {
+            str(event.get("seat_id"))
+            for event in matching_events("contribution_stale")
+        }
 
         def observe_supersession(latest_revision: int) -> None:
             nonlocal superseded_revision
@@ -1124,25 +1694,32 @@ class NativeCouncilTransport:
                 seat_id = str(contribution["seat_id"])
                 if seat_id in stale_seats:
                     continue
-                ledger.append(
+                self._append_wave_event_once(
+                    ledger,
                     "contribution_stale",
-                    phase=phase,
-                    prompt_revision=prompt_revision,
-                    latest_prompt_revision=superseded_revision,
-                    seat_id=seat_id,
+                    identity={
+                        "phase": phase,
+                        "prompt_revision": prompt_revision,
+                        "seat_id": seat_id,
+                    },
                     role_id=contribution["role_id"],
+                    latest_prompt_revision=superseded_revision,
                 )
                 stale_seats.add(seat_id)
             if first_observation:
-                ledger.append(
+                self._append_wave_event_once(
+                    ledger,
                     "wave_superseded",
-                    phase=phase,
-                    prompt_revision=prompt_revision,
+                    identity={
+                        "phase": phase,
+                        "prompt_revision": prompt_revision,
+                    },
                     latest_prompt_revision=superseded_revision,
                     completed_seats=len(contributions),
-                    pending_seats=sorted(pending),
-                )
+                        pending_seats=sorted(pending),
+                    )
 
+        observe_supersession(ledger.latest_revision())
         while pending and time.monotonic() < deadline:
             observe_supersession(ledger.latest_revision())
             for seat_id, seat in list(pending.items()):
@@ -1152,10 +1729,14 @@ class NativeCouncilTransport:
                     request_id=request["request_id"],
                     round_id=ledger.round_id,
                     prompt_revision=prompt_revision,
+                    expected_process_generation=request[
+                        "expected_process_generation"
+                    ],
                 )
                 if outcome is None:
                     continue
                 if outcome.get("ok") is not True:
+                    pending.pop(seat_id)
                     failure = {
                         "seat_id": seat.seat_id,
                         "role_id": seat.role_id,
@@ -1164,22 +1745,29 @@ class NativeCouncilTransport:
                             or "seat returned a failed durable outcome"
                         ),
                     }
-                    retry_failures[seat_id] = failure
-                    marker = (
-                        outcome.get("recorded_at") or outcome.get("ts"),
-                        failure["reason"],
+                    failures.append(failure)
+                    self._append_wave_event_once(
+                        ledger,
+                        "seat_failed",
+                        identity={
+                            "phase": phase,
+                            "prompt_revision": prompt_revision,
+                            "seat_id": seat.seat_id,
+                        },
+                        process_generation=request[
+                            "expected_process_generation"
+                        ],
+                        outcome_kind=outcome.get("kind"),
+                        inference_state=outcome.get("inference_state"),
+                        **failure,
                     )
-                    if observed_failed_outcomes.get(seat_id) != marker:
-                        observed_failed_outcomes[seat_id] = marker
-                        ledger.append(
-                            "seat_status",
-                            phase=phase,
-                            prompt_revision=prompt_revision,
-                            seat_id=seat.seat_id,
-                            role_id=seat.role_id,
-                            status="retrying",
-                            outcome_event_id=outcome.get("event_id"),
-                            error=failure["reason"],
+                    if (
+                        outcome.get("inference_state")
+                        == "side_effect_uncertain"
+                    ):
+                        raise CouncilTransportFailure(
+                            f"{seat.seat_id} inference side effect is uncertain; "
+                            "the council round cannot continue"
                         )
                     continue
                 pending.pop(seat_id)
@@ -1189,6 +1777,9 @@ class NativeCouncilTransport:
                         seat=seat,
                         phase=phase,
                         prompt_revision=prompt_revision,
+                        expected_process_generation=request[
+                            "expected_process_generation"
+                        ],
                         outcome=outcome,
                     )
                 except Exception as exc:
@@ -1198,53 +1789,73 @@ class NativeCouncilTransport:
                         "reason": f"{type(exc).__name__}: {exc}",
                     }
                     failures.append(failure)
-                    ledger.append(
+                    self._append_wave_event_once(
+                        ledger,
                         "seat_failed",
-                        phase=phase,
-                        prompt_revision=prompt_revision,
+                        identity={
+                            "phase": phase,
+                            "prompt_revision": prompt_revision,
+                            "seat_id": seat.seat_id,
+                        },
+                        process_generation=request[
+                            "expected_process_generation"
+                        ],
+                        outcome_kind="contribution_validation_failed",
+                        inference_state="completed_invalid",
                         **failure,
                     )
                     continue
                 contributions.append(contribution)
                 if superseded_revision is not None:
-                    ledger.append(
+                    self._append_wave_event_once(
+                        ledger,
                         "contribution_stale",
-                        phase=phase,
-                        prompt_revision=prompt_revision,
-                        latest_prompt_revision=superseded_revision,
-                        seat_id=contribution["seat_id"],
+                        identity={
+                            "phase": phase,
+                            "prompt_revision": prompt_revision,
+                            "seat_id": contribution["seat_id"],
+                        },
                         role_id=contribution["role_id"],
+                        latest_prompt_revision=superseded_revision,
                     )
                     stale_seats.add(str(contribution["seat_id"]))
             observe_supersession(ledger.latest_revision())
             if pending:
                 await asyncio.sleep(self.poll_interval)
         for seat in pending.values():
-            prior_failure = retry_failures.get(seat.seat_id)
             failure = {
                 "seat_id": seat.seat_id,
                 "role_id": seat.role_id,
-                "reason": (
-                    f"{prior_failure['reason']}; retry deadline exceeded "
-                    f"after {self.wave_timeout:.1f}s"
-                    if prior_failure
-                    else f"no durable {phase} outcome within "
-                    f"{self.wave_timeout:.1f}s"
-                ),
+                "reason": f"no durable {phase} outcome within "
+                f"{self.wave_timeout:.1f}s",
             }
             failures.append(failure)
-            ledger.append(
+            self._append_wave_event_once(
+                ledger,
                 "seat_failed",
-                phase=phase,
-                prompt_revision=prompt_revision,
+                identity={
+                    "phase": phase,
+                    "prompt_revision": prompt_revision,
+                    "seat_id": seat.seat_id,
+                },
+                process_generation=requests[seat.seat_id][
+                    "expected_process_generation"
+                ],
+                outcome_kind="outcome_timeout",
+                inference_state="side_effect_uncertain",
                 **failure,
             )
+        contributions.sort(key=lambda value: seat_order[str(value["seat_id"])])
+        failures.sort(key=lambda value: seat_order[str(value["seat_id"])])
         if superseded_revision is not None:
             if pending:
-                ledger.append(
+                self._append_wave_event_once(
+                    ledger,
                     "superseded_wave_drain_failed",
-                    phase=phase,
-                    prompt_revision=prompt_revision,
+                    identity={
+                        "phase": phase,
+                        "prompt_revision": prompt_revision,
+                    },
                     latest_prompt_revision=superseded_revision,
                     contribution_count=len(contributions),
                     failure_count=len(failures),
@@ -1255,10 +1866,13 @@ class NativeCouncilTransport:
                     f"did not drain within {self.wave_timeout:.1f}s; "
                     f"pending seats: {', '.join(sorted(pending))}"
                 )
-            ledger.append(
+            self._append_wave_event_once(
+                ledger,
                 "superseded_wave_drained",
-                phase=phase,
-                prompt_revision=prompt_revision,
+                identity={
+                    "phase": phase,
+                    "prompt_revision": prompt_revision,
+                },
                 latest_prompt_revision=superseded_revision,
                 contribution_count=len(contributions),
                 failure_count=len(failures),
@@ -1268,10 +1882,18 @@ class NativeCouncilTransport:
                 "contributions": contributions,
                 "failures": failures,
             }
-        ledger.append(
+        if pending:
+            raise CouncilTransportFailure(
+                f"{phase} wave timed out without durable outcomes; "
+                "seat inference side effects are uncertain"
+            )
+        self._append_wave_event_once(
+            ledger,
             "wave_completed",
-            phase=phase,
-            prompt_revision=prompt_revision,
+            identity={
+                "phase": phase,
+                "prompt_revision": prompt_revision,
+            },
             contribution_count=len(contributions),
             failure_count=len(failures),
             missing_seats=sorted(pending),
@@ -1294,6 +1916,7 @@ class NativeCouncilTransport:
             return
         try:
             opened = ledger.opened_event()
+            failure_revision = ledger.latest_revision()
             existing_terminal = ledger.terminal_event()
             if existing_terminal is not None:
                 await record_terminal(
@@ -1307,8 +1930,269 @@ class NativeCouncilTransport:
                     terminal_event_type=existing_terminal["event_type"],
                 )
                 return
+            existing_events = ledger.events()
+            recovery_revision = ledger.latest_revision()
+            resolved_synthesis_revisions = {
+                int(event.get("prompt_revision") or 0)
+                for event in existing_events
+                if event.get("event_type") in {"synthesis", "synthesis_stale"}
+            }
+            unresolved_synthesis_revisions = sorted(
+                {
+                    int(event.get("prompt_revision") or 0)
+                    for event in existing_events
+                    if event.get("event_type") == "synthesis_started"
+                    and int(event.get("prompt_revision") or 0)
+                    not in resolved_synthesis_revisions
+                }
+            )
+            if unresolved_synthesis_revisions:
+                failed_work_revision = unresolved_synthesis_revisions[0]
+                terminal = ledger.append_failed_current(
+                    failed_work_revision,
+                    status="failed",
+                    kind="main_synthesis_side_effect_uncertain",
+                    unresolved_synthesis_revisions=(
+                        unresolved_synthesis_revisions
+                    ),
+                    error=(
+                        "coordinator ended after durable synthesis start "
+                        "without a durable synthesis result or stale-result "
+                        "receipt; immutable synthesis identity was not retried"
+                    ),
+                )
+                await record_terminal(
+                    ledger.conversation_id,
+                    ledger.round_id,
+                    opened,
+                    terminal,
+                )
+                ledger.append(
+                    "terminal_projected",
+                    terminal_event_type=terminal["event_type"],
+                )
+                return
+            uncertain_seat_revisions = sorted(
+                {
+                    int(event.get("prompt_revision") or 0)
+                    for event in existing_events
+                    if event.get("event_type") == "seat_failed"
+                    and event.get("inference_state")
+                    == "side_effect_uncertain"
+                }
+            )
+            if uncertain_seat_revisions:
+                failed_work_revision = uncertain_seat_revisions[0]
+                terminal = ledger.append_failed_current(
+                    failed_work_revision,
+                    status="failed",
+                    kind=(
+                        "seat_inference_side_effect_uncertain"
+                        if failed_work_revision == recovery_revision
+                        else "seat_inference_side_effect_uncertain_"
+                        "after_revision_change"
+                    ),
+                    uncertain_seat_revisions=uncertain_seat_revisions,
+                    error=(
+                        "a durable seat failure records an uncertain inference "
+                        "side effect; the immutable council round was not "
+                        "continued"
+                    ),
+                )
+                await record_terminal(
+                    ledger.conversation_id,
+                    ledger.round_id,
+                    opened,
+                    terminal,
+                )
+                ledger.append(
+                    "terminal_projected",
+                    terminal_event_type=terminal["event_type"],
+                )
+                return
+            prior_preparations = [
+                event
+                for event in existing_events
+                if event.get("event_type") == "wave_dispatch_prepared"
+                and int(event.get("prompt_revision") or 0)
+                < recovery_revision
+            ]
+            prior_revisions = sorted(
+                {
+                    int(event.get("prompt_revision") or 0)
+                    for event in prior_preparations
+                }
+            )
+            for prior_revision in prior_revisions:
+                failure_revision = prior_revision
+                preparations = [
+                    event
+                    for event in prior_preparations
+                    if int(event.get("prompt_revision") or 0)
+                    == prior_revision
+                ]
+                prepared_phases = [str(event.get("phase") or "") for event in preparations]
+                if (
+                    len(prepared_phases) != len(set(prepared_phases))
+                    or not set(prepared_phases) <= {"independent", "critique"}
+                ):
+                    raise CouncilTransportFailure(
+                        f"revision {prior_revision} has invalid wave preparation state"
+                    )
+                terminal_phases = {
+                    str(event.get("phase") or "")
+                    for event in existing_events
+                    if event.get("event_type")
+                    in {
+                        "wave_completed",
+                        "superseded_wave_drained",
+                        "superseded_wave_drain_failed",
+                        "superseded_wave_not_dispatched",
+                    }
+                    and int(event.get("prompt_revision") or 0)
+                    == prior_revision
+                }
+                if any(
+                    event.get("event_type")
+                    == "superseded_wave_drain_failed"
+                    and int(event.get("prompt_revision") or 0)
+                    == prior_revision
+                    for event in existing_events
+                ):
+                    raise CouncilTransportFailure(
+                        f"revision {prior_revision} contains a prior wave "
+                        "that failed to drain"
+                    )
+                unresolved_phases = set(prepared_phases) - terminal_phases
+                if not unresolved_phases:
+                    continue
+                if "independent" not in prepared_phases:
+                    raise CouncilTransportFailure(
+                        f"revision {prior_revision} has critique work without "
+                        "a prepared independent wave"
+                    )
+                dispatched_phases: set[str] = set()
+                for prior_phase in ("independent", "critique"):
+                    if prior_phase not in unresolved_phases:
+                        continue
+                    dispatch_state = self._dispatch_state(
+                        ledger=ledger,
+                        phase=prior_phase,
+                        prompt_revision=prior_revision,
+                    )
+                    dispatched_count = sum(dispatch_state)
+                    if dispatched_count not in {0, len(COUNCIL_SEATS)}:
+                        raise CouncilTransportFailure(
+                            f"revision {prior_revision} {prior_phase} wave "
+                            "has a partial dispatch identity"
+                        )
+                    started = [
+                        event
+                        for event in existing_events
+                        if event.get("event_type") == "seat_started"
+                        and event.get("phase") == prior_phase
+                        and int(event.get("prompt_revision") or 0)
+                        == prior_revision
+                    ]
+                    if dispatched_count == 0:
+                        if started:
+                            raise CouncilTransportFailure(
+                                f"revision {prior_revision} {prior_phase} wave "
+                                "lost its dispatch tokens after durable start"
+                            )
+                        self._append_wave_event_once(
+                            ledger,
+                            "superseded_wave_not_dispatched",
+                            identity={
+                                "phase": prior_phase,
+                                "prompt_revision": prior_revision,
+                            },
+                            latest_prompt_revision=recovery_revision,
+                            contribution_count=0,
+                            failure_count=0,
+                            missing_seats=[],
+                            reason="prepared_before_supersession_without_dispatch",
+                        )
+                        continue
+                    dispatched_phases.add(prior_phase)
+                if not dispatched_phases:
+                    continue
+                prior_prompt = ledger.prompt_for_revision(prior_revision)
+                independent_requests = await self._dispatch_wave(
+                    ledger,
+                    phase="independent",
+                    prompt=prior_prompt,
+                    prompt_revision=prior_revision,
+                )
+                independent = await self._wait_wave(
+                    ledger,
+                    phase="independent",
+                    prompt_revision=prior_revision,
+                    requests=independent_requests,
+                )
+                if "critique" in dispatched_phases:
+                    critique_requests = await self._dispatch_wave(
+                        ledger,
+                        phase="critique",
+                        prompt=prior_prompt,
+                        prompt_revision=prior_revision,
+                        revealed=independent["contributions"],
+                    )
+                    await self._wait_wave(
+                        ledger,
+                        phase="critique",
+                        prompt_revision=prior_revision,
+                        requests=critique_requests,
+                    )
+            failure_revision = recovery_revision
+            recovered_synthesis = next(
+                (
+                    event
+                    for event in reversed(existing_events)
+                    if event.get("event_type") == "synthesis"
+                    and int(event.get("prompt_revision") or 0)
+                    == recovery_revision
+                ),
+                None,
+            )
+            if recovered_synthesis is not None:
+                try:
+                    terminal = ledger.append_completed(
+                        recovery_revision,
+                        prompt_revision=recovery_revision,
+                        status="completed",
+                        answer=recovered_synthesis["answer"],
+                        independent_count=int(
+                            recovered_synthesis.get("independent_count") or 0
+                        ),
+                        critique_count=int(
+                            recovered_synthesis.get("critique_count") or 0
+                        ),
+                        synthesis_receipt=(
+                            recovered_synthesis.get("synthesis_receipt") or {}
+                        ),
+                        failed_seats=(
+                            recovered_synthesis.get("failed_seats") or []
+                        ),
+                        recovered_without_inference=True,
+                    )
+                except CouncilRevisionSuperseded:
+                    terminal = None
+                if terminal is not None:
+                    await record_terminal(
+                        ledger.conversation_id,
+                        ledger.round_id,
+                        opened,
+                        terminal,
+                    )
+                    ledger.append(
+                        "terminal_projected",
+                        terminal_event_type=terminal["event_type"],
+                    )
+                    return
             while True:
                 prompt_revision = ledger.latest_revision()
+                failure_revision = prompt_revision
                 prompt = ledger.prompt_for_revision(prompt_revision)
                 independent_requests = await self._dispatch_wave(
                     ledger,
@@ -1328,10 +2212,13 @@ class NativeCouncilTransport:
                     raise CouncilTransportFailure(
                         "independent wave produced no durable council contributions"
                     )
-                ledger.append(
+                self._append_wave_event_once(
+                    ledger,
                     "reveal",
-                    phase="reveal",
-                    prompt_revision=prompt_revision,
+                    identity={
+                        "phase": "reveal",
+                        "prompt_revision": prompt_revision,
+                    },
                     contribution_count=len(independent["contributions"]),
                     failure_count=len(independent["failures"]),
                     contributions=independent["contributions"],
@@ -1418,6 +2305,8 @@ class NativeCouncilTransport:
                     prompt_revision=prompt_revision,
                     answer=answer,
                     synthesis_receipt=synthesis_receipt,
+                    independent_count=len(independent["contributions"]),
+                    critique_count=len(critique["contributions"]),
                     failed_seats=independent["failures"]
                     + critique["failures"],
                     dissent_count=sum(
@@ -1467,12 +2356,60 @@ class NativeCouncilTransport:
                     error=f"{type(exc).__name__}: {exc}",
                 )
             else:
-                terminal = ledger.append(
-                    "round_failed",
-                    prompt_revision=ledger.latest_revision(),
-                    status="failed",
-                    error=f"{type(exc).__name__}: {exc}",
+                events = ledger.events()
+                synthesis_started = any(
+                    event.get("event_type") == "synthesis_started"
+                    and int(event.get("prompt_revision") or 0)
+                    == failure_revision
+                    for event in events
                 )
+                synthesis_durable = any(
+                    event.get("event_type") == "synthesis"
+                    and int(event.get("prompt_revision") or 0)
+                    == failure_revision
+                    for event in events
+                )
+                seat_inference_uncertain = any(
+                    event.get("event_type") == "seat_failed"
+                    and int(event.get("prompt_revision") or 0)
+                    == failure_revision
+                    and event.get("inference_state")
+                    == "side_effect_uncertain"
+                    for event in events
+                )
+                kind = (
+                    "main_synthesis_side_effect_uncertain"
+                    if synthesis_started and not synthesis_durable
+                    else "seat_inference_side_effect_uncertain"
+                    if seat_inference_uncertain
+                    else "coordinator_failure"
+                )
+                try:
+                    terminal = ledger.append_failed(
+                        failure_revision,
+                        prompt_revision=failure_revision,
+                        status="failed",
+                        kind=kind,
+                        error=f"{type(exc).__name__}: {exc}",
+                    )
+                except CouncilRevisionSuperseded:
+                    drain_failed = any(
+                        event.get("event_type")
+                        == "superseded_wave_drain_failed"
+                        and int(event.get("prompt_revision") or 0)
+                        == failure_revision
+                        for event in events
+                    )
+                    terminal = ledger.append_failed_current(
+                        failure_revision,
+                        status="failed",
+                        kind=(
+                            "superseded_wave_drain_failed"
+                            if drain_failed
+                            else f"{kind}_after_revision_change"
+                        ),
+                        error=f"{type(exc).__name__}: {exc}",
+                    )
                 try:
                     await record_terminal(
                         ledger.conversation_id,

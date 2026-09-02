@@ -245,6 +245,16 @@ end
 return removed
 """
 
+_GUARDED_CLAIM_LUA = """
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then
+    return redis.error_reply('seat process generation is not current')
+end
+if ARGV[2] == '1' and redis.call('EXISTS', KEYS[2]) == 1 then
+    return nil
+end
+return redis.call('LMOVE', KEYS[3], KEYS[4], ARGV[3], ARGV[4])
+"""
+
 _QUARANTINE_LUA = """
 local removed = redis.call('LREM', KEYS[1], 1, ARGV[1])
 if removed == 1 then
@@ -430,9 +440,63 @@ def _decode_message(raw: str) -> tuple[dict[str, Any], str]:
 
 
 class ReliableInbox:
-    def __init__(self, client: redis.Redis, store: EventStore):
+    def __init__(
+        self,
+        client: redis.Redis,
+        store: EventStore,
+        *,
+        processing_generation: str | None = None,
+        claim_guard: tuple[str, str] | None = None,
+        claim_block_key: str | None = None,
+    ):
         self.client = client
         self.store = store
+        if processing_generation is not None:
+            if not _TRACE_ID_RE.fullmatch(processing_generation):
+                raise SeatFailure(
+                    f"invalid processing generation: {processing_generation!r}"
+                )
+            self.queues = tuple(
+                QueueSpec(
+                    name=source.name,
+                    queue_key=source.queue_key,
+                    processing_key=(
+                        f"{source.processing_key}:{processing_generation}"
+                    ),
+                    source_side=source.source_side,
+                    processing_side=source.processing_side,
+                    requeue_side=source.requeue_side,
+                )
+                for source in QUEUES
+            )
+        else:
+            self.queues = QUEUES
+        if claim_block_key is not None and claim_guard is None:
+            raise SeatFailure("claim_block_key requires claim_guard")
+        self.claim_guard = claim_guard
+        self.claim_block_key = claim_block_key
+
+    def _claim_raw(self, source: QueueSpec) -> str | None:
+        if self.claim_guard is None:
+            return self.client.lmove(
+                source.queue_key,
+                source.processing_key,
+                source.source_side,
+                source.processing_side,
+            )
+        guard_key, guard_value = self.claim_guard
+        return self.client.eval(
+            _GUARDED_CLAIM_LUA,
+            4,
+            guard_key,
+            self.claim_block_key or guard_key,
+            source.queue_key,
+            source.processing_key,
+            guard_value,
+            "1" if self.claim_block_key else "0",
+            source.source_side,
+            source.processing_side,
+        )
 
     def _ack(self, claim: ClaimedMessage) -> None:
         removed = int(
@@ -499,14 +563,9 @@ class ReliableInbox:
     def claim_available(self) -> list[ClaimedMessage]:
         claims: list[ClaimedMessage] = []
         try:
-            for source in QUEUES:
+            for source in self.queues:
                 while not claims:
-                    raw = self.client.lmove(
-                        source.queue_key,
-                        source.processing_key,
-                        source.source_side,
-                        source.processing_side,
-                    )
+                    raw = self._claim_raw(source)
                     if raw is None:
                         break
                     payload, message_id = _decode_message(raw)
@@ -548,7 +607,7 @@ class ReliableInbox:
         by_source: dict[str, list[ClaimedMessage]] = {}
         for claim in claims:
             by_source.setdefault(claim.source.name, []).append(claim)
-        for source in QUEUES:
+        for source in self.queues:
             source_claims = by_source.get(source.name, [])
             for claim in reversed(source_claims):
                 self._requeue(claim)
@@ -558,7 +617,7 @@ class ReliableInbox:
     def recover(self) -> dict[str, int]:
         recovered = 0
         acknowledged = 0
-        for source in QUEUES:
+        for source in self.queues:
             raws = list(self.client.lrange(source.processing_key, 0, -1))
             # LMOVE stores inbox claims newest-first (LEFT) but the other two
             # sources oldest-first (RIGHT); this produces the inverse push order
