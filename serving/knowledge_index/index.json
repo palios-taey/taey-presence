@@ -2,7 +2,7 @@
   "code_host_allowlist": [
     "github.com"
   ],
-  "generated_at_commit": "cef368b45bfcfdbd902c15be72ead1d07b821255",
+  "generated_at_commit": "1e49cae16c5e2788fd5c102b01c3d3c5fc79e533",
   "index_id": "taey-knowledge-index",
   "live_url": "https://github.com/palios-taey/taey-presence/raw/main/serving/knowledge_index/index.json",
   "sections": {
@@ -50,7 +50,7 @@
           },
           "repo": {
             "name": "palios-taey/taey-presence",
-            "pinned_sha": "cef368b45bfcfdbd902c15be72ead1d07b821255",
+            "pinned_sha": "1e49cae16c5e2788fd5c102b01c3d3c5fc79e533",
             "public_url": "https://github.com/palios-taey/taey-presence"
           },
           "status": "production"
@@ -104,7 +104,7 @@
           },
           "repo": {
             "name": "palios-taey/taey-presence",
-            "pinned_sha": "cef368b45bfcfdbd902c15be72ead1d07b821255",
+            "pinned_sha": "1e49cae16c5e2788fd5c102b01c3d3c5fc79e533",
             "public_url": "https://github.com/palios-taey/taey-presence"
           },
           "status": "production"
@@ -152,16 +152,16 @@
           },
           "repo": {
             "name": "palios-taey/taey-presence",
-            "pinned_sha": "cef368b45bfcfdbd902c15be72ead1d07b821255",
+            "pinned_sha": "1e49cae16c5e2788fd5c102b01c3d3c5fc79e533",
             "public_url": "https://github.com/palios-taey/taey-presence"
           },
           "status": "production"
         },
         {
-          "artifact_commit_sha": "cef368b45bfcfdbd902c15be72ead1d07b821255",
+          "artifact_commit_sha": "1e49cae16c5e2788fd5c102b01c3d3c5fc79e533",
           "artifact_manifest": {
             "path": "serving/manifests/presence-seat.artifacts.json",
-            "sha256": "13a0bb0a27c159ae2e74bcd00e3098e7fba5c0ffde46c87f3c584658573844b6"
+            "sha256": "a385ebab5bab61fdc35249d2d75d4598f3cd62003854ab4b5869f413304ce5c2"
           },
           "artifact_paths": [
             "serving/council_prompt_receipt.py",
@@ -213,7 +213,7 @@
           },
           "repo": {
             "name": "palios-taey/taey-presence",
-            "pinned_sha": "cef368b45bfcfdbd902c15be72ead1d07b821255",
+            "pinned_sha": "1e49cae16c5e2788fd5c102b01c3d3c5fc79e533",
             "public_url": "https://github.com/palios-taey/taey-presence"
           },
           "status": "production"
@@ -257,7 +257,7 @@
           },
           "repo": {
             "name": "palios-taey/taey-presence",
-            "pinned_sha": "cef368b45bfcfdbd902c15be72ead1d07b821255",
+            "pinned_sha": "1e49cae16c5e2788fd5c102b01c3d3c5fc79e533",
             "public_url": "https://github.com/palios-taey/taey-presence"
           },
           "status": "production"
@@ -303,7 +303,7 @@
           },
           "repo": {
             "name": "palios-taey/taey-presence",
-            "pinned_sha": "cef368b45bfcfdbd902c15be72ead1d07b821255",
+            "pinned_sha": "1e49cae16c5e2788fd5c102b01c3d3c5fc79e533",
             "public_url": "https://github.com/palios-taey/taey-presence"
           },
           "status": "production"
@@ -351,7 +351,7 @@
           },
           "repo": {
             "name": "palios-taey/taey-presence",
-            "pinned_sha": "cef368b45bfcfdbd902c15be72ead1d07b821255",
+            "pinned_sha": "1e49cae16c5e2788fd5c102b01c3d3c5fc79e533",
             "public_url": "https://github.com/palios-taey/taey-presence"
           },
           "status": "production"
@@ -439,7 +439,7 @@
     "presence"
   ],
   "source_manifest": {
-    "compiled_body_sha256": "9c8a5ab6e49ad7b5ed6a6724039a5f0d77fca46591f23b3c3a1b227f0e0f1339",
+    "compiled_body_sha256": "704784d4c7afe401a0ad6bf6b1b81c2057096a91083a8789230bfb380733a83e",
     "sections": [
       {
         "path": "serving/knowledge_index/sections/presence.md",
