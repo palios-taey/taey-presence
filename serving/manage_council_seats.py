@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,9 +21,16 @@ import redis
 
 SERVING_ROOT = Path(__file__).resolve().parent
 REPO_ROOT = SERVING_ROOT.parent
+sys.path.insert(0, str(REPO_ROOT))
+from dashboard.native_council import CouncilTransportFailure, RoundLedger  # noqa: E402
+
 DEFAULT_MANIFEST = SERVING_ROOT / "council_seats.json"
 RUN_ROOT = SERVING_ROOT / "run"
 SYSTEMD_UNIT_PREFIX = "taey-council-seat@"
+LEGACY_TERMINAL_ROUND = "dcm-20260817T014529Z-9b0dbd7863d5"
+LEGACY_TERMINAL_LEDGER_SHA256 = "24b6899841603b8173e7a329e135273520f9f77aaac9171020b82c1ad9bfb367"
+LEGACY_TERMINAL_SOURCE_SHA256 = "3894dafb71b74ed8b65c842ea91cd6d90896f6651d2500f3f24807f142aaa7c8"
+LEGACY_TERMINAL_REQUEST_COUNT = 13
 CANONICAL_ROLES = {
     "taey-council-1": "context-memory",
     "taey-council-2": "evidence-reality",
@@ -57,6 +66,13 @@ class SeatConfig:
     conversation_id: str
     shared_prompt: Path
     role_prompt: Path
+
+
+@dataclass(frozen=True)
+class LegacyTerminalPlan:
+    round_id: str
+    archive_path: Path
+    requests: tuple[dict[str, Any], ...]
 
 
 def _required_string(value: Any, field_name: str) -> str:
@@ -512,7 +528,7 @@ def _wait_for_at_rest(
     )
 
 
-def launch(seats: list[SeatConfig]) -> None:
+def launch(seats: list[SeatConfig], legacy_terminal_round: str | None = None) -> None:
     systemctl_binary = _systemctl_binary()
     tmux_binary = shutil.which("tmux")
     existing = [
@@ -553,9 +569,14 @@ def launch(seats: list[SeatConfig]) -> None:
             "launch requires seven stopped, inspectable units; use replace for "
             f"live or mixed generations: {unsafe_units}"
         )
+    sessions_root = _sessions_root()
+    _prepare_sessions_root(sessions_root)
+    legacy_plan = _prepare_legacy_or_release(
+        client, seats, prefix, sessions_root, legacy_terminal_round,
+        replacement_key, replacement_token)
     blockers = _seat_work_blockers(client, seats, prefix)
     active_rounds = _active_rounds(client, prefix)
-    if blockers or active_rounds:
+    if (blockers or active_rounds) and legacy_plan is None:
         _release_lifecycle_fence(
             client,
             replacement_key,
@@ -598,8 +619,6 @@ def launch(seats: list[SeatConfig]) -> None:
                 f"{seat.seat_id} registration changed before launch"
             )
         previous_registrations[seat.seat_id] = None
-    sessions_root = _sessions_root()
-    _prepare_sessions_root(sessions_root)
     started: list[str] = []
     for seat in seats:
         env_file = _write_seat_environment_file(seat, sessions_root)
@@ -636,6 +655,9 @@ def launch(seats: list[SeatConfig]) -> None:
             "remains active: "
             f"blockers={final_blockers} active_rounds={final_rounds}"
         )
+    if legacy_plan is not None:
+        _validate_legacy_terminal_state(
+            client, seats, prefix, sessions_root, legacy_plan, final=True)
     if not _release_lifecycle_fence(
         client,
         replacement_key,
@@ -644,7 +666,10 @@ def launch(seats: list[SeatConfig]) -> None:
         raise CouncilConfigError(
             "council seat launch completed but its dispatch fence was lost"
         )
-    print(json.dumps({"started": started}, separators=(",", ":")))
+    result: dict[str, Any] = {"started": started}
+    if legacy_plan is not None:
+        result["legacy_terminal_reconciled"] = _legacy_receipt(legacy_plan)
+    print(json.dumps(result, separators=(",", ":")))
 
 
 def _unit_state(systemctl_binary: str, seat: SeatConfig) -> dict[str, Any]:
@@ -745,7 +770,244 @@ def _active_rounds(client: redis.Redis, prefix: str) -> dict[str, str]:
     return rounds
 
 
-def replace(seats: list[SeatConfig]) -> None:
+def _read_private_jsonl(path: Path) -> list[dict[str, Any]]:
+    if path.exists() and (path.is_symlink() or stat.S_IMODE(path.stat().st_mode) & 0o077):
+        raise CouncilConfigError(f"council event log is not private: {path}")
+    raw = path.read_bytes() if path.exists() else b""
+    if raw and not raw.endswith(b"\n"):
+        raise CouncilConfigError(f"partial council event log: {path}")
+    events = [json.loads(line) for line in raw.splitlines()]
+    if any(not isinstance(event, dict) for event in events):
+        raise CouncilConfigError(f"non-object council event log record: {path}")
+    return events
+
+
+def _canonical_sha256(value: Any) -> str:
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _fsync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _validate_legacy_requests(document: dict[str, Any], seats: list[SeatConfig],
+                              events: list[dict[str, Any]]) -> tuple[dict[str, Any], ...]:
+    seat_roles = {seat.seat_id: seat.role_id for seat in seats}
+    started_events = [event for event in events if event.get("event_type") == "seat_started"]
+    started = {(event.get("seat_id"), event.get("prompt_revision"), event.get("phase")): event
+               for event in started_events}
+    requests = document.get("requests")
+    if (len(started) != len(started_events) or not isinstance(requests, list)
+            or len(requests) != LEGACY_TERMINAL_REQUEST_COUNT):
+        raise CouncilConfigError("legacy archive count/terminal starts are invalid")
+    identities: set[tuple[str, str]] = set()
+    for item in requests:
+        if not isinstance(item, dict) or set(item) != {"seat_id", "raw", "raw_sha256"}:
+            raise CouncilConfigError("legacy archive request shape is invalid")
+        seat_id, raw = item["seat_id"], item["raw"]
+        if (seat_id not in seat_roles or not isinstance(raw, str)
+                or hashlib.sha256(raw.encode()).hexdigest() != item["raw_sha256"]):
+            raise CouncilConfigError("legacy archive request seat/raw is invalid")
+        payload = json.loads(raw)
+        if not isinstance(payload, dict):
+            raise CouncilConfigError("legacy council request is not an object")
+        revision, phase = payload.get("prompt_revision"), payload.get("round_phase")
+        if type(revision) is not int or phase not in {"independent", "critique"}:
+            raise CouncilConfigError("legacy council request revision/phase is invalid")
+        request_id = f"{document['round_id']}:{revision}:{phase}:{seat_id}"
+        message_id = hashlib.sha256(
+            f"{document['round_id']}\0{revision}\0{phase}\0{seat_id}".encode()
+        ).hexdigest()[:24]
+        expected = {"from": "taey", "type": "council_request", "priority": "high",
+                    "msg_id": message_id, "event_id": request_id, "request_id": request_id,
+                    "correlation_id": document["round_id"],
+                    "council_run_id": document["round_id"], "round_id": document["round_id"]}
+        ledger_start = started.get((seat_id, revision, phase))
+        if ("expected_process_generation" in payload
+                or any(payload.get(key) != value for key, value in expected.items())
+                or not isinstance(payload.get("body"), str) or not payload["body"].strip()
+                or not isinstance(ledger_start, dict)
+                or ledger_start.get("role_id") != seat_roles[seat_id]
+                or ledger_start.get("request_id") != request_id
+                or ledger_start.get("message_id") != message_id
+                or (seat_id, message_id) in identities):
+            raise CouncilConfigError("legacy request does not match its terminal ledger")
+        identities.add((seat_id, message_id))
+    return tuple(requests)
+
+
+def _legacy_request_locations(client: redis.Redis, seats: list[SeatConfig],
+                              prefix: str) -> list[tuple[str, str, str]]:
+    locations: list[tuple[str, str, str]] = []
+    for seat in seats:
+        inbox = f"{prefix}:{seat.seat_id}:inbox"
+        processing = f"{prefix}:{seat.seat_id}:processing:inbox"
+        keys = [inbox, processing,
+                *sorted(client.scan_iter(match=f"{processing}:*"))]
+        locations.extend((seat.seat_id, key, raw)
+                         for key in keys for raw in client.lrange(key, 0, -1))
+    return locations
+
+
+def _validate_legacy_terminal_state(client: redis.Redis, seats: list[SeatConfig],
+                                    prefix: str, sessions_root: Path,
+                                    plan: LegacyTerminalPlan, *,
+                                    final: bool = False) -> None:
+    archived = {(item["seat_id"], item["raw"]) for item in plan.requests}
+    locations = _legacy_request_locations(client, seats, prefix)
+    current = [(seat_id, raw) for seat_id, _, raw in locations]
+    expected_blockers: dict[str, dict[str, int]] = {}
+    for seat in seats:
+        inbox = f"{prefix}:{seat.seat_id}:inbox"
+        inbox_count = sum(1 for seat_id, key, _ in locations
+                          if seat_id == seat.seat_id and key == inbox)
+        processing_count = sum(1 for seat_id, key, _ in locations
+                               if seat_id == seat.seat_id and key != inbox)
+        if inbox_count or processing_count:
+            expected_blockers[seat.seat_id] = {
+                "active_turns": 0, "inbox": inbox_count, "notifications": 0,
+                "orch": 0, "processing": processing_count}
+    if (
+        len(current) != len(set(current))
+        or not set(current) <= archived
+        or _seat_work_blockers(client, seats, prefix) != expected_blockers
+        or _active_rounds(client, prefix)
+        or (final and current)
+    ):
+        raise CouncilConfigError("council state exceeds the terminal legacy exception")
+    current_ids = {json.loads(raw)["msg_id"] for _, raw in current}
+    processing_ids = {
+        json.loads(raw)["msg_id"] for seat_id, key, raw in locations
+        if key != f"{prefix}:{seat_id}:inbox"}
+    for item in plan.requests:
+        payload = json.loads(item["raw"])
+        message_id = payload["msg_id"]
+        events = _read_private_jsonl(sessions_root / f"{item['seat_id']}.jsonl")
+        attempts = [event for event in events if event.get("event_type") == "turn_attempt"
+                    and message_id in (event.get("message_ids") or [])]
+        outcomes = [event for event in events if event.get("event_type") == "turn_outcome"
+                    and message_id in (event.get("message_ids") or [])]
+        outcome = outcomes[0] if len(outcomes) == 1 else {}
+        expected = {"kind": "dead_generation_terminal", "message_ids": [message_id],
+                    "request_id": payload["request_id"], "round_id": plan.round_id,
+                    "process_generation": "legacy-unbound", "skipped_inference": True,
+                    "inference_state": "not_started"}
+        valid_outcome = all(outcome.get(key) == value for key, value in expected.items())
+        if (attempts or (message_id in current_ids and outcomes
+                         and (message_id not in processing_ids or not valid_outcome))
+                or (message_id not in current_ids and not valid_outcome)):
+            raise CouncilConfigError(
+                f"legacy request lacks dead_generation_terminal/no-attempt proof: {message_id}"
+            )
+
+
+def _prepare_legacy_terminal_plan(client: redis.Redis, seats: list[SeatConfig],
+                                  prefix: str, sessions_root: Path,
+                                  round_id: str) -> LegacyTerminalPlan:
+    if round_id != LEGACY_TERMINAL_ROUND:
+        raise CouncilConfigError("legacy exception is bound to one exact terminal round")
+    dashboard_root = Path(os.environ.get(
+        "TAEY_SESSIONS_DIR", str(Path.home() / "taey_sessions")
+    )).expanduser().resolve()
+    ledger = RoundLedger(dashboard_root, "main", round_id)
+    before, events, after = ledger.path.read_bytes(), ledger.events(), ledger.path.read_bytes()
+    terminal = [event for event in events if event.get("event_type") in
+                {"round_completed", "round_failed"}]
+    if before != after or len(terminal) != 1 or not events or (
+        events[-1].get("event_type") != "terminal_projected"
+    ):
+        raise CouncilConfigError(f"round {round_id} is not stably terminal and projected")
+    ledger_sha256 = hashlib.sha256(after).hexdigest()
+    if ledger_sha256 != LEGACY_TERMINAL_LEDGER_SHA256:
+        raise CouncilConfigError("legacy terminal ledger does not match the pinned incident")
+    archive_dir = sessions_root / "legacy-terminal-reconciliation"
+    archive_dir_created = not archive_dir.exists()
+    archive_dir.mkdir(mode=0o700, exist_ok=True)
+    if archive_dir.is_symlink() or stat.S_IMODE(archive_dir.stat().st_mode) & 0o077:
+        raise CouncilConfigError(f"legacy archive directory is not private: {archive_dir}")
+    if archive_dir_created:
+        _fsync_directory(sessions_root)
+    archive_path = archive_dir / f"{round_id}.json"
+    create_archive = not archive_path.exists()
+    if not create_archive:
+        if archive_path.is_symlink() or stat.S_IMODE(archive_path.stat().st_mode) != 0o400:
+            raise CouncilConfigError(f"legacy archive is not immutable: {archive_path}")
+        document = json.loads(archive_path.read_text(encoding="utf-8"))
+    else:
+        source_state = [{"key": f"{prefix}:{seat.seat_id}:inbox", "values": client.lrange(
+            f"{prefix}:{seat.seat_id}:inbox", 0, -1)}
+                        for seat in seats]
+        source_sha256 = _canonical_sha256(source_state)
+        if source_sha256 != LEGACY_TERMINAL_SOURCE_SHA256:
+            raise CouncilConfigError("legacy source state does not match the pinned incident")
+        requests = [{"seat_id": seat.seat_id, "raw": raw, "raw_sha256": hashlib.sha256(
+            raw.encode()).hexdigest()}
+                    for seat, source in zip(seats, source_state, strict=True)
+                    for raw in source["values"]]
+        document = {"schema_version": 1, "contract": "taey-council-terminal-legacy-archive/v1",
+                    "conversation_id": "main", "round_id": round_id,
+                    "ledger_sha256": ledger_sha256, "ledger_events": events,
+                    "source_sha256": source_sha256, "requests": requests}
+    if (
+        not isinstance(document, dict)
+        or document.get("schema_version") != 1
+        or document.get("contract") != "taey-council-terminal-legacy-archive/v1"
+        or document.get("conversation_id") != "main"
+        or document.get("round_id") != round_id
+        or document.get("ledger_sha256") != ledger_sha256
+        or document.get("ledger_events") != events
+        or document.get("source_sha256") != LEGACY_TERMINAL_SOURCE_SHA256
+    ):
+        raise CouncilConfigError("legacy archive does not match the canonical ledger")
+    requests = _validate_legacy_requests(document, seats, events)
+    archived_state = [{"key": f"{prefix}:{seat.seat_id}:inbox", "values": [
+        item["raw"] for item in requests if item["seat_id"] == seat.seat_id]}
+                      for seat in seats]
+    if _canonical_sha256(archived_state) != document["source_sha256"]:
+        raise CouncilConfigError("legacy archive source fingerprint is invalid")
+    if create_archive:
+        encoded = (json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n").encode()
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{round_id}.", suffix=".tmp", dir=archive_dir)
+        temporary_path = Path(temporary_name)
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(encoded)
+                handle.flush()
+                os.fchmod(handle.fileno(), 0o400)
+                os.fsync(handle.fileno())
+            os.link(temporary_path, archive_path, follow_symlinks=False)
+        finally:
+            temporary_path.unlink(missing_ok=True)
+        _fsync_directory(archive_dir)
+    plan = LegacyTerminalPlan(round_id, archive_path, requests)
+    _validate_legacy_terminal_state(client, seats, prefix, sessions_root, plan)
+    return plan
+
+
+def _prepare_legacy_or_release(client: redis.Redis, seats: list[SeatConfig],
+                               prefix: str, sessions_root: Path, round_id: str | None,
+                               fence_key: str, fence_token: str) -> LegacyTerminalPlan | None:
+    if not round_id:
+        return None
+    try:
+        return _prepare_legacy_terminal_plan(client, seats, prefix, sessions_root, round_id)
+    except (CouncilConfigError, CouncilTransportFailure, OSError, ValueError):
+        _release_lifecycle_fence(client, fence_key, fence_token)
+        raise
+
+
+def _legacy_receipt(plan: LegacyTerminalPlan) -> dict[str, Any]:
+    return {"round_id": plan.round_id, "request_count": len(plan.requests),
+            "archive": str(plan.archive_path), "proof": "dead_generation_terminal/no_attempt"}
+
+
+def replace(seats: list[SeatConfig], legacy_terminal_round: str | None = None) -> None:
     systemctl_binary = _systemctl_binary()
     tmux_binary = shutil.which("tmux")
     existing_tmux = [
@@ -760,13 +1022,32 @@ def replace(seats: list[SeatConfig]) -> None:
         )
     for seat in seats:
         _preflight_systemd_unit(systemctl_binary, seat)
+    if legacy_terminal_round:
+        unit_states = {
+            seat.seat_id: _unit_state(systemctl_binary, seat) for seat in seats
+        }
+        unsafe_units = {
+            seat_id: state for seat_id, state in unit_states.items()
+            if not state["answered"] or state["active"] != "inactive"
+            or state["main_pid"] != "0"
+        }
+        if unsafe_units:
+            raise CouncilConfigError(
+                "legacy reconciliation requires all seven units already inactive: "
+                f"{unsafe_units}"
+            )
     client = _redis_client()
     prefix = os.environ.get("NOTIFY_KEY_PREFIX", "taey")
     replacement_key = f"{prefix}:dcm:native:seat_replacement"
     replacement_token = _acquire_lifecycle_fence(client, replacement_key)
+    sessions_root = _sessions_root()
+    _prepare_sessions_root(sessions_root)
+    legacy_plan = _prepare_legacy_or_release(
+        client, seats, prefix, sessions_root, legacy_terminal_round,
+        replacement_key, replacement_token)
     blockers = _seat_work_blockers(client, seats, prefix)
     active_rounds = _active_rounds(client, prefix)
-    if blockers or active_rounds:
+    if (blockers or active_rounds) and legacy_plan is None:
         _release_lifecycle_fence(
             client,
             replacement_key,
@@ -783,8 +1064,6 @@ def replace(seats: list[SeatConfig]) -> None:
         )
         for seat in seats
     }
-    sessions_root = _sessions_root()
-    _prepare_sessions_root(sessions_root)
     for seat in seats:
         _write_seat_environment_file(seat, sessions_root)
     stopped: list[str] = []
@@ -808,11 +1087,15 @@ def replace(seats: list[SeatConfig]) -> None:
     stopped_blockers = _seat_work_blockers(client, seats, prefix)
     stopped_rounds = _active_rounds(client, prefix)
     if stopped_blockers or stopped_rounds:
-        raise CouncilConfigError(
-            "council state changed after replacement fencing; all units remain "
-            "stopped and the fence remains active: "
-            f"blockers={stopped_blockers} active_rounds={stopped_rounds}"
-        )
+        if legacy_plan is not None:
+            _validate_legacy_terminal_state(client, seats, prefix, sessions_root,
+                                            legacy_plan)
+        else:
+            raise CouncilConfigError(
+                "council state changed after replacement fencing; all units remain "
+                "stopped and the fence remains active: "
+                f"blockers={stopped_blockers} active_rounds={stopped_rounds}"
+            )
     for seat in seats:
         previous = previous_registrations[seat.seat_id]
         if previous is not None:
@@ -849,6 +1132,9 @@ def replace(seats: list[SeatConfig]) -> None:
             "remains active: "
             f"blockers={final_blockers} active_rounds={final_rounds}"
         )
+    if legacy_plan is not None:
+        _validate_legacy_terminal_state(
+            client, seats, prefix, sessions_root, legacy_plan, final=True)
     if not _release_lifecycle_fence(
         client,
         replacement_key,
@@ -857,15 +1143,13 @@ def replace(seats: list[SeatConfig]) -> None:
         raise CouncilConfigError(
             "council seat replacement completed but its dispatch fence was lost"
         )
-    print(
-        json.dumps(
-            {
-                "replaced": started,
-                "registration_contract": "generation-bound-expiring/v1",
-            },
-            separators=(",", ":"),
-        )
-    )
+    result: dict[str, Any] = {
+        "replaced": started,
+        "registration_contract": "generation-bound-expiring/v1",
+    }
+    if legacy_plan is not None:
+        result["legacy_terminal_reconciled"] = _legacy_receipt(legacy_plan)
+    print(json.dumps(result, separators=(",", ":")))
 
 
 def status(seats: list[SeatConfig]) -> list[dict[str, Any]]:
@@ -939,9 +1223,12 @@ def main() -> int:
         type=Path,
         default=DEFAULT_MANIFEST,
     )
+    parser.add_argument("--reconcile-terminal-round")
     args = parser.parse_args()
     try:
         seats = load_manifest(args.manifest.resolve())
+        if args.reconcile_terminal_round and args.command not in {"launch", "replace"}:
+            raise CouncilConfigError("--reconcile-terminal-round requires launch or replace")
         if args.command == "validate":
             print(
                 json.dumps(
@@ -958,9 +1245,9 @@ def main() -> int:
         elif args.command == "render":
             print(json.dumps(render(seats), indent=2))
         elif args.command == "launch":
-            launch(seats)
+            launch(seats, args.reconcile_terminal_round)
         elif args.command == "replace":
-            replace(seats)
+            replace(seats, args.reconcile_terminal_round)
         else:
             print(json.dumps(status(seats), indent=2))
     except (CouncilConfigError, OSError, redis.RedisError, ValueError) as exc:
