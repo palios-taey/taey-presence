@@ -16,6 +16,7 @@ import socket
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
@@ -439,13 +440,24 @@ def signing_key(config: dict[str, Any]) -> tuple[Path, str]:
 
 
 def sign_publication(payload: dict[str, Any], private_key: Path) -> str:
-    result = subprocess.run(
-        ["openssl", "pkeyutl", "-sign", "-rawin", "-inkey", str(private_key)],
-        input=canonical_json_bytes(payload),
-        capture_output=True,
-        timeout=10,
-        check=False,
-    )
+    with tempfile.NamedTemporaryFile() as payload_file:
+        payload_file.write(canonical_json_bytes(payload))
+        payload_file.flush()
+        result = subprocess.run(
+            [
+                "openssl",
+                "pkeyutl",
+                "-sign",
+                "-rawin",
+                "-inkey",
+                str(private_key),
+                "-in",
+                payload_file.name,
+            ],
+            capture_output=True,
+            timeout=10,
+            check=False,
+        )
     if result.returncode != 0:
         raise AttestationError("could not sign the model identity publication")
     return base64.b64encode(result.stdout).decode("ascii")
