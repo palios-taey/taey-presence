@@ -16,6 +16,9 @@ from typing import Any, Awaitable, Callable
 
 import redis
 
+from serving import council_prompt_receipt as prompt_producer
+from serving import model_identity_status
+
 
 log = logging.getLogger(__name__)
 
@@ -48,6 +51,9 @@ COUNCIL_SEATS = (
     CouncilSeat("taey-council-5", "scope-intent"),
     CouncilSeat("taey-council-6", "options-alternatives"),
     CouncilSeat("taey-council-7", "control-acceptance"),
+)
+_COUNCIL_MANIFEST_PATH = (
+    Path(__file__).resolve().parents[1] / "serving" / "council_seats.json"
 )
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$")
 _SESSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
@@ -787,7 +793,7 @@ class NativeCouncilTransport:
         ledger = self.ledger(conversation_id, round_id)
         ledger.append(
             "round_opened",
-            council_protocol="taey-native-dcm/v1",
+            council_protocol="taey-native-dcm/v2",
             executive_event_id=_safe_id(executive_event_id),
             user_prompt=user_prompt.strip(),
             executive_context=executive_context or [],
@@ -919,35 +925,419 @@ class NativeCouncilTransport:
             raise CouncilTransportFailure(f"round {round_id} is already terminal")
         return ledger.append_amendment(content)
 
+    @staticmethod
+    def _dcm_adapter() -> Any:
+        if not os.environ.get("DCM_NEO4J_URI") or not os.environ.get(
+            "DCM_NEO4J_DATABASE"
+        ):
+            raise CouncilTransportFailure(
+                "DCM_NEO4J_URI and DCM_NEO4J_DATABASE are required for council dispatch"
+            )
+        import taey_adapter
+
+        if (
+            taey_adapter.mesh.DCM_NEO4J_URI != os.environ["DCM_NEO4J_URI"]
+            or taey_adapter.mesh.DCM_NEO4J_DATABASE
+            != os.environ["DCM_NEO4J_DATABASE"]
+        ):
+            raise CouncilTransportFailure(
+                "loaded DCM graph identity differs from the explicit council environment"
+            )
+        return taey_adapter
+
+    @staticmethod
+    def _graph_session_payload(ledger: RoundLedger) -> str:
+        opened = ledger.opened_event()
+        return prompt_producer.canonical_json(
+            {
+                "conversation_id": ledger.conversation_id,
+                "executive_context": opened.get("executive_context") or [],
+                "executive_event_id": opened["executive_event_id"],
+                "user_prompt": opened["user_prompt"],
+            }
+        )
+
+    def _ensure_graph_session(self, ledger: RoundLedger) -> dict[str, Any]:
+        adapter = self._dcm_adapter()
+        topic = f"Taey native council round {ledger.round_id}"
+        payload = self._graph_session_payload(ledger)
+        try:
+            session = adapter.mesh.read_session(ledger.round_id)
+        except ValueError:
+            try:
+                adapter.mesh.start_session(
+                    topic,
+                    payload,
+                    [seat.role_id for seat in COUNCIL_SEATS],
+                    session_id=ledger.round_id,
+                )
+            except adapter.mesh.SessionIdentityConflictError:
+                pass
+            session = adapter.mesh.read_session(ledger.round_id)
+        if (
+            session.get("topic") != topic
+            or session.get("payload") != payload
+            or session.get("status") != "open"
+        ):
+            raise CouncilTransportFailure(
+                "DCM session identity or open state differs from the durable council round"
+            )
+        return session
+
+    @staticmethod
+    def _verified_prompt_contracts() -> dict[str, str]:
+        manifest = prompt_producer.load_manifest(_COUNCIL_MANIFEST_PATH)
+        return {
+            seat.seat_id: prompt_producer.prompt_contract_receipt(
+                manifest,
+                seat,
+            )["prompt_contract_sha256"]
+            for seat in manifest.seats
+        }
+
+    @staticmethod
+    def _verified_model_identity() -> dict[str, Any]:
+        aliases = sorted(
+            os.environ.get("TAEY_MODEL_IDENTITY_EXPECTED_ALIASES", "").split()
+        )
+        endpoint = os.environ.get(
+            "TAEY_MODEL_IDENTITY_UPSTREAM_COMPLETION_ENDPOINT",
+            "",
+        )
+        if not aliases or len(aliases) != len(set(aliases)) or not endpoint:
+            raise CouncilTransportFailure(
+                "model identity aliases and upstream completion endpoint are required"
+            )
+        try:
+            publication, ttl_ms = model_identity_status.read_publication(
+                aliases,
+                endpoint,
+                False,
+            )
+        except (
+            OSError,
+            TypeError,
+            ValueError,
+            model_identity_status.VerificationError,
+        ) as exc:
+            raise CouncilTransportFailure(
+                f"live model identity could not be verified: {exc}"
+            ) from exc
+        return {
+            "publication": publication,
+            "ttl_ms": ttl_ms,
+            "served_aliases": aliases,
+        }
+
+    def _open_graph_wave(
+        self,
+        *,
+        ledger: RoundLedger,
+        phase: str,
+        prompt_revision: int,
+        body: str,
+        registrations: dict[str, dict[str, Any]],
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        adapter = self._dcm_adapter()
+        self._ensure_graph_session(ledger)
+        prompt_contracts = self._verified_prompt_contracts()
+        model_identity = self._verified_model_identity()
+        publication = model_identity["publication"]
+        model_receipt_sha256 = publication["receipt_sha256"]
+        required_members = []
+        for seat in COUNCIL_SEATS:
+            registration = registrations[seat.seat_id]
+            if (
+                registration["dcm_v2_prompt_contract_sha256"]
+                != prompt_contracts.get(seat.seat_id)
+                or registration["requested_alias"]
+                not in model_identity["served_aliases"]
+            ):
+                raise CouncilTransportFailure(
+                    f"{seat.seat_id} prompt or model registration is not independently reproducible"
+                )
+            required_members.append(
+                {
+                    "seat_id": seat.seat_id,
+                    "role": seat.role_id,
+                    "prompt_contract_sha256": prompt_contracts[seat.seat_id],
+                    "model_identity_receipt_sha256": model_receipt_sha256,
+                }
+            )
+        prior_waves = [
+            event["dcm_wave_id"]
+            for event in ledger.events()
+            if event.get("event_type") == "wave_dispatch_prepared"
+            and isinstance(event.get("dcm_wave_id"), str)
+        ]
+        parent_wave_id = prior_waves[-1] if prior_waves else None
+        opened = ledger.opened_event()
+        wave = adapter.mesh.open_wave(
+            ledger.round_id,
+            round=1,
+            phase=phase,
+            prompt_id=str(opened["executive_event_id"]),
+            prompt_revision=prompt_revision,
+            prompt_messages=[{"role": "user", "content": body}],
+            attachment_evidence_digests=[],
+            request_revision=1,
+            required_members=required_members,
+            request_contract=prompt_producer.DCM_REQUEST_CONTRACT,
+            parent_wave_id=parent_wave_id,
+        )
+        return wave, publication
+
     def _seat_log(self, seat: CouncilSeat) -> Path:
         return self.council_log_dir / f"{seat.seat_id}.jsonl"
+
+    def _result_key(self, round_id: str) -> str:
+        return f"{self.key_prefix}:dcm:native:round:{round_id}:results"
 
     def _matching_outcome(
         self,
         seat: CouncilSeat,
         *,
-        request_id: str,
-        round_id: str,
-        prompt_revision: int,
-        expected_process_generation: str,
+        request: dict[str, Any],
     ) -> dict[str, Any] | None:
-        matching: dict[str, Any] | None = None
-        for event in _read_jsonl(self._seat_log(seat)):
+        receipts = []
+        for raw in self.redis.lrange(self._result_key(request["dcm_session_id"]), 0, -1):
+            try:
+                receipt = json.loads(raw)
+            except (TypeError, json.JSONDecodeError) as exc:
+                raise CouncilTransportFailure(
+                    "DCM result list contains a non-JSON receipt"
+                ) from exc
+            if not isinstance(receipt, dict):
+                raise CouncilTransportFailure(
+                    "DCM result list contains a non-object receipt"
+                )
+            if receipt.get("request_id") == request["request_id"]:
+                receipts.append(receipt)
+        if not receipts:
+            return None
+        if len(receipts) != 1:
+            raise CouncilTransportFailure(
+                f"{seat.seat_id} has duplicate DCM terminal receipts"
+            )
+        receipt = receipts[0]
+        stated_receipt_sha256 = receipt.get("receipt_sha256")
+        unhashed_receipt = {
+            key: value for key, value in receipt.items() if key != "receipt_sha256"
+        }
+        if stated_receipt_sha256 != prompt_producer.canonical_sha256(
+            unhashed_receipt
+        ):
+            raise CouncilTransportFailure(
+                f"{seat.seat_id} DCM transport receipt digest is invalid"
+            )
+        expected = {
+            "contract": "taey-native-dcm-receipt/v2",
+            "receipt_kind": "transport",
+            "session_id": request["dcm_session_id"],
+            "correlation_id": request["dcm_session_id"],
+            "wave_id": request["wave_id"],
+            "round": request["round"],
+            "phase": request["phase"],
+            "seat_id": seat.seat_id,
+            "role": seat.role_id,
+            "request_revision": request["request_revision"],
+            "request_id": request["request_id"],
+            "stage": "terminal_acknowledged",
+            "delivery_id": request["delivery_id"],
+            "request_contract": prompt_producer.DCM_REQUEST_CONTRACT,
+            "prompt_contract_sha256": request["prompt_contract_sha256"],
+            "model_identity_receipt_sha256": request[
+                "model_identity_receipt_sha256"
+            ],
+        }
+        mismatched = [
+            field for field, value in expected.items() if receipt.get(field) != value
+        ]
+        adapter = self._dcm_adapter()
+        wave = adapter.mesh.read_wave(
+            request["dcm_session_id"],
+            request["wave_id"],
+        )
+        slots = [
+            slot
+            for slot in wave["slots"]
+            if slot.get("request_id") == request["request_id"]
+        ]
+        if len(slots) != 1:
+            raise CouncilTransportFailure(
+                f"{seat.seat_id} receipt does not resolve to one graph slot"
+            )
+        slot = slots[0]
+        request_identity = slot.get("request_identity")
+        request_identity_fields = (
+            "session_id",
+            "wave_id",
+            "round",
+            "phase",
+            "prompt_id",
+            "prompt_revision",
+            "prompt_sha256",
+            "seat_id",
+            "role",
+            "request_revision",
+            "parent_frontier_sha256",
+            "process_generation_expected",
+            "model_endpoint",
+            "requested_alias",
+            "model_manifest_sha256",
+            "model_content_sha256",
+            "serving_container_digest",
+            "request_contract",
+            "prompt_contract_sha256",
+            "model_identity_receipt_sha256",
+        )
+        expected_request_identity = {
+            field: request[field] for field in request_identity_fields
+        }
+        if request_identity != expected_request_identity:
+            raise CouncilTransportFailure(
+                f"{seat.seat_id} Redis delivery differs from graph request identity"
+            )
+        claim_observation = slot.get("claim_observation")
+        observed_generation = (
+            claim_observation.get("process_generation_observed")
+            if isinstance(claim_observation, dict)
+            else None
+        )
+        served_alias = (
+            claim_observation.get("served_alias")
+            if isinstance(claim_observation, dict)
+            else None
+        )
+        expected_prompt = {
+            "prompt_id": request["prompt_id"],
+            "revision": request["prompt_revision"],
+            "sha256": request["prompt_sha256"],
+        }
+        expected_frontier = {
+            "parent_contribution_ids": request["parent_contribution_ids"],
+            "parent_frontier_sha256": request["parent_frontier_sha256"],
+            "claimed_peers": request["parent_contribution_ids"],
+            "peers_present": request["parent_contribution_ids"],
+        }
+        receipt_execution = receipt.get("execution")
+        if not isinstance(receipt_execution, dict):
+            raise CouncilTransportFailure(
+                f"{seat.seat_id} DCM transport receipt has no execution binding"
+            )
+        expected_execution = {
+            "model_endpoint": request["model_endpoint"],
+            "process_generation_expected": request[
+                "process_generation_expected"
+            ],
+            "process_generation_observed": observed_generation,
+            "requested_alias": request["requested_alias"],
+            "served_alias": served_alias,
+            "model_manifest_sha256": request["model_manifest_sha256"],
+            "model_content_sha256": request["model_content_sha256"],
+            "serving_container_digest": request["serving_container_digest"],
+        }
+        if receipt.get("prompt") != expected_prompt:
+            mismatched.append("prompt")
+        if receipt.get("frontier") != expected_frontier:
+            mismatched.append("frontier")
+        if receipt.get("execution") != expected_execution:
+            mismatched.append("execution")
+        if receipt.get("graph") != {
+            "uri": adapter.mesh.DCM_NEO4J_URI,
+            "database": adapter.mesh.DCM_NEO4J_DATABASE,
+        }:
+            mismatched.append("graph")
+        if mismatched:
+            raise CouncilTransportFailure(
+                f"{seat.seat_id} DCM transport receipt changed fields "
+                f"{sorted(set(mismatched))}"
+            )
+        if receipt.get("terminal_outcome") == "contributed":
+            contributions = [
+                contribution
+                for contribution in wave["contributions"]
+                if contribution.get("contrib_id") == receipt.get("contrib_id")
+            ]
             if (
-                event.get("event_type") == "turn_outcome"
-                and str(event.get("request_id") or "") == request_id
-                and str(event.get("round_id") or "") == round_id
-                and int(event.get("prompt_revision") or 0) == prompt_revision
+                len(contributions) != 1
+                or slot.get("state") != "contributed"
+                or receipt.get("inference_performed") is not True
+                or slot.get("contrib_id") != receipt.get("contrib_id")
+                or contributions[0].get("contribution_receipt_sha256")
+                != receipt.get("contribution_receipt_sha256")
+                or not isinstance(
+                    contributions[0].get("structured_content"),
+                    dict,
+                )
             ):
-                if (
-                    event.get("process_generation")
-                    != expected_process_generation
-                ):
-                    raise CouncilTransportFailure(
-                        f"{seat.seat_id} outcome process generation mismatch"
-                    )
-                matching = event
-        return matching
+                raise CouncilTransportFailure(
+                    f"{seat.seat_id} contribution receipt is not graph-authoritative"
+                )
+            graph_receipt_sha256 = contributions[0][
+                "contribution_receipt_sha256"
+            ]
+            contribution = contributions[0]["structured_content"]
+            ok = True
+            error = None
+        else:
+            outcome_record = slot.get("outcome_record")
+            if (
+                slot.get("terminal_outcome")
+                != receipt.get("terminal_outcome")
+                or slot.get("inference_performed")
+                != receipt.get("inference_performed")
+                or receipt.get("contrib_id") is not None
+                or receipt.get("contribution_receipt_sha256") is not None
+                or not isinstance(outcome_record, dict)
+                or receipt.get("failure_stage")
+                != outcome_record.get("failure_stage")
+                or receipt.get("failure_detail_sha256")
+                != outcome_record.get("failure_detail_sha256")
+            ):
+                raise CouncilTransportFailure(
+                    f"{seat.seat_id} failure receipt is not graph-authoritative"
+                )
+            graph_receipt_sha256 = outcome_record.get("outcome_record_sha256")
+            contribution = None
+            ok = False
+            error = (
+                f"DCM request ended as {receipt.get('terminal_outcome')} at "
+                f"{receipt.get('failure_stage')}"
+            )
+        expected_acknowledgement = prompt_producer.canonical_sha256(
+            {
+                "delivery_id": request["delivery_id"],
+                "graph_receipt_sha256": graph_receipt_sha256,
+                "request_id": request["request_id"],
+                "terminal_outcome": receipt["terminal_outcome"],
+            }
+        )
+        if receipt.get("acknowledgement_id") != expected_acknowledgement:
+            raise CouncilTransportFailure(
+                f"{seat.seat_id} acknowledgement is not bound to graph truth"
+            )
+        return {
+            "ok": ok,
+            "event_id": receipt["acknowledgement_id"],
+            "process_generation": request["expected_process_generation"],
+            "proxy_turn_id": None,
+            "contribution": contribution,
+            "error": error,
+            "kind": (
+                "council_contribution"
+                if ok
+                else f"dcm_{receipt['terminal_outcome']}"
+            ),
+            "inference_state": (
+                "completed"
+                if ok
+                else "failed"
+                if receipt["inference_performed"]
+                else "not_started"
+            ),
+            "dcm_transport_receipt": receipt,
+        }
 
     def _message_id(
         self,
@@ -981,7 +1371,7 @@ class NativeCouncilTransport:
         revealed: list[dict[str, Any]] | None,
     ) -> str:
         packet: dict[str, Any] = {
-            "council_protocol": "taey-native-dcm/v1",
+            "council_protocol": "taey-native-dcm/v2",
             "phase": phase,
             "prompt_revision": prompt_revision,
             "request": prompt,
@@ -1016,9 +1406,110 @@ class NativeCouncilTransport:
         phase: str,
         prompt_revision: int,
         registrations: dict[str, dict[str, Any]],
+        wave: dict[str, Any],
+        model_identity: dict[str, Any] | None,
     ) -> dict[str, dict[str, Any]]:
-        return {
-            seat.seat_id: {
+        adapter = self._dcm_adapter()
+        requests = {}
+        for seat in COUNCIL_SEATS:
+            slots = [
+                slot
+                for slot in wave["slots"]
+                if slot.get("seat_id") == seat.seat_id
+                and slot.get("role") == seat.role_id
+                and slot.get("request_revision") == 1
+            ]
+            if len(slots) != 1:
+                raise CouncilTransportFailure(
+                    f"{seat.seat_id} does not resolve to one immutable graph slot"
+                )
+            slot = slots[0]
+            registration = registrations[seat.seat_id]
+            request_identity = slot.get("request_identity")
+            if request_identity is None:
+                if model_identity is None:
+                    raise CouncilTransportFailure(
+                        f"{seat.seat_id} graph request identity is missing"
+                    )
+                receipt = model_identity["receipt"]
+                request_identity = {
+                    "session_id": wave["session_id"],
+                    "wave_id": wave["wave_id"],
+                    "round": wave["round"],
+                    "phase": wave["phase"],
+                    "prompt_id": wave["prompt_id"],
+                    "prompt_revision": wave["prompt_revision"],
+                    "prompt_sha256": wave["prompt_sha256"],
+                    "seat_id": seat.seat_id,
+                    "role": seat.role_id,
+                    "request_revision": 1,
+                    "parent_frontier_sha256": wave[
+                        "parent_frontier_sha256"
+                    ],
+                    "process_generation_expected": registration[
+                        "process_generation"
+                    ],
+                    "model_endpoint": registration["model_endpoint"],
+                    "requested_alias": registration["requested_alias"],
+                    "model_manifest_sha256": receipt["model"][
+                        "model_manifest_sha256"
+                    ],
+                    "model_content_sha256": receipt["model"][
+                        "model_content_sha256"
+                    ],
+                    "serving_container_digest": receipt["serving"][
+                        "image_digest"
+                    ],
+                    "request_contract": prompt_producer.DCM_REQUEST_CONTRACT,
+                    "prompt_contract_sha256": slot[
+                        "prompt_contract_sha256"
+                    ],
+                    "model_identity_receipt_sha256": slot[
+                        "model_identity_receipt_sha256"
+                    ],
+                }
+            expected_registration = {
+                "seat_id": seat.seat_id,
+                "role": seat.role_id,
+                "process_generation_expected": registration[
+                    "process_generation"
+                ],
+                "model_endpoint": registration["model_endpoint"],
+                "requested_alias": registration["requested_alias"],
+                "prompt_contract_sha256": registration[
+                    "dcm_v2_prompt_contract_sha256"
+                ],
+            }
+            mismatched = [
+                field
+                for field, value in expected_registration.items()
+                if request_identity.get(field) != value
+            ]
+            if mismatched:
+                raise CouncilTransportFailure(
+                    f"{seat.seat_id} graph request differs from its durable registration: "
+                    f"{sorted(mismatched)}"
+                )
+            request_id = adapter.mesh.canonical_wave_request_id(
+                request_identity
+            )
+            adapter.mesh.reserve_wave_request(
+                ledger.round_id,
+                wave["wave_id"],
+                role=seat.role_id,
+                request_revision=1,
+                request_identity=request_identity,
+                parent_contribution_ids=wave["parent_contribution_ids"],
+            )
+            requests[seat.seat_id] = {
+                **request_identity,
+                "dcm_session_id": ledger.round_id,
+                "delivery_id": self._message_id(
+                    ledger.round_id,
+                    prompt_revision,
+                    phase,
+                    seat,
+                ),
                 "seat_id": seat.seat_id,
                 "role_id": seat.role_id,
                 "message_id": self._message_id(
@@ -1027,18 +1518,15 @@ class NativeCouncilTransport:
                     phase,
                     seat,
                 ),
-                "request_id": self._request_id(
-                    ledger.round_id,
-                    prompt_revision,
-                    phase,
-                    seat,
+                "request_id": request_id,
+                "parent_contribution_ids": list(
+                    wave["parent_contribution_ids"]
                 ),
                 "expected_process_generation": registrations[seat.seat_id][
                     "process_generation"
                 ],
             }
-            for seat in COUNCIL_SEATS
-        }
+        return requests
 
     def _dispatch_state(
         self,
@@ -1073,13 +1561,8 @@ class NativeCouncilTransport:
         prompt_revision: int,
         body: str,
         registrations: dict[str, dict[str, Any]],
+        requests: dict[str, dict[str, Any]],
     ) -> dict[str, dict[str, Any]]:
-        requests = self._wave_requests(
-            ledger=ledger,
-            phase=phase,
-            prompt_revision=prompt_revision,
-            registrations=registrations,
-        )
         encoded_requests: list[tuple[str, str]] = []
         requested_at = time.time()
         for seat in COUNCIL_SEATS:
@@ -1100,6 +1583,41 @@ class NativeCouncilTransport:
                 "round_phase": phase,
                 "expected_process_generation": request[
                     "expected_process_generation"
+                ],
+                "request_contract": request["request_contract"],
+                "delivery_id": request["delivery_id"],
+                "dcm_session_id": request["dcm_session_id"],
+                "wave_id": request["wave_id"],
+                "round": request["round"],
+                "phase": request["phase"],
+                "prompt_id": request["prompt_id"],
+                "prompt_sha256": request["prompt_sha256"],
+                "seat_id": request["seat_id"],
+                "role": request["role"],
+                "request_revision": request["request_revision"],
+                "parent_contribution_ids": request[
+                    "parent_contribution_ids"
+                ],
+                "parent_frontier_sha256": request[
+                    "parent_frontier_sha256"
+                ],
+                "process_generation_expected": request[
+                    "process_generation_expected"
+                ],
+                "model_endpoint": request["model_endpoint"],
+                "requested_alias": request["requested_alias"],
+                "model_manifest_sha256": request[
+                    "model_manifest_sha256"
+                ],
+                "model_content_sha256": request["model_content_sha256"],
+                "serving_container_digest": request[
+                    "serving_container_digest"
+                ],
+                "prompt_contract_sha256": request[
+                    "prompt_contract_sha256"
+                ],
+                "model_identity_receipt_sha256": request[
+                    "model_identity_receipt_sha256"
                 ],
             }
             encoded = json.dumps(
@@ -1200,6 +1718,15 @@ class NativeCouncilTransport:
             or not registration.get("process_generation")
             or registration.get("response_contract")
             != "taey-council-contribution/v1"
+            or registration.get("prompt_contract_producer_state")
+            != "self_asserted_unverified"
+            or not model_identity_status.is_sha256(
+                registration.get("dcm_v2_prompt_contract_sha256")
+            )
+            or not isinstance(registration.get("model_endpoint"), str)
+            or not registration["model_endpoint"].strip()
+            or not isinstance(registration.get("requested_alias"), str)
+            or not registration["requested_alias"].strip()
             or registration.get("readiness") != "ready"
             or type(registration.get("pid")) is not int
             or registration["pid"] <= 0
@@ -1212,6 +1739,11 @@ class NativeCouncilTransport:
             )
         return {
             "process_generation": registration["process_generation"],
+            "dcm_v2_prompt_contract_sha256": registration[
+                "dcm_v2_prompt_contract_sha256"
+            ],
+            "model_endpoint": registration["model_endpoint"],
+            "requested_alias": registration["requested_alias"],
             "ttl_seconds": ttl_seconds,
             "raw_registration": raw_registration,
         }
@@ -1293,6 +1825,13 @@ class NativeCouncilTransport:
                     or registration.get("role_id") != seat.role_id
                     or not registration.get("process_generation")
                     or not isinstance(registration.get("raw_registration"), str)
+                    or not model_identity_status.is_sha256(
+                        registration.get("dcm_v2_prompt_contract_sha256")
+                    )
+                    or not isinstance(registration.get("model_endpoint"), str)
+                    or not registration["model_endpoint"].strip()
+                    or not isinstance(registration.get("requested_alias"), str)
+                    or not registration["requested_alias"].strip()
                     or type(registration.get("ttl_seconds")) is not int
                     or registration["ttl_seconds"] <= 0
                 ):
@@ -1309,11 +1848,62 @@ class NativeCouncilTransport:
                 seat.seat_id: self._live_seat_registration(seat)
                 for seat in COUNCIL_SEATS
             }
+        adapter = self._dcm_adapter()
+        if matching_events:
+            prepared = matching_events[0]
+            wave_id = prepared.get("dcm_wave_id")
+            if not isinstance(wave_id, str):
+                raise CouncilTransportFailure(
+                    "durable council wave preparation has no DCM wave identity"
+                )
+            wave = adapter.mesh.read_wave(ledger.round_id, wave_id)
+            expected_prompt_sha256 = adapter.mesh.canonical_prompt_sha256(
+                [{"role": "user", "content": body}],
+                [],
+            )
+            if (
+                wave.get("phase") != phase
+                or wave.get("prompt_revision") != prompt_revision
+                or wave.get("prompt_sha256") != expected_prompt_sha256
+                or wave.get("wave_fingerprint")
+                != prepared.get("dcm_wave_fingerprint")
+                or wave.get("request_contract")
+                != prompt_producer.DCM_REQUEST_CONTRACT
+            ):
+                raise CouncilTransportFailure(
+                    "durable council preparation differs from its graph wave"
+                )
+            model_identity = None
+        else:
+            wave, model_identity = self._open_graph_wave(
+                ledger=ledger,
+                phase=phase,
+                prompt_revision=prompt_revision,
+                body=body,
+                registrations=registrations,
+            )
+        requests = self._wave_requests(
+            ledger=ledger,
+            phase=phase,
+            prompt_revision=prompt_revision,
+            registrations=registrations,
+            wave=wave,
+            model_identity=model_identity,
+        )
+        if not matching_events:
             ledger.append(
                 "wave_dispatch_prepared",
                 phase=phase,
                 prompt_revision=prompt_revision,
                 body_sha256=body_sha256,
+                request_contract=prompt_producer.DCM_REQUEST_CONTRACT,
+                dcm_wave_id=wave["wave_id"],
+                dcm_wave_fingerprint=wave["wave_fingerprint"],
+                dcm_parent_wave_id=wave.get("parent_wave_id"),
+                dcm_prompt_sha256=wave["prompt_sha256"],
+                model_identity_receipt_sha256=model_identity[
+                    "receipt_sha256"
+                ],
                 registrations={
                     seat.seat_id: {
                         "role_id": seat.role_id,
@@ -1323,12 +1913,6 @@ class NativeCouncilTransport:
                 },
             )
         if terminal_wave_events or dispatched_count == len(COUNCIL_SEATS):
-            requests = self._wave_requests(
-                ledger=ledger,
-                phase=phase,
-                prompt_revision=prompt_revision,
-                registrations=registrations,
-            )
             for request in requests.values():
                 request["enqueued"] = False
         else:
@@ -1338,6 +1922,7 @@ class NativeCouncilTransport:
                 prompt_revision=prompt_revision,
                 body=body,
                 registrations=registrations,
+                requests=requests,
             )
         wave_started = [
             event
@@ -1524,6 +2109,66 @@ class NativeCouncilTransport:
             return existing
         return ledger.append(event_type, **expected)
 
+    def _close_graph_wave(
+        self,
+        requests: dict[str, dict[str, Any]],
+        *,
+        superseded_by_prompt_revision: int | None = None,
+    ) -> dict[str, Any]:
+        identities = {
+            (request["dcm_session_id"], request["wave_id"])
+            for request in requests.values()
+        }
+        if len(identities) != 1:
+            raise CouncilTransportFailure(
+                "council requests do not share one graph wave identity"
+            )
+        session_id, wave_id = identities.pop()
+        adapter = self._dcm_adapter()
+        closed = adapter.mesh.close_wave(
+            session_id,
+            wave_id,
+            superseded_by_prompt_revision=superseded_by_prompt_revision,
+        )
+        expected_outcome = (
+            "superseded_revision"
+            if superseded_by_prompt_revision is not None
+            else "complete"
+        )
+        verification = adapter.mesh.verify_wave_coordination(
+            session_id,
+            wave_id,
+        )
+        if (
+            closed.get("status") != "closed"
+            or closed.get("close_outcome") != expected_outcome
+            or not verification.get("coordinated")
+        ):
+            raise CouncilTransportFailure(
+                f"graph wave did not close as {expected_outcome} with verified coordination"
+            )
+        return closed
+
+    def publish_graph_final(
+        self,
+        round_id: str,
+        final: str,
+    ) -> dict[str, Any]:
+        adapter = self._dcm_adapter()
+        session = adapter.mesh.read_session(round_id)
+        if session.get("final") is None:
+            adapter.mesh.publish_final(round_id, final)
+            session = adapter.mesh.read_session(round_id)
+        if session.get("status") != "closed" or session.get("final") != final:
+            raise CouncilTransportFailure(
+                "Main synthesis differs from the terminal DCM session"
+            )
+        return {
+            "dcm_session_id": round_id,
+            "dcm_graph_status": session["status"],
+            "dcm_final_sha256": prompt_producer.text_sha256(final),
+        }
+
     async def _wait_wave(
         self,
         ledger: RoundLedger,
@@ -1657,6 +2302,18 @@ class NativeCouncilTransport:
                     f"superseded {phase} wave revision {prompt_revision} "
                     "previously failed to drain"
                 )
+            self._close_graph_wave(
+                requests,
+                superseded_by_prompt_revision=(
+                    int(terminal_wave["latest_prompt_revision"])
+                    if terminal_wave["event_type"]
+                    in {
+                        "superseded_wave_drained",
+                        "superseded_wave_not_dispatched",
+                    }
+                    else None
+                ),
+            )
             return {
                 "superseded": terminal_wave["event_type"]
                 in {
@@ -1726,12 +2383,7 @@ class NativeCouncilTransport:
                 request = requests[seat_id]
                 outcome = self._matching_outcome(
                     seat,
-                    request_id=request["request_id"],
-                    round_id=ledger.round_id,
-                    prompt_revision=prompt_revision,
-                    expected_process_generation=request[
-                        "expected_process_generation"
-                    ],
+                    request=request,
                 )
                 if outcome is None:
                     continue
@@ -1877,6 +2529,10 @@ class NativeCouncilTransport:
                 contribution_count=len(contributions),
                 failure_count=len(failures),
             )
+            self._close_graph_wave(
+                requests,
+                superseded_by_prompt_revision=superseded_revision,
+            )
             return {
                 "superseded": True,
                 "contributions": contributions,
@@ -1898,6 +2554,7 @@ class NativeCouncilTransport:
             failure_count=len(failures),
             missing_seats=sorted(pending),
         )
+        self._close_graph_wave(requests)
         return {
             "superseded": False,
             "contributions": contributions,
@@ -2253,7 +2910,7 @@ class NativeCouncilTransport:
                     )
                     continue
                 packet = {
-                    "council_protocol": "taey-native-dcm/v1",
+                    "council_protocol": "taey-native-dcm/v2",
                     "conversation_id": ledger.conversation_id,
                     "round_id": ledger.round_id,
                     "prompt_revision": prompt_revision,

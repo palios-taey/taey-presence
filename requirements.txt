@@ -5,9 +5,9 @@ httpx>=0.26
 redis>=5.0
 python-dotenv>=1.0
 
-# Optional: DCM inter-worker state in Neo4j. Without it, the presence worker
-# runs Redis-only (peer-state writes are skipped, everything else works).
-neo4j>=5.0
+# Public graph authority and Taey-seat transaction adapter, pinned to the
+# independently accepted source merge.
+dcm-mesh @ git+https://github.com/palios-taey/dcm.git@980a845a79b73b0d7b5f222cfc9ccdd0e0f78e75
 
 # Required by the soma_proxy `fetch_url` tool (serving/soma_proxy.py:1248) —
 # trafilatura extracts article text from HTML, pypdf from PDFs. The imports are

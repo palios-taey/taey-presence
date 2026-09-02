@@ -141,8 +141,10 @@ An explicitly opted-in `taey-native-dcm-request/v2` seat request additionally wr
 inference. The receipt binds the exact ordered model messages, rendered response schema,
 ordered source-message digests, explicit no-attachment state, model selector, and the
 complete static prompt contract. Legacy council requests omit `request_contract` and
-retain their existing prompt, digest, and inference path. This producer receipt is not
-an authorization receipt and no DCM selector consumes it in this release.
+retain their existing prompt, digest, and inference path. The producer receipt is not an
+authorization receipt: the public DCM graph claim is. Main opens and reserves the exact
+v2 wave slot before Redis delivery; the seat adapter validates the frozen graph identity,
+claims it once, and can invoke the model only after that claim authorizes inference.
 
 The launcher starts `taey_council_seat.py`; it does not branch Main's
 `taey_seat.py` runtime. At startup, a supporting seat atomically publishes
@@ -160,15 +162,18 @@ lease, and council dispatch validates all seven ready generation leases before
 it enqueues any request. Stale `idle` state cannot certify a dead, recovering,
 or prior process.
 
-Before that atomic enqueue, the coordinator fsyncs the exact request-body
-digest and all seven process generations. Recovery accepts only zero dispatch
+Before that atomic enqueue, the coordinator opens the public DCM wave, reserves all
+seven exact request identities, and fsyncs the wave identity, request-body digest,
+and process generations. Recovery accepts only zero dispatch
 tokens or all seven; a partial token set fails the round. A prior revision with
 zero tokens and no durable seat start is recorded as never dispatched and is
 not sent after supersession. An all-seven prior revision is drained without a
 second enqueue. Any durable seat start with missing dispatch tokens is an
-identity-loss failure. Durable wave results and reveal packets replay in
-canonical seat order, and already recorded seat, wave, and reveal events are
-validated instead of appended again.
+identity-loss failure. Durable wave results and reveal packets replay in canonical
+seat order. Main consumes Redis terminal receipts only after verifying their request,
+acknowledgement, slot, and contribution identity against Neo4j. Already recorded seat,
+wave, and reveal events are validated instead of appended again; seat JSONL is not
+consulted as deliberation authority.
 
 Claims use generation-specific processing lists. After a crash, the next live
 generation does not requeue or re-infer a request pinned to the dead process.
@@ -187,9 +192,9 @@ contribution-validation failure similarly writes one
 request, and records a failed seat; it is never requeued for another inference.
 Only `side_effect_uncertain` full-stops the wave and round. A
 `completed_invalid` seat result may be synthesized with the other valid seat
-contributions. Neo4j DCM becomes the terminal authority when the
-public graph adapter is enabled; JSONL remains the current durable handoff
-record during this migration step.
+contributions. Neo4j DCM is the terminal deliberation authority. Redis owns delivery
+and acknowledgement; JSONL retains diagnostic, recovery, and UI-projection records but
+cannot authorize a next wave or Main synthesis.
 
 This is a fail-closed registration transition. A coordinator running this
 revision rejects the older permanent registration shape. Reconcile outstanding
@@ -935,6 +940,14 @@ namespace recover through ordinary lease expiry.
 | `TAEY_COUNCIL_SHARED_PROMPT_PATH` | *(empty)* | shared supporting-seat contract; required by `taey_council_seat.py` |
 | `TAEY_COUNCIL_ROLE_PROMPT_PATH` | *(empty)* | seat-specific role prompt; required by `taey_council_seat.py` |
 | `TAEY_COUNCIL_SESSIONS_DIR` | `$TAEY_SESSIONS_DIR/council` | private transcript root used by the council launcher |
+| `DCM_NEO4J_URI` | *(none for v2 dispatch)* | explicit public DCM graph URI; v2 council dispatch fails closed when absent |
+| `DCM_NEO4J_DATABASE` | *(none for v2 dispatch)* | explicit DCM database; keep it distinct from the orchestrator graph |
+| `DCM_NEO4J_USER` / `DCM_NEO4J_PASSWORD` | *(unset)* | graph credentials; both are required together for an authenticated target |
+| `DCM_ALLOW_INSECURE` | *(unset)* | set to `1` only to authorize an unauthenticated non-loopback DCM target |
+| `TAEY_MODEL_IDENTITY_AUTHORITY_ID` | *(empty)* | committed Ed25519 trust-root identifier for the serving-host publication |
+| `TAEY_MODEL_IDENTITY_REDIS_HOST` / `TAEY_MODEL_IDENTITY_REDIS_PORT` | *(empty)* / `6379` | Redis authority carrying the short-lived signed model publication |
+| `TAEY_MODEL_IDENTITY_UPSTREAM_COMPLETION_ENDPOINT` | *(empty)* | exact Thor/vLLM completion endpoint bound by the signed publication |
+| `TAEY_MODEL_IDENTITY_EXPECTED_ALIASES` | *(empty)* | whitespace-separated complete alias set, for example `ep3 taey` |
 
 The seat's proxy request has no fixed elapsed-time deadline. It ends on a natural
 terminal response, an explicit cancellation, a downstream failure, or process

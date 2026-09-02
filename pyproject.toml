@@ -10,15 +10,13 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
 dependencies = [
+    "dcm-mesh @ git+https://github.com/palios-taey/dcm.git@980a845a79b73b0d7b5f222cfc9ccdd0e0f78e75",
     "fastapi>=0.110",
     "uvicorn[standard]>=0.27",
     "httpx>=0.26",
     "redis>=5.0",
     "python-dotenv>=1.0",
 ]
-
-[project.optional-dependencies]
-dcm = ["neo4j>=5.0"]
 
 [tool.setuptools]
 packages = ["presence", "soma", "dashboard"]

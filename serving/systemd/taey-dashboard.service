@@ -8,6 +8,7 @@ Type=simple
 WorkingDirectory=@TAEY_ROOT@
 Environment=HOME=@TAEY_HOME@
 Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=@TAEY_ROOT@/.env
 Environment=REDIS_HOST=127.0.0.1
 Environment=REDIS_PORT=6379
 # Wave window sized from measurement, not hope: on 2026-08-11 a 7-seat wave took

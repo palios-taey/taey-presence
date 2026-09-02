@@ -32,6 +32,12 @@ def install_import_only_redis_stub() -> None:
     sys.modules["redis"] = redis_stub
 
 
+def install_import_only_dcm_stub() -> None:
+    if importlib.util.find_spec("taey_adapter") is not None:
+        return
+    sys.modules["taey_adapter"] = ModuleType("taey_adapter")
+
+
 def main() -> int:
     manifest = producer.load_manifest(MANIFEST_PATH)
     require(len(manifest.seats) == 7, "production manifest seat count changed")
@@ -209,6 +215,7 @@ def main() -> int:
             }
         )
         install_import_only_redis_stub()
+        install_import_only_dcm_stub()
         import taey_council_seat as runtime
 
         runtime_manifest, runtime_seat, runtime_contract = (
@@ -241,10 +248,29 @@ def main() -> int:
             payload={
                 "type": "council_request",
                 "body": "exact evidence",
+                "delivery_id": "m1",
                 "request_id": "dcm-request-1",
                 "council_run_id": "dcm-round-1",
                 "round_id": "dcm-round-1",
+                "dcm_session_id": "dcm-round-1",
+                "wave_id": "wave-dcm-1",
+                "round": 1,
+                "phase": "independent",
+                "prompt_id": "prompt-1",
                 "prompt_revision": 1,
+                "prompt_sha256": "sha256:" + ("b" * 64),
+                "seat_id": seat.seat_id,
+                "role": seat.role_id,
+                "request_revision": 1,
+                "parent_contribution_ids": [],
+                "parent_frontier_sha256": "sha256:" + ("c" * 64),
+                "process_generation_expected": runtime.PROCESS_GENERATION,
+                "expected_process_generation": runtime.PROCESS_GENERATION,
+                "model_endpoint": runtime.executive.PROXY_URL,
+                "requested_alias": runtime.executive.MODEL,
+                "model_manifest_sha256": "sha256:" + ("d" * 64),
+                "model_content_sha256": "sha256:" + ("e" * 64),
+                "serving_container_digest": "sha256:" + ("f" * 64),
                 "request_contract": producer.DCM_REQUEST_CONTRACT,
                 "prompt_contract_sha256": store.dcm_v2_prompt_contract_sha256,
                 "model_identity_receipt_sha256": "sha256:" + ("a" * 64),

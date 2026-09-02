@@ -97,9 +97,11 @@ FastAPI dashboard renders all of it.
   path on and retains an explicit Council toggle for per-prompt opt-out. A
   leading `/no-council`, `[council:off]`, or “do not use the council/DCM”
   directive also opts out for that prompt without changing the toggle.
-  Append-only 0600 JSONL is the round source of truth; Redis holds only active
-  routing and idempotent dispatch projections. Production acceptance remains a
-  separate gate.
+  The public Neo4j DCM session is the deliberation authority: Main reserves each
+  role request there before Redis delivery, seats commit there before Redis
+  acknowledgement, and Main reads the committed contribution before advancing.
+  Append-only 0600 JSONL retains UI projection and recovery diagnostics only.
+  Production acceptance remains a separate gate.
 - **Live, UI-safe council ledger** — open rounds stream seat-started, status,
   evidence, hypothesis, contribution, dissent, failure, revision, and synthesis
   events. These are structured work products and provenance, not hidden
@@ -128,7 +130,9 @@ the *work* is. Ask the endpoint what it is serving.
   back into a worker's decisions, and there is no live multi-worker coordination
   *through this path* today. This is a narrow, checkable gap in this repo's presence
   worker; it is **not** a statement about the council, which is built and running.
-  Neo4j stays fully optional — without it the presence worker runs Redis-only.
+  Neo4j stays optional for that presence-worker path. The explicitly enabled
+  Taey-native council has a separate required `DCM_NEO4J_*` graph contract and
+  fails closed instead of degrading to Redis-only deliberation.
 - **Cross-machine presence *sync*.** Presence state coordinates through one Redis
   (and optionally one Neo4j) on a single trusted host. Cross-machine *inference* is
   routine — the proxy reaches whichever node serves — but the presence keys
@@ -180,15 +184,13 @@ fleet-notify ──claim──► taey_seat.py┘          │
 The optional Taey-native council path extends the same boundaries:
 
 ```
-Main UI prompt ──► durable round ledger ──► seven fleet-notify inboxes
-                         │                           │
-                         │                  private seat JSONL outcomes
-                         │                           │
-                         └── independent reveal ◄───┘
+Main UI prompt ──► public Neo4j DCM session/wave ──reserve──► Redis inboxes
+                                      ▲                           │
+                                      └────commit before ack──── seats
+                                      │                           │
+                               Main graph read ◄──── Redis receipt┘
                                       │
-                                critique wave
-                                      │
-                         Main-only synthesis ──► main.jsonl + UI
+                         Main-only synthesis ──► DCM final ──► UI
 ```
 
 ### Redis keys (the contract)
@@ -215,6 +217,7 @@ Main UI prompt ──► durable round ledger ──► seven fleet-notify inbox
 | `taey:soma:active_turns`, `taey:soma:gpu_busy` | soma proxy | global leased open-turn membership and its boolean projection |
 | `taey:dcm:native:conversation:<conversation>:active_round` | native council transport | the one open durable round projected for a UI conversation |
 | `taey:dcm:native:round:<round>:dispatched` | native council transport | idempotent seat/revision/phase dispatch tokens; expires after terminal projection |
+| `taey:dcm:native:round:<round>:results` | council seats | graph-bound terminal acknowledgements consumed by Main; never authoritative without the matching Neo4j slot/contribution |
 | `taey:dcm:native:seat_replacement` | council launcher | non-expiring, process-identity-owned, compare-deleted lifecycle fence that blocks atomic wave enqueue and council claims during seven-seat launch or replacement; a later manager may reclaim it only after proving the recorded local process is dead |
 
 ### Dashboard endpoints
@@ -244,20 +247,20 @@ Main UI prompt ──► durable round ledger ──► seven fleet-notify inbox
   The workers append the concrete endpoints they need (`/search`,
   `/v2/search/adaptive`, `/health`). Without the backend, the memory worker
   simply returns nothing.
-- **Neo4j** (optional) — only for DCM state writes. No auth; degrades to
-  Redis-only if absent. See scope note above.
+- **Neo4j** — optional for the partial-input presence workers, but required when
+  the Taey-native council is enabled. Council dispatch fails closed unless
+  `DCM_NEO4J_URI` and `DCM_NEO4J_DATABASE` are explicit.
 
-> **No auth, by design.** This stack assumes a trusted local network and passes
-> **no credentials** to Redis / Neo4j / the model endpoint. That is intentional
-> low-friction operation, not an oversight. Do not expose these ports to an
-> untrusted network; if you must, front them with your own auth — the code won't.
+> Redis and model endpoints assume a trusted local network. DCM accepts
+> `DCM_NEO4J_USER` / `DCM_NEO4J_PASSWORD` and refuses a non-loopback graph with
+> no credentials unless `DCM_ALLOW_INSECURE=1` is an explicit operator choice.
 
 ## Install & run
 
 ```bash
 git clone <this-repo> taey-presence && cd taey-presence
 python3 -m venv .venv && . .venv/bin/activate
-pip install -r requirements.txt            # add: pip install neo4j   (optional, for DCM)
+pip install -r requirements.txt
 cp .env.example .env                        # defaults already target localhost
 
 # Start Redis + your local LLM first, then the four processes:

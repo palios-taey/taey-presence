@@ -14,6 +14,8 @@ from typing import Any, Callable
 import redis
 
 import council_prompt_receipt as prompt_producer
+import model_identity_status
+import taey_adapter as dcm_adapter
 import taey_seat as executive
 
 
@@ -92,6 +94,24 @@ if removed == 1 and ARGV[3] == 'requeue' then
     else
         redis.call('RPUSH', KEYS[3], ARGV[2])
     end
+end
+return removed
+"""
+_ACK_DCM_OWNED_CLAIM_LUA = """
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then
+    return redis.error_reply('seat process generation is not current')
+end
+local processing_type = redis.call('TYPE', KEYS[2])['ok']
+if processing_type ~= 'none' and processing_type ~= 'list' then
+    return redis.error_reply('council processing key is not a list')
+end
+local result_type = redis.call('TYPE', KEYS[3])['ok']
+if result_type ~= 'none' and result_type ~= 'list' then
+    return redis.error_reply('DCM result key is not a list')
+end
+local removed = redis.call('LREM', KEYS[2], 1, ARGV[2])
+if removed == 1 then
+    redis.call('RPUSH', KEYS[3], ARGV[3])
 end
 return removed
 """
@@ -278,6 +298,25 @@ def _response_lineage(
         lineage["model_identity_receipt_sha256"] = payload[
             "model_identity_receipt_sha256"
         ]
+        dcm_fields = (
+            "delivery_id",
+            "dcm_session_id",
+            "wave_id",
+            "round",
+            "phase",
+            "prompt_id",
+            "prompt_sha256",
+            "request_revision",
+            "parent_contribution_ids",
+            "parent_frontier_sha256",
+            "process_generation_expected",
+            "model_endpoint",
+            "requested_alias",
+            "model_manifest_sha256",
+            "model_content_sha256",
+            "serving_container_digest",
+        )
+        lineage.update({field: payload[field] for field in dcm_fields})
     for field_name in ("council_run_id", "round_id"):
         value = payload.get(field_name)
         if value:
@@ -323,6 +362,24 @@ def _request_contract(
         raise executive.SeatFailure(
             "v2 model_identity_receipt_sha256 must be sha256:<64 lowercase hex>"
         )
+    claim = explicit[0]
+    expected = {
+        "delivery_id": claim.message_id,
+        "dcm_session_id": payload.get("round_id"),
+        "seat_id": executive.SESSION,
+        "role": ROLE_ID,
+        "process_generation_expected": PROCESS_GENERATION,
+        "expected_process_generation": PROCESS_GENERATION,
+        "model_endpoint": executive.PROXY_URL,
+        "requested_alias": executive.MODEL,
+    }
+    mismatched = [
+        field for field, value in expected.items() if payload.get(field) != value
+    ]
+    if mismatched:
+        raise executive.SeatFailure(
+            f"v2 request delivery differs from the live seat: {sorted(mismatched)}"
+        )
     return prompt_producer.DCM_REQUEST_CONTRACT, store.dcm_v2_prompt_contract_sha256
 
 
@@ -347,6 +404,22 @@ def _prompt_for(
                 "request_contract",
                 "prompt_contract_sha256",
                 "model_identity_receipt_sha256",
+                "delivery_id",
+                "dcm_session_id",
+                "wave_id",
+                "round",
+                "phase",
+                "prompt_id",
+                "prompt_sha256",
+                "request_revision",
+                "parent_contribution_ids",
+                "parent_frontier_sha256",
+                "process_generation_expected",
+                "model_endpoint",
+                "requested_alias",
+                "model_manifest_sha256",
+                "model_content_sha256",
+                "serving_container_digest",
             )
         )
     request_contract = {
@@ -456,6 +529,324 @@ def _validated_contribution(
     return contribution
 
 
+def _dcm_claim_observation(payload: dict[str, Any]) -> dict[str, Any]:
+    if not os.environ.get("DCM_NEO4J_URI") or not os.environ.get(
+        "DCM_NEO4J_DATABASE"
+    ):
+        raise executive.SeatFailure(
+            "DCM_NEO4J_URI and DCM_NEO4J_DATABASE are required for a v2 request"
+        )
+    raw_aliases = os.environ.get("TAEY_MODEL_IDENTITY_EXPECTED_ALIASES", "")
+    aliases = raw_aliases.split()
+    if not aliases or len(aliases) != len(set(aliases)):
+        raise executive.SeatFailure(
+            "TAEY_MODEL_IDENTITY_EXPECTED_ALIASES must name unique served aliases"
+        )
+    upstream_endpoint = os.environ.get(
+        "TAEY_MODEL_IDENTITY_UPSTREAM_COMPLETION_ENDPOINT",
+        "",
+    )
+    if not upstream_endpoint:
+        raise executive.SeatFailure(
+            "TAEY_MODEL_IDENTITY_UPSTREAM_COMPLETION_ENDPOINT is required"
+        )
+    try:
+        publication, _ = model_identity_status.read_publication(
+            sorted(aliases),
+            upstream_endpoint,
+            False,
+        )
+    except (OSError, TypeError, ValueError, model_identity_status.VerificationError) as exc:
+        raise executive.SeatFailure(
+            f"live model identity could not be verified: {exc}"
+        ) from exc
+    receipt = publication["receipt"]
+    requested_alias = payload.get("requested_alias")
+    served_aliases = [item["id"] for item in receipt["serving"]["aliases"]]
+    observed = {
+        "seat_id": executive.SESSION,
+        "process_generation_observed": PROCESS_GENERATION,
+        "model_endpoint": executive.PROXY_URL,
+        "served_alias": requested_alias,
+        "model_manifest_sha256": receipt["model"]["model_manifest_sha256"],
+        "model_content_sha256": receipt["model"]["model_content_sha256"],
+        "serving_container_digest": receipt["serving"]["image_digest"],
+        "prompt_contract_sha256": payload.get("prompt_contract_sha256"),
+        "model_identity_receipt_sha256": publication["receipt_sha256"],
+    }
+    expected = {
+        "requested_alias": requested_alias,
+        "model_manifest_sha256": observed["model_manifest_sha256"],
+        "model_content_sha256": observed["model_content_sha256"],
+        "serving_container_digest": observed["serving_container_digest"],
+        "model_identity_receipt_sha256": observed[
+            "model_identity_receipt_sha256"
+        ],
+    }
+    mismatched = [
+        field for field, value in expected.items() if payload.get(field) != value
+    ]
+    if requested_alias not in served_aliases:
+        mismatched.append("requested_alias")
+    if mismatched:
+        raise executive.SeatFailure(
+            f"v2 request model identity differs from the signed live receipt: "
+            f"{sorted(set(mismatched))}"
+        )
+    return observed
+
+
+def _graph_contribution(request: dict[str, Any], contrib_id: str) -> dict[str, Any]:
+    wave = dcm_adapter.mesh.read_wave(
+        request["dcm_session_id"],
+        request["wave_id"],
+    )
+    matches = [
+        contribution
+        for contribution in wave["contributions"]
+        if contribution.get("contrib_id") == contrib_id
+    ]
+    if len(matches) != 1 or not isinstance(
+        matches[0].get("structured_content"), dict
+    ):
+        raise executive.SeatFailure(
+            "acknowledged graph contribution is missing or ambiguous"
+        )
+    return matches[0]["structured_content"]
+
+
+def _run_dcm_turn(
+    *,
+    claim: executive.ClaimedMessage,
+    inbox: CouncilReliableInbox,
+    store: CouncilEventStore,
+    proxy: executive.ProxyClient,
+    liveness: SeatRegistrationLease,
+    lineage: dict[str, Any],
+    prompt: str,
+    messages: list[dict[str, str]],
+    contribution_format: dict[str, Any],
+    attempt_fields: dict[str, Any],
+    event_id: str,
+    correlation_id: str,
+    previously_attempted: bool,
+) -> str:
+    request = claim.payload
+
+    def acknowledge(receipt: dict[str, Any]) -> None:
+        liveness.assert_healthy()
+        inbox.acknowledge_dcm(claim, receipt)
+
+    wave = dcm_adapter.mesh.read_wave(
+        request["dcm_session_id"],
+        request["wave_id"],
+    )
+    matching_slots = [
+        slot
+        for slot in wave["slots"]
+        if slot.get("request_id") == request.get("request_id")
+    ]
+    if len(matching_slots) != 1:
+        raise executive.SeatFailure(
+            "v2 request does not resolve to one graph-reserved role slot"
+        )
+    slot = matching_slots[0]
+    if slot["state"] != "pending":
+        recovered = dcm_adapter.recover_wave_request(
+            request,
+            acknowledge=acknowledge,
+            emitter_process_generation=PROCESS_GENERATION,
+            terminal_outcome=(
+                "inference_failed" if previously_attempted else "dead_seat"
+            ),
+            inference_performed=previously_attempted,
+            failure_stage="dead_generation_recovery",
+            failure_detail=(
+                "a prior seat generation ended after a durable model-attempt marker"
+                if previously_attempted
+                else "a prior seat generation ended before a durable model-attempt marker"
+            ),
+        )
+        receipt = recovered["transport_receipt"]
+        if receipt["terminal_outcome"] != "contributed":
+            store.append(
+                "turn_outcome",
+                ok=False,
+                event_id=event_id,
+                correlation_id=correlation_id,
+                message_ids=[claim.message_id],
+                prompt=prompt,
+                error=(
+                    f"graph recovery closed request as "
+                    f"{receipt['terminal_outcome']}"
+                ),
+                kind="dcm_graph_terminal_failure",
+                skipped_inference=not receipt["inference_performed"],
+                inference_state=(
+                    "failed" if receipt["inference_performed"] else "not_started"
+                ),
+                dcm_transport_receipt=receipt,
+                context_visible=False,
+                conversation_visible=False,
+                **lineage,
+            )
+            raise executive.SeatFailure(
+                f"DCM request recovered as {receipt['terminal_outcome']}"
+            )
+        contribution = _graph_contribution(request, receipt["contrib_id"])
+        reply = json.dumps(
+            contribution,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        store.append(
+            "turn_outcome",
+            ok=True,
+            event_id=event_id,
+            correlation_id=correlation_id,
+            proxy_turn_id=None,
+            message_ids=[claim.message_id],
+            prompt=prompt,
+            reply=reply,
+            contribution=contribution,
+            role="assistant",
+            content=reply,
+            source=executive.SESSION,
+            source_id=receipt["contrib_id"],
+            kind="council_contribution",
+            dcm_transport_receipt=receipt,
+            context_visible=True,
+            conversation_visible=False,
+            **lineage,
+        )
+        store.remember_outcome(prompt, reply, [claim.message_id])
+        return reply
+
+    try:
+        claim_observation = _dcm_claim_observation(request)
+    except executive.SeatFailure as exc:
+        terminal = dcm_adapter.recover_wave_request(
+            request,
+            acknowledge=acknowledge,
+            emitter_process_generation=PROCESS_GENERATION,
+            terminal_outcome="model_identity_unproven",
+            inference_performed=False,
+            failure_stage="model_identity_verification",
+            failure_detail=f"{type(exc).__name__}: {exc}",
+            duplicate_dispatch=False,
+        )
+        receipt = terminal["transport_receipt"]
+        store.append(
+            "turn_outcome",
+            ok=False,
+            event_id=event_id,
+            correlation_id=correlation_id,
+            message_ids=[claim.message_id],
+            prompt=prompt,
+            error=str(exc),
+            kind="dcm_model_identity_terminal_failure",
+            skipped_inference=True,
+            inference_state="not_started",
+            dcm_transport_receipt=receipt,
+            context_visible=False,
+            conversation_visible=False,
+            **lineage,
+        )
+        raise
+
+    invoked: dict[str, Any] = {}
+
+    def invoke(_wave: dict[str, Any]) -> executive.ProxyResult:
+        store.append("turn_attempt", **attempt_fields)
+        liveness.assert_healthy()
+        result = proxy.ask(
+            prompt,
+            event_id=event_id,
+            correlation_id=correlation_id,
+            messages=messages,
+            response_format=contribution_format,
+        )
+        invoked["result"] = result
+        liveness.assert_healthy()
+        return result
+
+    def validate_response(
+        result: executive.ProxyResult,
+        _wave: dict[str, Any],
+    ) -> dict[str, Any]:
+        contribution = _validated_contribution(result.reply, lineage)
+        invoked["contribution"] = contribution
+        return contribution
+
+    try:
+        transaction = dcm_adapter.execute_wave_request(
+            request,
+            claim_observation,
+            invoke=invoke,
+            validate_response=validate_response,
+            acknowledge=acknowledge,
+            emitter_component="taey-council-seat",
+            emitter_process_generation=PROCESS_GENERATION,
+        )
+    except dcm_adapter.WaveRequestExecutionError as exc:
+        receipt = exc.receipt
+        store.append(
+            "turn_outcome",
+            ok=False,
+            event_id=event_id,
+            correlation_id=correlation_id,
+            message_ids=[claim.message_id],
+            prompt=prompt,
+            error=f"{type(exc).__name__}: {exc}",
+            kind="dcm_graph_terminal_failure",
+            skipped_inference=False,
+            inference_state="failed",
+            dcm_transport_receipt=receipt,
+            context_visible=False,
+            conversation_visible=False,
+            **lineage,
+        )
+        raise executive.SeatFailure(str(exc)) from exc
+
+    terminal = transaction["graph"]
+    receipt = transaction["transport_receipt"]
+    contribution = _graph_contribution(request, terminal["contrib_id"])
+    if invoked.get("contribution") is not None and (
+        invoked["contribution"] != contribution
+    ):
+        raise executive.SeatFailure(
+            "committed graph contribution differs from the validated model result"
+        )
+    reply = json.dumps(
+        contribution,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    result = invoked.get("result")
+    store.append(
+        "turn_outcome",
+        ok=True,
+        event_id=event_id,
+        correlation_id=correlation_id,
+        proxy_turn_id=result.turn_id if result is not None else None,
+        message_ids=[claim.message_id],
+        prompt=prompt,
+        reply=reply,
+        contribution=contribution,
+        role="assistant",
+        content=reply,
+        source=executive.SESSION,
+        source_id=terminal["contrib_id"],
+        kind="council_contribution",
+        dcm_transport_receipt=receipt,
+        context_visible=True,
+        conversation_visible=False,
+        **lineage,
+    )
+    store.remember_outcome(prompt, reply, [claim.message_id])
+    return reply
+
+
 def _ack_non_actionable_claims(
     claims: list[executive.ClaimedMessage],
     *,
@@ -553,6 +944,9 @@ def _run_turn(
     )
     prompt = _prompt_for(text, claims, lineage)
     message_ids = [claim.message_id for claim in claims]
+    previously_attempted = any(
+        message_id in store.attempted_message_ids for message_id in message_ids
+    )
     messages = store.messages_for(prompt)
     contribution_format = _contribution_response_format(lineage, store.seat)
     model_request = proxy.model_request_body(messages, contribution_format)
@@ -594,6 +988,22 @@ def _run_turn(
     }
     if producer_receipt is not None:
         attempt_fields["model_request_producer_receipt"] = producer_receipt
+    if request_contract == prompt_producer.DCM_REQUEST_CONTRACT:
+        return _run_dcm_turn(
+            claim=claims[0],
+            inbox=inbox,
+            store=store,
+            proxy=proxy,
+            liveness=liveness,
+            lineage=lineage,
+            prompt=prompt,
+            messages=messages,
+            contribution_format=contribution_format,
+            attempt_fields=attempt_fields,
+            event_id=event_id,
+            correlation_id=correlation_id,
+            previously_attempted=previously_attempted,
+        )
     store.append("turn_attempt", **attempt_fields)
     inference_state = "side_effect_uncertain"
     try:
@@ -833,6 +1243,47 @@ class CouncilReliableInbox(executive.ReliableInbox):
                 f"msg_id={claim.message_id}"
             )
 
+    def acknowledge_dcm(
+        self,
+        claim: executive.ClaimedMessage,
+        receipt: dict[str, Any],
+    ) -> None:
+        round_id = claim.payload.get("dcm_session_id")
+        if (
+            receipt.get("stage") != "terminal_acknowledged"
+            or receipt.get("session_id") != round_id
+            or receipt.get("request_id") != claim.payload.get("request_id")
+            or receipt.get("delivery_id") != claim.message_id
+        ):
+            raise executive.SeatFailure(
+                f"DCM acknowledgement does not match msg_id={claim.message_id}"
+            )
+        encoded = json.dumps(
+            receipt,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+        removed = int(
+            self.client.eval(
+                _ACK_DCM_OWNED_CLAIM_LUA,
+                3,
+                self.registration_key,
+                claim.source.processing_key,
+                f"{executive.KEY_PREFIX}:dcm:native:round:{round_id}:results",
+                self.registration,
+                claim.raw,
+                encoded,
+            )
+        )
+        if removed != 1:
+            raise executive.SeatFailure(
+                f"DCM ack lost generation-owned claim source={claim.source.name} "
+                f"msg_id={claim.message_id}"
+            )
+        self.store.completed_message_ids.add(claim.message_id)
+
     def _requeue(self, claim: executive.ClaimedMessage) -> None:
         if self._mutate_owned_claim(claim, "requeue") != 1:
             raise executive.SeatFailure(
@@ -865,6 +1316,82 @@ class CouncilReliableInbox(executive.ReliableInbox):
             payload.get("expected_process_generation") or "legacy-unbound"
         )
         inference_attempted = claim.message_id in self.store.attempted_message_ids
+        if payload.get("request_contract") == prompt_producer.DCM_REQUEST_CONTRACT:
+            recovered = dcm_adapter.recover_wave_request(
+                payload,
+                acknowledge=lambda receipt: self.acknowledge_dcm(claim, receipt),
+                emitter_process_generation=PROCESS_GENERATION,
+                terminal_outcome=(
+                    "inference_failed" if inference_attempted else "dead_seat"
+                ),
+                inference_performed=inference_attempted,
+                failure_stage="dead_generation_recovery",
+                failure_detail=(
+                    "dead generation left a durable model-attempt marker"
+                    if inference_attempted
+                    else "dead generation ended before a durable model-attempt marker"
+                ),
+            )
+            receipt = recovered["transport_receipt"]
+            if receipt["terminal_outcome"] == "contributed":
+                contribution = _graph_contribution(payload, receipt["contrib_id"])
+                reply = json.dumps(
+                    contribution,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+                self.store.append(
+                    "turn_outcome",
+                    ok=True,
+                    event_id=request_id,
+                    correlation_id=correlation_id,
+                    message_ids=[claim.message_id],
+                    request_id=request_id,
+                    council_run_id=payload.get("council_run_id"),
+                    round_id=payload.get("round_id"),
+                    prompt_revision=prompt_revision,
+                    seat_id=executive.SESSION,
+                    role_id=ROLE_ID,
+                    process_generation=dead_generation,
+                    recovered_by_process_generation=PROCESS_GENERATION,
+                    kind="dcm_contribution_recovered",
+                    contribution=contribution,
+                    reply=reply,
+                    dcm_transport_receipt=receipt,
+                    skipped_inference=True,
+                    inference_state="not_started",
+                    context_visible=False,
+                    conversation_visible=False,
+                )
+            else:
+                self.store.append(
+                    "turn_outcome",
+                    ok=False,
+                    event_id=request_id,
+                    correlation_id=correlation_id,
+                    message_ids=[claim.message_id],
+                    request_id=request_id,
+                    council_run_id=payload.get("council_run_id"),
+                    round_id=payload.get("round_id"),
+                    prompt_revision=prompt_revision,
+                    seat_id=executive.SESSION,
+                    role_id=ROLE_ID,
+                    process_generation=dead_generation,
+                    recovered_by_process_generation=PROCESS_GENERATION,
+                    kind="dcm_dead_generation_terminal",
+                    dcm_transport_receipt=receipt,
+                    skipped_inference=not receipt["inference_performed"],
+                    inference_state=(
+                        "failed" if receipt["inference_performed"] else "not_started"
+                    ),
+                    error=(
+                        f"graph recovery closed request as "
+                        f"{receipt['terminal_outcome']}"
+                    ),
+                    context_visible=False,
+                    conversation_visible=False,
+                )
+            return
         self.store.append(
             "turn_outcome",
             ok=False,
@@ -1045,6 +1572,8 @@ def _register_at_rest_liveness(
         "dcm_v2_prompt_contract_sha256": store.dcm_v2_prompt_contract_sha256,
         "prompt_contract_producer_state": "self_asserted_unverified",
         "response_contract": RESPONSE_CONTRACT,
+        "model_endpoint": executive.PROXY_URL,
+        "requested_alias": executive.MODEL,
         "liveness_ttl_seconds": ttl_seconds,
         "pid": os.getpid(),
         "registered_at": registered_at,
