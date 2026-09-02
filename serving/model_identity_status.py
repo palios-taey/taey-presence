@@ -178,9 +178,21 @@ def verify_signature(publication: dict[str, Any], authority_id: str) -> None:
     except (TypeError, ValueError) as error:
         raise VerificationError("model identity publication signature is invalid") from error
     signed = {key: value for key, value in publication.items() if key != "signature_base64"}
-    with tempfile.NamedTemporaryFile() as signature_file:
+    signed_bytes = json.dumps(
+        signed,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    with (
+        tempfile.NamedTemporaryFile() as signature_file,
+        tempfile.NamedTemporaryFile() as payload_file,
+    ):
         signature_file.write(signature)
         signature_file.flush()
+        payload_file.write(signed_bytes)
+        payload_file.flush()
         verified = subprocess.run(
             [
                 "openssl",
@@ -192,14 +204,9 @@ def verify_signature(publication: dict[str, Any], authority_id: str) -> None:
                 str(public_key),
                 "-sigfile",
                 signature_file.name,
+                "-in",
+                payload_file.name,
             ],
-            input=json.dumps(
-                signed,
-                sort_keys=True,
-                separators=(",", ":"),
-                ensure_ascii=False,
-                allow_nan=False,
-            ).encode("utf-8"),
             capture_output=True,
             timeout=10,
             check=False,
