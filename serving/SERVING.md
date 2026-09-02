@@ -195,6 +195,16 @@ atomic wave enqueue and council claims fail closed for either launch or
 replacement; the fence is compare-deleted only after all seven new leases pass
 and terminal state is rechecked.
 
+One legacy exception is explicit and incident-bound:
+`python3 serving/manage_council_seats.py replace --reconcile-terminal-round dcm-20260817T014529Z-9b0dbd7863d5`.
+All seven effective systemd unit states must already be inspectably inactive.
+It accepts only generation-unbound requests whose deterministic identities cover
+the pinned source state exactly. After acquiring the consistency fence and before
+any seat or queue mutation, it atomically publishes one read-only archive. Those
+exact raws may then exist only in inbox or base/generation-specific inbox-processing
+lists until seat recovery proves `dead_generation_terminal` with no inference
+attempt. All other blockers retain the ordinary full stop.
+
 ## Running a fleet: deploy, swap models, and the checks that gate each step
 
 The quick start above stands up ONE node by hand. Once a node carries real traffic, every step
