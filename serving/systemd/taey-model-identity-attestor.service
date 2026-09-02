@@ -4,7 +4,7 @@ Description=Taey serving model identity attestor
 BindsTo=taey-ep3.service
 After=taey-ep3.service network-online.target
 PartOf=taey-ep3.service
-# Burst starts must fit worst-case TimeoutStartSec+RestartSec, then fail.
+# At most three starts per two-hour window, then fail loud.
 StartLimitIntervalSec=7200
 StartLimitBurst=3
 
