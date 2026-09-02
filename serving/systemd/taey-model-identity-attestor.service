@@ -4,9 +4,8 @@ Description=Taey serving model identity attestor
 BindsTo=taey-ep3.service
 After=taey-ep3.service network-online.target
 PartOf=taey-ep3.service
-# 3 starts in 3*TimeoutStartSec, then fail loud. Default 10s StartLimit
-# never trips on a long hash failure, so retries would be unbounded.
-StartLimitIntervalSec=5400
+# Burst starts must fit worst-case TimeoutStartSec+RestartSec, then fail.
+StartLimitIntervalSec=7200
 StartLimitBurst=3
 
 [Service]
