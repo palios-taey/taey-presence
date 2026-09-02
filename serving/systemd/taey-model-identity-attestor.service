@@ -4,6 +4,9 @@ Description=Taey serving model identity attestor
 BindsTo=taey-ep3.service
 After=taey-ep3.service network-online.target
 PartOf=taey-ep3.service
+# At most three starts per two-hour window, then fail loud.
+StartLimitIntervalSec=7200
+StartLimitBurst=3
 
 [Service]
 Type=simple
@@ -16,8 +19,14 @@ EnvironmentFile=/etc/taey/model-identity-attestor.env
 LoadCredential=model-identity-signing-key:/etc/taey/model-identity-attestor.key
 ExecStart=/usr/bin/python3 @TAEY_ROOT@/serving/model_identity_attestor.py
 TimeoutStartSec=1800
+# Bound the hasher working set (8MiB chunk + interpreter). SwapMax=0 so Max
+# is the real cgroup-v2 ceiling.
+MemoryAccounting=yes
+MemoryHigh=128M
+MemoryMax=256M
+MemorySwapMax=0
 Restart=on-failure
-RestartSec=10
+RestartSec=60
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=taey-model-identity-attestor
