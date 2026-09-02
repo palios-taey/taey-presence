@@ -501,7 +501,7 @@ def _wait_for_at_rest(
                 or not registration.get("process_generation")
                 or registration.get("response_contract")
                 != "taey-council-contribution/v1"
-                or registration.get("readiness") != "ready"
+                or registration.get("readiness") not in {"recovering", "ready"}
                 or type(registration.get("pid")) is not int
                 or str(registration["pid"]) != unit_state["main_pid"]
                 or type(registration.get("liveness_ttl_seconds")) is not int
@@ -512,6 +512,8 @@ def _wait_for_at_rest(
                     f"{seat.seat_id} published mismatched seat_registration: "
                     f"{registration}"
                 )
+            if registration["readiness"] == "recovering":
+                registration = None
         else:
             registration = None
         if (
