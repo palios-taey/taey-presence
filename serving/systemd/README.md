@@ -10,6 +10,7 @@ implementation; do not fork these into another repo or hand-edit them on a node.
 | `taey-soma-proxy.service` | persona injection + latency feedback + tool surface | 8765 |
 | `taey-seat.service` | supervised tmux executive seat and fleet-notify reader | n/a |
 | `taey-council-seat@.service` | supervised private supporting council seats | n/a |
+| `taey-dashboard.service` | UI, Main synthesis, and graph-authoritative council coordinator | 5001 |
 
 (The INFRA=SOUL embodiment daemon `taey-soma` is owned by the infra-soul repo, not here — a
 different concern from serving.)
@@ -36,6 +37,13 @@ sudo systemctl daemon-reload && sudo systemctl enable --now taey-ep3
 ```
 Private config (endpoints, keys) lives only in `@TAEY_ROOT@/.env` (referenced via
 `EnvironmentFile`), which is gitignored — it is never committed here.
+The dashboard and generated council-seat environments require explicit
+`DCM_NEO4J_URI`, `DCM_NEO4J_DATABASE`, `TAEY_MODEL_IDENTITY_AUTHORITY_ID`,
+`TAEY_MODEL_IDENTITY_REDIS_HOST`,
+`TAEY_MODEL_IDENTITY_UPSTREAM_COMPLETION_ENDPOINT`, and
+`TAEY_MODEL_IDENTITY_EXPECTED_ALIASES`. The council launcher copies those values,
+the optional DCM credentials, and `DCM_ALLOW_INSECURE` into each mode-0600 seat
+environment. A missing value stops v2 dispatch before Redis enqueue.
 Before enabling the model identity attestor, install
 `model-identity-attestor.env.example` privately as
 `/etc/taey/model-identity-attestor.env`. Generate the Ed25519 private key on the serving host only:

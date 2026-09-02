@@ -17,11 +17,13 @@ from pathlib import Path
 from typing import Any
 
 import redis
+from dotenv import load_dotenv
 
 import council_prompt_receipt as prompt_producer
 
 SERVING_ROOT = Path(__file__).resolve().parent
 REPO_ROOT = SERVING_ROOT.parent
+load_dotenv(REPO_ROOT / ".env")
 sys.path.insert(0, str(REPO_ROOT))
 from dashboard.native_council import CouncilTransportFailure, RoundLedger  # noqa: E402
 
@@ -73,7 +75,7 @@ def _sessions_root() -> Path:
 
 def _seat_environment(seat: SeatConfig, sessions_root: Path) -> dict[str, str]:
     event_log = sessions_root / f"{seat.seat_id}.jsonl"
-    return {
+    environment = {
         "TAEY_SESSION_NAME": seat.seat_id,
         "TAEY_COUNCIL_ROLE_ID": seat.role_id,
         "TAEY_CONVERSATION_ID": seat.conversation_id,
@@ -104,6 +106,21 @@ def _seat_environment(seat: SeatConfig, sessions_root: Path) -> dict[str, str]:
         "REDIS_PORT": os.environ.get("REDIS_PORT", "6379"),
         "PYTHONUNBUFFERED": "1",
     }
+    for name in (
+        "DCM_NEO4J_URI",
+        "DCM_NEO4J_DATABASE",
+        "DCM_NEO4J_USER",
+        "DCM_NEO4J_PASSWORD",
+        "DCM_ALLOW_INSECURE",
+        "TAEY_MODEL_IDENTITY_AUTHORITY_ID",
+        "TAEY_MODEL_IDENTITY_REDIS_HOST",
+        "TAEY_MODEL_IDENTITY_REDIS_PORT",
+        "TAEY_MODEL_IDENTITY_UPSTREAM_COMPLETION_ENDPOINT",
+        "TAEY_MODEL_IDENTITY_EXPECTED_ALIASES",
+    ):
+        if name in os.environ:
+            environment[name] = os.environ[name]
+    return environment
 
 
 def render(seats: list[SeatConfig]) -> list[dict[str, Any]]:

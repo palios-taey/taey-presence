@@ -445,6 +445,10 @@ async def _record_native_council_terminal(
     if terminal.get("event_type") == "round_completed":
         receipt = terminal.get("synthesis_receipt") or {}
         answer = str(terminal.get("answer") or "")
+        graph_terminal = _native_council.publish_graph_final(
+            round_id,
+            answer,
+        )
         _append_session_event(
             conversation_id,
             {
@@ -461,8 +465,9 @@ async def _record_native_council_terminal(
                 "role": "assistant",
                 "content": answer,
                 "ok": True,
-                "council_protocol": "taey-native-dcm/v1",
+                "council_protocol": "taey-native-dcm/v2",
                 "failed_seats": terminal.get("failed_seats") or [],
+                **graph_terminal,
             },
         )
         return
@@ -479,7 +484,7 @@ async def _record_native_council_terminal(
             "kind": "council_round_failure",
             "ok": False,
             "error": str(terminal.get("error") or "council round failed"),
-            "council_protocol": "taey-native-dcm/v1",
+            "council_protocol": "taey-native-dcm/v2",
         },
     )
 
@@ -2107,7 +2112,7 @@ async def chat_session_council_amendment(
                 round_id=round_id,
                 prompt_revision=amendment["prompt_revision"],
                 revision_id=amendment["revision_id"],
-                council_protocol="taey-native-dcm/v1",
+                council_protocol="taey-native-dcm/v2",
             ),
         )
     except Exception as exc:
@@ -2180,7 +2185,7 @@ async def chat_session_stream(session_id: str, request: Request):
                     round_id=active_council["round_id"],
                     prompt_revision=amendment["prompt_revision"],
                     revision_id=amendment["revision_id"],
-                    council_protocol="taey-native-dcm/v1",
+                    council_protocol="taey-native-dcm/v2",
                 ),
             )
         except CouncilTransportFailure as exc:
