@@ -1198,11 +1198,22 @@ def main() -> int:
     parser.add_argument("--reconcile-terminal-round")
     args = parser.parse_args()
     try:
-        seats = load_manifest(args.manifest.resolve())
-        if args.seat_ids and args.command != "replace":
-            raise CouncilConfigError("--seat-id is only supported for the replace command")
+        resolved_manifest = args.manifest.resolve()
+        if args.seat_ids:
+            if args.command != "replace":
+                raise CouncilConfigError("--seat-id is only supported for the replace command")
+            if resolved_manifest != DEFAULT_MANIFEST.resolve():
+                raise CouncilConfigError(
+                    "--seat-id requires the canonical council seats manifest "
+                    f"({DEFAULT_MANIFEST.resolve()})"
+                )
+            if args.reconcile_terminal_round:
+                raise CouncilConfigError(
+                    "--seat-id cannot be combined with --reconcile-terminal-round"
+                )
         if args.reconcile_terminal_round and args.command not in {"launch", "replace"}:
             raise CouncilConfigError("--reconcile-terminal-round requires launch or replace")
+        seats = load_manifest(resolved_manifest)
         if args.command == "validate":
             print(
                 json.dumps(
