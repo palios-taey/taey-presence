@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import copy
+import importlib.util
 import json
 import os
 import shutil
+import sys
 import tempfile
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import council_prompt_receipt as producer
 
@@ -20,6 +22,14 @@ MANIFEST_PATH = ROOT / "council_seats.json"
 def require(condition: bool, detail: str) -> None:
     if not condition:
         raise RuntimeError(detail)
+
+
+def install_import_only_redis_stub() -> None:
+    if importlib.util.find_spec("redis") is not None:
+        return
+    redis_stub = ModuleType("redis")
+    redis_stub.Redis = object
+    sys.modules["redis"] = redis_stub
 
 
 def main() -> int:
@@ -198,6 +208,7 @@ def main() -> int:
                 "TAEY_MODEL": "ep3",
             }
         )
+        install_import_only_redis_stub()
         import taey_council_seat as runtime
 
         runtime_manifest, runtime_seat, runtime_contract = (
