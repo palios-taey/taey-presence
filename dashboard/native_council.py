@@ -27,6 +27,10 @@ class CouncilTransportFailure(RuntimeError):
     pass
 
 
+class CouncilRosterMismatch(CouncilTransportFailure):
+    """Live transport seats do not match the durable round_opened roster."""
+
+
 class CouncilRevisionSuperseded(CouncilTransportFailure):
     def __init__(self, expected_revision: int, latest_revision: int):
         self.expected_revision = expected_revision
@@ -2667,6 +2671,17 @@ class NativeCouncilTransport:
             "failures": failures,
         }
 
+    def _require_opened_roster(self, opened: dict[str, Any]) -> None:
+        expected_ids = [seat.seat_id for seat in self.seats]
+        expected_roles = [seat.role_id for seat in self.seats]
+        if (
+            opened.get("seat_ids") != expected_ids
+            or opened.get("role_ids") != expected_roles
+        ):
+            raise CouncilRosterMismatch(
+                "durable round roster differs from the live transport seats"
+            )
+
     async def _run_round(
         self,
         ledger: RoundLedger,
@@ -2693,6 +2708,7 @@ class NativeCouncilTransport:
                     terminal_event_type=existing_terminal["event_type"],
                 )
                 return
+            self._require_opened_roster(opened)
             existing_events = ledger.events()
             recovery_revision = ledger.latest_revision()
             resolved_synthesis_revisions = {
@@ -3110,6 +3126,8 @@ class NativeCouncilTransport:
                     terminal_event_type=terminal["event_type"],
                 )
                 return
+        except CouncilRosterMismatch:
+            raise
         except Exception as exc:
             terminal = ledger.terminal_event()
             if terminal is not None:

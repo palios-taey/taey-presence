@@ -90,8 +90,9 @@ FastAPI dashboard renders all of it.
   The launcher does not make a deployment claim; production registration and
   concurrent-inference acceptance remain separate gates.
 - **Taey-native council transport** — `dashboard/native_council.py` opens one
-  durable round for a Main UI prompt, dispatches an independent wave to all
-  seven local seats through the fleet-notify Redis inbox contract, reveals the
+  durable round for a Main UI prompt, dispatches an independent wave to the
+  transport's active seats (all seven by default, or `TAEY_COUNCIL_ACTIVE_SEAT_IDS`)
+  through the fleet-notify Redis inbox contract, reveals the
   completed packet only after that wave, requests a critique wave, and gives
   the evidence-bearing packet to Main Taey for synthesis. The UI defaults this
   path on and retains an explicit Council toggle for per-prompt opt-out. A
