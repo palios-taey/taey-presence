@@ -52,6 +52,7 @@ COUNCIL_SEATS = (
     CouncilSeat("taey-council-6", "options-alternatives"),
     CouncilSeat("taey-council-7", "control-acceptance"),
 )
+_ACTIVE_SEAT_IDS_ENV = "TAEY_COUNCIL_ACTIVE_SEAT_IDS"
 _COUNCIL_MANIFEST_PATH = (
     Path(__file__).resolve().parents[1] / "serving" / "council_seats.json"
 )
@@ -143,6 +144,37 @@ TerminalCallback = Callable[
     [str, str, dict[str, Any], dict[str, Any]],
     Awaitable[None],
 ]
+
+
+def resolve_active_council_seats(raw: str | None = None) -> tuple[CouncilSeat, ...]:
+    """Return the canonical seven seats, or a validated production-qualification subset.
+
+    Unset `TAEY_COUNCIL_ACTIVE_SEAT_IDS` keeps every committed `COUNCIL_SEATS`
+    entry. A set value must name one or more unique canonical seat IDs; the
+    returned tuple stays in committed manifest order.
+    """
+    if raw is None:
+        raw = os.environ.get(_ACTIVE_SEAT_IDS_ENV)
+    if raw is None:
+        return COUNCIL_SEATS
+    requested = [part for part in re.split(r"[\s,]+", raw.strip()) if part]
+    if not requested:
+        raise CouncilTransportFailure(
+            f"{_ACTIVE_SEAT_IDS_ENV} is set but contains no seat IDs"
+        )
+    if len(requested) != len(set(requested)):
+        raise CouncilTransportFailure(
+            f"{_ACTIVE_SEAT_IDS_ENV} contains duplicate seat IDs"
+        )
+    known = {seat.seat_id: seat for seat in COUNCIL_SEATS}
+    unknown = [seat_id for seat_id in requested if seat_id not in known]
+    if unknown:
+        raise CouncilTransportFailure(
+            f"{_ACTIVE_SEAT_IDS_ENV} names unknown seat IDs: "
+            + ",".join(unknown)
+        )
+    selected = set(requested)
+    return tuple(seat for seat in COUNCIL_SEATS if seat.seat_id in selected)
 
 
 def _safe_id(value: Any) -> str:
@@ -726,6 +758,7 @@ class NativeCouncilTransport:
         council_log_dir: Path | None = None,
         wave_timeout: float = 1800.0,
         poll_interval: float = 0.25,
+        seats: tuple[CouncilSeat, ...] | None = None,
     ):
         self.redis = redis_client
         self.sessions_dir = sessions_dir
@@ -737,6 +770,20 @@ class NativeCouncilTransport:
         )
         self.wave_timeout = max(1.0, wave_timeout)
         self.poll_interval = max(0.05, poll_interval)
+        self.seats = (
+            resolve_active_council_seats()
+            if seats is None
+            else resolve_active_council_seats(
+                ",".join(seat.seat_id for seat in seats)
+            )
+        )
+        if seats is not None:
+            expected = {seat.seat_id: seat for seat in COUNCIL_SEATS}
+            for seat in seats:
+                if expected.get(seat.seat_id) != seat:
+                    raise CouncilTransportFailure(
+                        f"active council seat {seat.seat_id} is not a canonical CouncilSeat"
+                    )
         self._tasks: dict[str, asyncio.Task[None]] = {}
 
     def _active_key(self, conversation_id: str) -> str:
@@ -799,8 +846,8 @@ class NativeCouncilTransport:
             executive_context=executive_context or [],
             prompt_revision=1,
             revision_id=uuid.uuid4().hex,
-            seat_ids=[seat.seat_id for seat in COUNCIL_SEATS],
-            role_ids=[seat.role_id for seat in COUNCIL_SEATS],
+            seat_ids=[seat.seat_id for seat in self.seats],
+            role_ids=[seat.role_id for seat in self.seats],
             status="open",
         )
         claimed = self.redis.set(
@@ -968,7 +1015,7 @@ class NativeCouncilTransport:
                 adapter.mesh.start_session(
                     topic,
                     payload,
-                    [seat.role_id for seat in COUNCIL_SEATS],
+                    [seat.role_id for seat in self.seats],
                     session_id=ledger.round_id,
                 )
             except adapter.mesh.SessionIdentityConflictError:
@@ -1045,7 +1092,7 @@ class NativeCouncilTransport:
         publication = model_identity["publication"]
         model_receipt_sha256 = publication["receipt_sha256"]
         required_members = []
-        for seat in COUNCIL_SEATS:
+        for seat in self.seats:
             registration = registrations[seat.seat_id]
             if (
                 registration["dcm_v2_prompt_contract_sha256"]
@@ -1411,7 +1458,7 @@ class NativeCouncilTransport:
     ) -> dict[str, dict[str, Any]]:
         adapter = self._dcm_adapter()
         requests = {}
-        for seat in COUNCIL_SEATS:
+        for seat in self.seats:
             slots = [
                 slot
                 for slot in wave["slots"]
@@ -1537,7 +1584,7 @@ class NativeCouncilTransport:
     ) -> list[bool]:
         tokens = [
             f"{prompt_revision}:{phase}:{seat.seat_id}"
-            for seat in COUNCIL_SEATS
+            for seat in self.seats
         ]
         raw_state = self.redis.eval(
             _READ_DISPATCH_STATE_LUA,
@@ -1546,7 +1593,7 @@ class NativeCouncilTransport:
             *tokens,
         )
         if not isinstance(raw_state, list) or len(raw_state) != len(
-            COUNCIL_SEATS
+            self.seats
         ):
             raise CouncilTransportFailure(
                 "council wave dispatch state returned an invalid result"
@@ -1565,7 +1612,7 @@ class NativeCouncilTransport:
     ) -> dict[str, dict[str, Any]]:
         encoded_requests: list[tuple[str, str]] = []
         requested_at = time.time()
-        for seat in COUNCIL_SEATS:
+        for seat in self.seats:
             request = requests[seat.seat_id]
             payload = {
                 "from": "taey",
@@ -1633,16 +1680,16 @@ class NativeCouncilTransport:
         ]
         keys.extend(
             f"{self.key_prefix}:{seat.seat_id}:seat_registration"
-            for seat in COUNCIL_SEATS
+            for seat in self.seats
         )
         keys.extend(
             f"{self.key_prefix}:{seat.seat_id}:inbox"
-            for seat in COUNCIL_SEATS
+            for seat in self.seats
         )
-        arguments: list[Any] = [len(COUNCIL_SEATS)]
+        arguments: list[Any] = [len(self.seats)]
         arguments.extend(
             registrations[seat.seat_id]["raw_registration"]
-            for seat in COUNCIL_SEATS
+            for seat in self.seats
         )
         for token, encoded in encoded_requests:
             arguments.extend((token, encoded))
@@ -1653,12 +1700,12 @@ class NativeCouncilTransport:
             *arguments,
         )
         if not isinstance(enqueue_results, list) or len(enqueue_results) != len(
-            COUNCIL_SEATS
+            self.seats
         ):
             raise CouncilTransportFailure(
                 "atomic council wave enqueue returned an invalid result"
             )
-        for seat, raw_enqueued in zip(COUNCIL_SEATS, enqueue_results):
+        for seat, raw_enqueued in zip(self.seats, enqueue_results):
             request = requests[seat.seat_id]
             request["enqueued"] = bool(int(raw_enqueued))
             if not request["enqueued"]:
@@ -1802,7 +1849,7 @@ class NativeCouncilTransport:
             prompt_revision=prompt_revision,
         )
         dispatched_count = sum(dispatch_state)
-        if dispatched_count not in {0, len(COUNCIL_SEATS)}:
+        if dispatched_count not in {0, len(self.seats)}:
             raise CouncilTransportFailure(
                 "council wave has a partial atomic dispatch identity"
             )
@@ -1818,7 +1865,7 @@ class NativeCouncilTransport:
                     "durable council wave registrations are invalid"
                 )
             registrations: dict[str, dict[str, Any]] = {}
-            for seat in COUNCIL_SEATS:
+            for seat in self.seats:
                 registration = prepared_registrations.get(seat.seat_id)
                 if (
                     not isinstance(registration, dict)
@@ -1846,7 +1893,7 @@ class NativeCouncilTransport:
                 )
             registrations = {
                 seat.seat_id: self._live_seat_registration(seat)
-                for seat in COUNCIL_SEATS
+                for seat in self.seats
             }
         adapter = self._dcm_adapter()
         if matching_events:
@@ -1909,10 +1956,10 @@ class NativeCouncilTransport:
                         "role_id": seat.role_id,
                         **registrations[seat.seat_id],
                     }
-                    for seat in COUNCIL_SEATS
+                    for seat in self.seats
                 },
             )
-        if terminal_wave_events or dispatched_count == len(COUNCIL_SEATS):
+        if terminal_wave_events or dispatched_count == len(self.seats):
             for request in requests.values():
                 request["enqueued"] = False
         else:
@@ -1936,9 +1983,9 @@ class NativeCouncilTransport:
                 "wave_started",
                 phase=phase,
                 prompt_revision=prompt_revision,
-                expected_seats=len(COUNCIL_SEATS),
+                expected_seats=len(self.seats),
             )
-        for seat in COUNCIL_SEATS:
+        for seat in self.seats:
             request = requests[seat.seat_id]
             existing_seat_started = [
                 event
@@ -2237,13 +2284,13 @@ class NativeCouncilTransport:
         requests: dict[str, dict[str, Any]],
     ) -> dict[str, Any]:
         deadline = time.monotonic() + self.wave_timeout
-        pending = {seat.seat_id: seat for seat in COUNCIL_SEATS}
+        pending = {seat.seat_id: seat for seat in self.seats}
         contributions: list[dict[str, Any]] = []
         failures: list[dict[str, Any]] = []
         superseded_revision: int | None = None
         stale_seats: set[str] = set()
         seat_order = {
-            seat.seat_id: index for index, seat in enumerate(COUNCIL_SEATS)
+            seat.seat_id: index for index, seat in enumerate(self.seats)
         }
         events = ledger.events()
 
@@ -2259,7 +2306,7 @@ class NativeCouncilTransport:
         contribution_events = matching_events("contribution")
         failure_events = matching_events("seat_failed")
         status_events = matching_events("seat_status")
-        for seat in COUNCIL_SEATS:
+        for seat in self.seats:
             seat_contributions = [
                 event
                 for event in contribution_events
@@ -2797,7 +2844,7 @@ class NativeCouncilTransport:
                         prompt_revision=prior_revision,
                     )
                     dispatched_count = sum(dispatch_state)
-                    if dispatched_count not in {0, len(COUNCIL_SEATS)}:
+                    if dispatched_count not in {0, len(self.seats)}:
                         raise CouncilTransportFailure(
                             f"revision {prior_revision} {prior_phase} wave "
                             "has a partial dispatch identity"

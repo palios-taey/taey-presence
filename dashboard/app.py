@@ -22,6 +22,7 @@ from fastapi.staticfiles import StaticFiles
 from dashboard.native_council import (
     CouncilTransportFailure,
     NativeCouncilTransport,
+    resolve_active_council_seats,
 )
 
 try:
@@ -114,6 +115,7 @@ _native_council = NativeCouncilTransport(
     council_log_dir=TAEY_COUNCIL_LOG_DIR,
     wave_timeout=TAEY_COUNCIL_WAVE_TIMEOUT,
     poll_interval=TAEY_COUNCIL_POLL_INTERVAL,
+    seats=resolve_active_council_seats(),
 )
 
 

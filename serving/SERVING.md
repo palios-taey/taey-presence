@@ -901,6 +901,10 @@ curl --fail-with-body --silent --show-error \
 The durable seat has no fixed elapsed-time deadline for a complete proxy turn.
 `VLLM_REQUEST_TIMEOUT_SECS` applies to one upstream inference request, while the
 dashboard's `TAEY_COUNCIL_WAVE_TIMEOUT` applies to council-wave coordination.
+The dashboard defaults to all seven committed seats. `TAEY_COUNCIL_ACTIVE_SEAT_IDS`
+selects a production-qualification subset of those IDs without changing the
+canonical roster; unset keeps seven. Empty, duplicate, or unknown IDs fail
+dashboard startup.
 Neither is a tool-round or whole-consultation limit. When an amendment supersedes
 an active council wave, the coordinator records each old-revision contribution as
 stale and waits for every dispatched request to drain before sending the

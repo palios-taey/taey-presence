@@ -97,6 +97,11 @@ FastAPI dashboard renders all of it.
   path on and retains an explicit Council toggle for per-prompt opt-out. A
   leading `/no-council`, `[council:off]`, or “do not use the council/DCM”
   directive also opts out for that prompt without changing the toggle.
+  The dashboard defaults to all seven committed seats. For a one-seat (or other
+  subset) production-qualification round, set `TAEY_COUNCIL_ACTIVE_SEAT_IDS` to
+  unique canonical `taey-council-N` IDs; empty, duplicate, or unknown values
+  fail startup. Graph membership, Redis dispatch, wait, recovery, terminal
+  projection, and registration reads then use that instance subset only.
   The public Neo4j DCM session is the deliberation authority: Main reserves each
   role request there before Redis delivery, seats commit there before Redis
   acknowledgement, and Main reads the committed contribution before advancing.
