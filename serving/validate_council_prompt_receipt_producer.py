@@ -32,6 +32,12 @@ def install_import_only_redis_stub() -> None:
     sys.modules["redis"] = redis_stub
 
 
+def install_import_only_dcm_stub() -> None:
+    if importlib.util.find_spec("taey_adapter") is not None:
+        return
+    sys.modules["taey_adapter"] = ModuleType("taey_adapter")
+
+
 def main() -> int:
     manifest = producer.load_manifest(MANIFEST_PATH)
     require(len(manifest.seats) == 7, "production manifest seat count changed")
@@ -209,6 +215,7 @@ def main() -> int:
             }
         )
         install_import_only_redis_stub()
+        install_import_only_dcm_stub()
         import taey_council_seat as runtime
 
         runtime_manifest, runtime_seat, runtime_contract = (
