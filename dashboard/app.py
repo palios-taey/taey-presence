@@ -431,6 +431,16 @@ async def _record_native_council_terminal(
     opened: dict,
     terminal: dict,
 ) -> None:
+    graph_terminal: dict = {}
+    failure_detail = str(terminal.get("error") or "council round failed")
+    if terminal.get("event_type") == "round_failed":
+        graph_terminal = _native_council.fail_graph_session(
+            round_id,
+            failure_kind=str(
+                terminal.get("kind") or "council_round_failure"
+            ),
+            failure_detail=failure_detail,
+        )
     existing = [
         event
         for event in _read_session_events(conversation_id)
@@ -483,8 +493,9 @@ async def _record_native_council_terminal(
             "source_id": round_id,
             "kind": "council_round_failure",
             "ok": False,
-            "error": str(terminal.get("error") or "council round failed"),
+            "error": failure_detail,
             "council_protocol": "taey-native-dcm/v2",
+            **graph_terminal,
         },
     )
 

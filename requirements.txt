@@ -7,7 +7,7 @@ python-dotenv>=1.0
 
 # Public graph authority and Taey-seat transaction adapter, pinned to the
 # independently accepted source merge.
-dcm-mesh @ git+https://github.com/palios-taey/dcm.git@980a845a79b73b0d7b5f222cfc9ccdd0e0f78e75
+dcm-mesh @ git+https://github.com/palios-taey/dcm.git@0ab99ce3ef79bccddc66d3e2b3a7c4380c130703
 
 # Required by the soma_proxy `fetch_url` tool (serving/soma_proxy.py:1248) —
 # trafilatura extracts article text from HTML, pypdf from PDFs. The imports are

@@ -2169,6 +2169,65 @@ class NativeCouncilTransport:
             "dcm_final_sha256": prompt_producer.text_sha256(final),
         }
 
+    def fail_graph_session(
+        self,
+        round_id: str,
+        *,
+        failure_kind: str,
+        failure_detail: str,
+    ) -> dict[str, Any]:
+        detail_sha256 = prompt_producer.text_sha256(failure_detail)
+        adapter = self._dcm_adapter()
+        failure = adapter.mesh.fail_session(
+            round_id,
+            failure_kind=failure_kind,
+            failure_detail_sha256=detail_sha256,
+        )
+        expected = {
+            "session_id": round_id,
+            "status": "failed",
+            "failure_kind": failure_kind,
+            "failure_detail_sha256": detail_sha256,
+        }
+        mismatched = [
+            field
+            for field, value in expected.items()
+            if failure.get(field) != value
+        ]
+        terminal_sha256 = failure.get("terminal_failure_sha256")
+        if mismatched or not model_identity_status.is_sha256(terminal_sha256):
+            raise CouncilTransportFailure(
+                "DCM failure terminal receipt differs from the durable council failure"
+            )
+        # The transition receipt carries failure identity; read_session currently
+        # confirms terminal state but does not expose those failure fields.
+        session = adapter.mesh.read_session(round_id)
+        if session.get("status") != "failed" or session.get("final") is not None:
+            raise CouncilTransportFailure(
+                "DCM session did not retain the failed terminal state"
+            )
+        failure_wave_id = failure.get("failure_wave_id")
+        if failure_wave_id is not None:
+            wave = adapter.mesh.read_wave(round_id, failure_wave_id)
+            if (
+                wave.get("status") != "closed"
+                or wave.get("close_outcome") != "session_failed"
+                or wave.get("session_failure_sha256") != terminal_sha256
+                or wave.get("session_status") != "failed"
+                or wave.get("active_wave_id") is not None
+            ):
+                raise CouncilTransportFailure(
+                    "DCM failure terminal left an incoherent active wave"
+                )
+        return {
+            "dcm_session_id": round_id,
+            "dcm_graph_status": "failed",
+            "dcm_failure_kind": failure_kind,
+            "dcm_failure_detail_sha256": detail_sha256,
+            "dcm_terminal_failure_sha256": terminal_sha256,
+            "dcm_failure_wave_id": failure_wave_id,
+        }
+
     async def _wait_wave(
         self,
         ledger: RoundLedger,
