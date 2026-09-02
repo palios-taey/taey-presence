@@ -1142,8 +1142,33 @@ def status(seats: list[SeatConfig]) -> list[dict[str, Any]]:
     return rows
 
 
+def select_seats(
+    seats: list[SeatConfig],
+    requested_seat_ids: list[str] | None,
+) -> list[SeatConfig]:
+    if not requested_seat_ids:
+        return list(seats)
+    manifest_by_id = {seat.seat_id: seat for seat in seats}
+    seen: set[str] = set()
+    for raw in requested_seat_ids:
+        candidate = raw.strip()
+        if not candidate:
+            raise CouncilConfigError("seat-id cannot be empty")
+        if candidate in seen:
+            raise CouncilConfigError(f"duplicate seat-id requested: {candidate}")
+        if candidate not in manifest_by_id:
+            raise CouncilConfigError(
+                f"unknown seat-id requested: {candidate} "
+                f"(available: {', '.join(manifest_by_id)})"
+            )
+        seen.add(candidate)
+    return [seat for seat in seats if seat.seat_id in seen]
+
+
 def main() -> int:
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+        description="Manage private supporting runtime seats for Taey's local council."
+    )
     parser.add_argument(
         "command",
         choices=(
@@ -1160,12 +1185,35 @@ def main() -> int:
         type=Path,
         default=DEFAULT_MANIFEST,
     )
+    parser.add_argument(
+        "--seat-id",
+        action="append",
+        dest="seat_ids",
+        default=None,
+        help=(
+            "Canonical seat ID to replace (repeatable, replace command only; "
+            "e.g. --seat-id taey-council-1)."
+        ),
+    )
     parser.add_argument("--reconcile-terminal-round")
     args = parser.parse_args()
     try:
-        seats = load_manifest(args.manifest.resolve())
+        resolved_manifest = args.manifest.resolve()
+        if args.seat_ids:
+            if args.command != "replace":
+                raise CouncilConfigError("--seat-id is only supported for the replace command")
+            if resolved_manifest != DEFAULT_MANIFEST.resolve():
+                raise CouncilConfigError(
+                    "--seat-id requires the canonical council seats manifest "
+                    f"({DEFAULT_MANIFEST.resolve()})"
+                )
+            if args.reconcile_terminal_round:
+                raise CouncilConfigError(
+                    "--seat-id cannot be combined with --reconcile-terminal-round"
+                )
         if args.reconcile_terminal_round and args.command not in {"launch", "replace"}:
             raise CouncilConfigError("--reconcile-terminal-round requires launch or replace")
+        seats = load_manifest(resolved_manifest)
         if args.command == "validate":
             print(
                 json.dumps(
@@ -1196,7 +1244,8 @@ def main() -> int:
         elif args.command == "launch":
             launch(seats, args.reconcile_terminal_round)
         elif args.command == "replace":
-            replace(seats, args.reconcile_terminal_round)
+            target_seats = select_seats(seats, args.seat_ids)
+            replace(target_seats, args.reconcile_terminal_round)
         else:
             print(json.dumps(status(seats), indent=2))
     except (CouncilConfigError, OSError, redis.RedisError, ValueError) as exc:
