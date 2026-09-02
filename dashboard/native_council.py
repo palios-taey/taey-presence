@@ -1331,6 +1331,26 @@ class NativeCouncilTransport:
             contribution = contributions[0]["structured_content"]
             ok = True
             error = None
+        elif (
+            wave.get("session_status") == "failed"
+            and wave.get("status") == "closed"
+            and wave.get("close_outcome") == "session_failed"
+            and receipt.get("terminal_outcome") == "session_failed"
+            and wave.get("session_failure") is not None
+            and receipt.get("session_failure_sha256")
+            == (wave.get("session_failure") or {}).get("terminal_failure_sha256")
+            and receipt.get("session_failure_sha256")
+            == wave.get("session_failure_sha256")
+            and receipt.get("failure_stage") == "session_failed"
+            and receipt.get("failure_detail_sha256")
+            == (wave.get("session_failure") or {}).get("failure_detail_sha256")
+            and receipt.get("contrib_id") is None
+            and receipt.get("contribution_receipt_sha256") is None
+        ):
+            graph_receipt_sha256 = wave["session_failure_sha256"]
+            contribution = None
+            ok = False
+            error = f"DCM session failed in graph with {receipt.get('failure_stage')}"
         else:
             outcome_record = slot.get("outcome_record")
             if (
