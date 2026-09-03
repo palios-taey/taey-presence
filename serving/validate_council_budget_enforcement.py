@@ -17,6 +17,45 @@ if "redis" not in sys.modules and importlib.util.find_spec("redis") is None:
     redis_stub.Redis = mock.MagicMock
     sys.modules["redis"] = redis_stub
 
+if importlib.util.find_spec("starlette") is None:
+    starlette_stub = ModuleType("starlette")
+    starlette_background_stub = ModuleType("starlette.background")
+    starlette_background_stub.BackgroundTask = mock.MagicMock
+    sys.modules["starlette"] = starlette_stub
+    sys.modules["starlette.background"] = starlette_background_stub
+
+if importlib.util.find_spec("httpx") is None:
+    httpx_stub = ModuleType("httpx")
+    httpx_stub.AsyncClient = mock.MagicMock
+    httpx_stub.Client = mock.MagicMock
+    httpx_stub.Response = object
+    httpx_stub.Request = object
+    httpx_stub.TimeoutException = type("TimeoutException", (Exception,), {})
+    httpx_stub.RequestError = type("RequestError", (Exception,), {})
+    httpx_stub.RemoteProtocolError = type("RemoteProtocolError", (Exception,), {})
+    sys.modules["httpx"] = httpx_stub
+
+if importlib.util.find_spec("fastapi") is None:
+    fastapi_stub = ModuleType("fastapi")
+
+    class StubHTTPException(Exception):
+        def __init__(self, status_code: int, detail: object = None):
+            self.status_code = status_code
+            self.detail = detail
+            super().__init__(f"{status_code}: {detail}")
+
+    fastapi_stub.FastAPI = mock.MagicMock
+    fastapi_stub.Request = object
+    fastapi_stub.HTTPException = StubHTTPException
+    fastapi_responses_stub = ModuleType("fastapi.responses")
+    fastapi_responses_stub.StreamingResponse = mock.MagicMock
+    fastapi_responses_stub.JSONResponse = mock.MagicMock
+    sys.modules["fastapi"] = fastapi_stub
+    sys.modules["fastapi.responses"] = fastapi_responses_stub
+
+if importlib.util.find_spec("uvicorn") is None:
+    sys.modules["uvicorn"] = ModuleType("uvicorn")
+
 import council_prompt_receipt as producer
 import soma_proxy
 
