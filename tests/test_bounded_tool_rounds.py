@@ -137,8 +137,21 @@ class BoundedToolRoundTests(unittest.TestCase):
             started_at=1.0,
         )
 
-    def _inexhaustible_mock_http(self, tool_payload: dict, final_payload: dict) -> mock.AsyncMock:
+    def _inexhaustible_mock_http(
+        self,
+        tool_payload: dict,
+        final_payload: dict,
+        max_calls: int = 20,
+    ) -> mock.AsyncMock:
+        call_count = 0
+
         async def mock_post(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count > max_calls:
+                raise AssertionError(
+                    f"Runaway loop detected: call_count={call_count} exceeded limit {max_calls}"
+                )
             req_body = kwargs.get("json", {})
             if req_body.get("tool_choice") == "none" or "tools" not in req_body:
                 return SimpleNamespace(status_code=200, json=lambda: final_payload)
@@ -173,7 +186,7 @@ class BoundedToolRoundTests(unittest.TestCase):
             }],
             "usage": {"prompt_tokens": 10, "completion_tokens": 2},
         }
-        http = self._inexhaustible_mock_http(tool_payload, final_payload)
+        http = self._inexhaustible_mock_http(tool_payload, final_payload, max_calls=10)
         turn = self._make_turn()
         body = {
             "model": "ep3",
@@ -356,7 +369,7 @@ class BoundedToolRoundTests(unittest.TestCase):
             "usage": {"prompt_tokens": 10, "completion_tokens": 2},
         }
         ceiling = 3
-        http = self._inexhaustible_mock_http(tool_payload, final_payload)
+        http = self._inexhaustible_mock_http(tool_payload, final_payload, max_calls=10)
         turn = self._make_turn()
         body = {
             "model": "ep3",
@@ -401,6 +414,89 @@ class BoundedToolRoundTests(unittest.TestCase):
         self.assertEqual(final_body["tool_choice"], "none")
         self.assertEqual(json.loads(response.body), final_payload)
 
+    def test_stream_request_terminates_at_default_proxy_ceiling(self):
+        tool_payload = {
+            "choices": [{
+                "finish_reason": "tool_calls",
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [{
+                        "id": "call-1",
+                        "function": {
+                            "name": "search_isma",
+                            "arguments": '{"query":"stream"}',
+                        },
+                    }],
+                },
+            }],
+            "usage": {"completion_tokens": 1},
+        }
+        final_payload = {
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "role": "assistant",
+                    "content": "stream-final-content",
+                    "reasoning": "stream-final-thinking",
+                },
+            }],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 2},
+        }
+        ceiling = 2
+        http = self._inexhaustible_mock_http(tool_payload, final_payload, max_calls=10)
+        turn = self._make_turn()
+        body = {
+            "model": "ep3",
+            "stream": True,
+            "messages": [{"role": "user", "content": "stream tool turns"}],
+            "tools": [{
+                "type": "function",
+                "function": {"name": "search_isma"},
+            }],
+        }
+
+        with mock.patch.object(
+            soma_proxy,
+            "DEFAULT_MAX_TOOL_ROUNDS",
+            ceiling,
+        ), mock.patch.object(
+            soma_proxy,
+            "inject_preamble",
+            side_effect=lambda value: value,
+        ), mock.patch.object(
+            soma_proxy,
+            "_http",
+            http,
+        ), mock.patch.object(
+            soma_proxy,
+            "execute_tool_call_async",
+            new=mock.AsyncMock(return_value="evidence"),
+        ) as execute:
+            response = asyncio.run(
+                soma_proxy._chat_completions_for_turn(
+                    body,
+                    turn,
+                    liveness_registered=False,
+                )
+            )
+
+            async def consume(resp):
+                chunks = []
+                async for chunk in resp.body_iterator:
+                    chunks.append(chunk)
+                return chunks
+
+            chunks = asyncio.run(consume(response))
+
+        # Invariant: stream path tool loop terminates at ceiling rounds
+        self.assertEqual(http.post.await_count, ceiling + 1)
+        self.assertEqual(execute.await_count, ceiling)
+        final_body = http.post.await_args_list[-1].kwargs["json"]
+        self.assertNotIn("tools", final_body)
+        self.assertEqual(final_body["tool_choice"], "none")
+        self.assertGreater(len(chunks), 0)
+
     def test_caller_cannot_raise_max_rounds_above_proxy_ceiling(self):
         tool_payload = {
             "choices": [{
@@ -427,7 +523,7 @@ class BoundedToolRoundTests(unittest.TestCase):
             "usage": {"prompt_tokens": 10, "completion_tokens": 2},
         }
         ceiling = 2
-        http = self._inexhaustible_mock_http(tool_payload, final_payload)
+        http = self._inexhaustible_mock_http(tool_payload, final_payload, max_calls=10)
         turn = self._make_turn()
         body = {
             "model": "ep3",

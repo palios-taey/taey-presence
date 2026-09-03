@@ -29,6 +29,26 @@ def source_function(path: Path, name: str) -> ast.AsyncFunctionDef:
     return matches[0]
 
 
+def extract_constant(path: Path, name: str) -> object:
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id == name:
+                    ns = {}
+                    exec(
+                        compile(
+                            ast.Module(body=[node], type_ignores=[]),
+                            str(path),
+                            "exec",
+                        ),
+                        {"os": __import__("os"), "max": max, "min": min, "int": int},
+                        ns,
+                    )
+                    return ns[name]
+    raise AssertionError(f"Constant {name} not found in {path}")
+
+
 class FakeHTTPException(Exception):
     def __init__(self, status_code: int, detail: object):
         super().__init__(str(detail))
@@ -183,7 +203,7 @@ def handler_namespace(fake_http: FakeHTTP) -> dict[str, object]:
         "_turn_headers": lambda turn: {},
         "JSONResponse": FakeJSONResponse,
         "MAX_CONTEXT_TOKENS": 262144,
-        "DEFAULT_MAX_TOOL_ROUNDS": 16,
+        "DEFAULT_MAX_TOOL_ROUNDS": extract_constant(SOMA_PROXY, "DEFAULT_MAX_TOOL_ROUNDS"),
     }
     node = source_function(SOMA_PROXY, "_chat_completions_for_turn")
     module = ast.Module(body=[node], type_ignores=[])
