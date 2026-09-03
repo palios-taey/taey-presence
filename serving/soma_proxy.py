@@ -27,10 +27,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
-from outbound_request_codec import (
-    bind_outbound_request_bytes,
-    encode_outbound_request_bytes,
-)
+try:
+    from serving.outbound_request_codec import (
+        bind_outbound_request_bytes,
+        encode_outbound_request_bytes,
+    )
+except ImportError:
+    from outbound_request_codec import (
+        bind_outbound_request_bytes,
+        encode_outbound_request_bytes,
+    )
 from revenue_ui_contract import (
     SEMANTIC_OUTWARD,
     canonical_json_bytes,

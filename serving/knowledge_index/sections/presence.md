@@ -188,6 +188,7 @@ production status, which is exactly a new artifact commit.
     "serving/taey_seat.py",
     "serving/validate_council_prompt_receipt_producer.py",
     "serving/validate_outbound_request_receipt_bytes.py",
+    "serving/validate_repo_root_imports.py",
     "serving/outbound_request_codec.py"
   ],
   "bootstrap": {

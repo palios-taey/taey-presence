@@ -9,11 +9,18 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from outbound_request_codec import (
-    bind_outbound_request_bytes,
-    encode_outbound_request_bytes,
-    outbound_request_sha256,
-)
+try:
+    from serving.outbound_request_codec import (
+        bind_outbound_request_bytes,
+        encode_outbound_request_bytes,
+        outbound_request_sha256,
+    )
+except ImportError:
+    from outbound_request_codec import (
+        bind_outbound_request_bytes,
+        encode_outbound_request_bytes,
+        outbound_request_sha256,
+    )
 
 
 MANIFEST_CONTRACT = "taey-local-council-seats/v1"

@@ -20,11 +20,18 @@ if "redis" not in sys.modules and importlib.util.find_spec("redis") is None:
     redis_stub.Redis = mock.MagicMock
     sys.modules["redis"] = redis_stub
 
-import council_prompt_receipt as producer
-from outbound_request_codec import (
-    bind_outbound_request_bytes,
-    encode_outbound_request_bytes,
-)
+try:
+    import serving.council_prompt_receipt as producer
+    from serving.outbound_request_codec import (
+        bind_outbound_request_bytes,
+        encode_outbound_request_bytes,
+    )
+except ImportError:
+    import council_prompt_receipt as producer
+    from outbound_request_codec import (
+        bind_outbound_request_bytes,
+        encode_outbound_request_bytes,
+    )
 
 
 ROOT = Path(__file__).resolve().parent
