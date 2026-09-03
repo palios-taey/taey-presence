@@ -31,6 +31,8 @@ jobs:
         run: python3 serving/validate_outbound_request_receipt_bytes.py
       - name: Prove council recovery outcome anti-forgery contract
         run: python3 serving/validate_council_session_recovery_anti_forgery.py
+      - name: Prove bounded tool rounds enforcement
+        run: python3 tests/test_bounded_tool_rounds.py
       - name: Install gitleaks
         # The gate exits 2 (INDETERMINATE) rather than passing if this is missing, so a broken
         # install surfaces as "could not determine" instead of a false clean bill.
