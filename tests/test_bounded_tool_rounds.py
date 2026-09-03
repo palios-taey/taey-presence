@@ -1,11 +1,50 @@
 import asyncio
+import importlib.util
 import json
 import sys
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from unittest import mock
-from fastapi import HTTPException
+
+# Install import-only stubs if dependencies are absent in CI runner
+if importlib.util.find_spec("fastapi") is None:
+    fastapi_stub = ModuleType("fastapi")
+
+    class HTTPException(Exception):
+        def __init__(self, status_code: int, detail: str = ""):
+            self.status_code = status_code
+            self.detail = detail
+            super().__init__(f"{status_code}: {detail}")
+
+    fastapi_stub.HTTPException = HTTPException
+    fastapi_stub.FastAPI = object
+    fastapi_stub.Request = object
+    fastapi_responses = ModuleType("fastapi.responses")
+    fastapi_responses.StreamingResponse = object
+    fastapi_responses.JSONResponse = object
+    sys.modules["fastapi"] = fastapi_stub
+    sys.modules["fastapi.responses"] = fastapi_responses
+else:
+    from fastapi import HTTPException
+
+if importlib.util.find_spec("httpx") is None:
+    sys.modules["httpx"] = ModuleType("httpx")
+
+if importlib.util.find_spec("redis") is None:
+    redis_stub = ModuleType("redis")
+    redis_stub.Redis = object
+    sys.modules["redis"] = redis_stub
+
+if importlib.util.find_spec("starlette") is None or importlib.util.find_spec("starlette.background") is None:
+    starlette_stub = ModuleType("starlette")
+    starlette_bg = ModuleType("starlette.background")
+    starlette_bg.BackgroundTask = object
+    sys.modules["starlette"] = starlette_stub
+    sys.modules["starlette.background"] = starlette_bg
+
+if importlib.util.find_spec("uvicorn") is None:
+    sys.modules["uvicorn"] = ModuleType("uvicorn")
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
