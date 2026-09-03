@@ -49,9 +49,49 @@ _TEXTUAL_TOOL_INTENT_RE = re.compile(r"<tool_call(?:>|\s)", re.IGNORECASE)
 
 
 class CompletionContractError(ValueError):
-    def __init__(self, code: str):
+    def __init__(self, code: str, completion_receipt: dict[str, Any]):
         super().__init__(code)
         self.code = code
+        self.completion_receipt = completion_receipt
+
+
+def _completion_receipt(
+    payload: Any,
+    requested_max_tokens: int | None,
+) -> dict[str, Any]:
+    response = payload if isinstance(payload, dict) else {}
+    choices = response.get("choices")
+    choice = choices[0] if isinstance(choices, list) and choices else {}
+    choice = choice if isinstance(choice, dict) else {}
+    usage = response.get("usage")
+    usage = usage if isinstance(usage, dict) else {}
+    bounded_usage = {
+        field_name: usage[field_name]
+        for field_name in (
+            "prompt_tokens",
+            "completion_tokens",
+            "total_tokens",
+            "reasoning_tokens",
+        )
+        if type(usage.get(field_name)) is int and usage[field_name] >= 0
+    }
+    completion_tokens = bounded_usage.get("completion_tokens")
+    return {
+        "contract": "taey-model-completion-receipt/v1",
+        "finish_reason": (
+            choice.get("finish_reason")
+            if isinstance(choice.get("finish_reason"), str)
+            else None
+        ),
+        "usage": bounded_usage,
+        "requested_max_tokens": requested_max_tokens,
+        "cap_exhausted": (
+            completion_tokens >= requested_max_tokens
+            if completion_tokens is not None
+            and requested_max_tokens is not None
+            else None
+        ),
+    }
 
 
 def _contains_textual_tool_intent(reply: str) -> bool:
@@ -71,27 +111,38 @@ def _contains_textual_tool_intent(reply: str) -> bool:
     )
 
 
-def _terminal_reply(payload: Any) -> str:
+def _terminal_reply(
+    payload: Any,
+    *,
+    requested_max_tokens: int | None = None,
+) -> str:
+    completion_receipt = _completion_receipt(payload, requested_max_tokens)
+
+    def reject(code: str) -> None:
+        raise CompletionContractError(code, completion_receipt)
+
     if not isinstance(payload, dict):
-        raise CompletionContractError("proxy_response_not_object")
+        reject("proxy_response_not_object")
     choices = payload.get("choices")
     if not isinstance(choices, list) or not choices:
-        raise CompletionContractError("proxy_choice_missing")
+        reject("proxy_choice_missing")
     choice = choices[0]
     if not isinstance(choice, dict):
-        raise CompletionContractError("proxy_choice_not_object")
+        reject("proxy_choice_not_object")
     message = choice.get("message")
     if not isinstance(message, dict):
-        raise CompletionContractError("proxy_message_missing")
+        reject("proxy_message_missing")
     if message.get("tool_calls"):
-        raise CompletionContractError("proxy_structured_tool_intent_unfinished")
+        reject("proxy_structured_tool_intent_unfinished")
+    if completion_receipt["cap_exhausted"] is True:
+        reject("proxy_completion_budget_exhausted")
     if choice.get("finish_reason") != "stop":
-        raise CompletionContractError("proxy_finish_reason_not_terminal")
+        reject("proxy_finish_reason_not_terminal")
     reply = message.get("content")
     if not isinstance(reply, str) or not reply.strip():
-        raise CompletionContractError("proxy_terminal_answer_missing")
+        reject("proxy_terminal_answer_missing")
     if _contains_textual_tool_intent(reply):
-        raise CompletionContractError("proxy_textual_tool_intent_unfinished")
+        reject("proxy_textual_tool_intent_unfinished")
     return reply
 
 
@@ -179,6 +230,7 @@ class ProxyResult:
     event_id: str
     correlation_id: str
     payload: dict[str, Any]
+    completion_receipt: dict[str, Any]
 
 
 QUEUES = (
@@ -797,15 +849,8 @@ class ProxyClient:
             raise SeatFailure(
                 f"proxy returned invalid JSON for correlation={correlation_id}: {exc}"
             ) from exc
-        reply = (
-            ((payload.get("choices") or [{}])[0].get("message") or {}).get("content")
-            if isinstance(payload, dict)
-            else None
-        )
-        if not isinstance(reply, str) or not reply.strip():
-            raise SeatFailure(
-                f"proxy returned no assistant content for correlation={correlation_id}"
-            )
+        reply = _terminal_reply(payload, requested_max_tokens=max_tokens)
+        completion_receipt = _completion_receipt(payload, max_tokens)
         returned_turn_id = str(response_headers.get("X-Taey-Turn-Id") or "")
         returned_event_id = str(response_headers.get("X-Taey-Event-Id") or "")
         returned_correlation_id = str(
@@ -835,6 +880,7 @@ class ProxyClient:
             event_id=returned_event_id,
             correlation_id=returned_correlation_id,
             payload=payload,
+            completion_receipt=completion_receipt,
         )
 
 
@@ -1162,7 +1208,7 @@ def _run_turn(
             correlation_id=correlation_id,
             messages=store.messages_for(prompt, include_history=not claims),
         )
-        reply = _terminal_reply(result.payload)
+        reply = result.reply
         store.append(
             "turn_outcome",
             ok=True,
@@ -1178,10 +1224,19 @@ def _run_turn(
             source_id=result.turn_id,
             kind="assistant_raise" if claims else "assistant_reply",
             conversation_visible=True,
+            model_completion_receipt=result.completion_receipt,
         )
     except Exception as exc:
         try:
             inbox.quarantine(claims)
+            completion_failure = (
+                {
+                    "completion_error_code": exc.code,
+                    "model_completion_receipt": exc.completion_receipt,
+                }
+                if isinstance(exc, CompletionContractError)
+                else {}
+            )
             store.append(
                 "turn_outcome",
                 ok=False,
@@ -1192,6 +1247,7 @@ def _run_turn(
                 error=f"{type(exc).__name__}: {exc}",
                 claim_state="quarantined" if claims else "not_applicable",
                 continuation="reconciliation_required",
+                **completion_failure,
             )
         except Exception as recovery_exc:
             raise SeatFailure(

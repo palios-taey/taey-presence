@@ -45,6 +45,33 @@ PROCESS_GENERATION = uuid.uuid4().hex
 CONTRIBUTION_FIELDS = prompt_producer.CONTRIBUTION_FIELDS
 CONTRIBUTION_LIST_FIELDS = prompt_producer.CONTRIBUTION_LIST_FIELDS
 
+
+class ContributionContractError(executive.SeatFailure):
+    def __init__(self, code: str, detail: str):
+        super().__init__(detail)
+        self.code = code
+
+
+def _completion_diagnostics(
+    error: Exception | None = None,
+    result: executive.ProxyResult | None = None,
+) -> dict[str, Any]:
+    fields: dict[str, Any] = {}
+    if result is not None:
+        fields["model_completion_receipt"] = result.completion_receipt
+    if isinstance(error, executive.CompletionContractError):
+        fields.update({
+            "validation_error_class": type(error).__name__,
+            "validation_error_code": error.code,
+            "model_completion_receipt": error.completion_receipt,
+        })
+    elif isinstance(error, ContributionContractError):
+        fields.update({
+            "validation_error_class": type(error).__name__,
+            "validation_error_code": error.code,
+        })
+    return fields
+
 _REGISTER_AT_REST_LUA = """
 if redis.call('EXISTS', KEYS[6]) == 1 then
     return redis.error_reply('a live council seat generation is already registered')
@@ -453,17 +480,22 @@ def _validated_contribution(
     try:
         contribution = json.loads(reply)
     except json.JSONDecodeError as exc:
-        raise executive.SeatFailure(
+        raise ContributionContractError(
+            "invalid_json",
             f"{RESPONSE_CONTRACT} reply is not valid JSON: {exc}"
         ) from exc
     if not isinstance(contribution, dict):
-        raise executive.SeatFailure(f"{RESPONSE_CONTRACT} reply must be an object")
+        raise ContributionContractError(
+            "not_object",
+            f"{RESPONSE_CONTRACT} reply must be an object",
+        )
     actual_fields = set(contribution)
     expected_fields = set(CONTRIBUTION_FIELDS)
     if actual_fields != expected_fields:
         missing = sorted(expected_fields - actual_fields)
         unexpected = sorted(actual_fields - expected_fields)
-        raise executive.SeatFailure(
+        raise ContributionContractError(
+            "fields_mismatch",
             f"{RESPONSE_CONTRACT} fields mismatch "
             f"missing={missing} unexpected={unexpected}"
         )
@@ -471,69 +503,99 @@ def _validated_contribution(
         type(contribution["schema_version"]) is not int
         or contribution["schema_version"] != 1
     ):
-        raise executive.SeatFailure(
+        raise ContributionContractError(
+            "schema_version_mismatch",
             f"{RESPONSE_CONTRACT} schema_version must be integer 1"
         )
     if contribution["seat_id"] != executive.SESSION:
-        raise executive.SeatFailure(
+        raise ContributionContractError(
+            "seat_id_mismatch",
             f"{RESPONSE_CONTRACT} seat_id must be {executive.SESSION}"
         )
     if contribution["role_id"] != ROLE_ID:
-        raise executive.SeatFailure(
+        raise ContributionContractError(
+            "role_id_mismatch",
             f"{RESPONSE_CONTRACT} role_id must be {ROLE_ID}"
         )
     if (
         type(contribution["prompt_revision"]) is not int
         or contribution["prompt_revision"] != lineage["prompt_revision"]
     ):
-        raise executive.SeatFailure(
+        raise ContributionContractError(
+            "prompt_revision_mismatch",
             f"{RESPONSE_CONTRACT} prompt_revision must be integer "
             f"{lineage['prompt_revision']}"
         )
     status = contribution["status"]
-    if (
-        not isinstance(status, str)
-        or not status.strip()
-        or len(status) > prompt_producer.CONTRIBUTION_STATUS_MAX_CHARS
-    ):
-        raise executive.SeatFailure(
-            f"{RESPONSE_CONTRACT} status must be a non-empty string no longer than "
-            f"{prompt_producer.CONTRIBUTION_STATUS_MAX_CHARS} characters"
+    if status not in prompt_producer.CONTRIBUTION_STATUS_VALUES:
+        raise ContributionContractError(
+            "status_value",
+            f"{RESPONSE_CONTRACT} status is not an allowed value",
         )
-    for field_name in CONTRIBUTION_LIST_FIELDS:
+    for field_name in prompt_producer.CONTRIBUTION_NARRATIVE_FIELDS:
         values = contribution[field_name]
         if (
             not isinstance(values, list)
             or len(values) > prompt_producer.CONTRIBUTION_LIST_MAX_ITEMS
             or any(
                 not isinstance(value, str)
-                or not value.strip()
+                or not value
                 or len(value) > prompt_producer.CONTRIBUTION_ITEM_MAX_CHARS
+                or not value.isascii()
+                or not value.isprintable()
+                or '"' in value
+                or "\\" in value
                 for value in values
             )
         ):
-            raise executive.SeatFailure(
+            raise ContributionContractError(
+                f"{field_name}_bounds",
                 f"{RESPONSE_CONTRACT} {field_name} must be an array "
                 f"of at most {prompt_producer.CONTRIBUTION_LIST_MAX_ITEMS} non-empty "
                 f"strings no longer than "
                 f"{prompt_producer.CONTRIBUTION_ITEM_MAX_CHARS} characters"
             )
+    evidence_refs = contribution["evidence_refs"]
+    if (
+        not isinstance(evidence_refs, list)
+        or len(evidence_refs) > prompt_producer.CONTRIBUTION_EVIDENCE_MAX_ITEMS
+        or any(
+            not isinstance(value, str)
+            or not value
+            or len(value) > prompt_producer.CONTRIBUTION_EVIDENCE_MAX_CHARS
+            or not value.isascii()
+            or not value.isprintable()
+            or '"' in value
+            or "\\" in value
+            for value in evidence_refs
+        )
+    ):
+        raise ContributionContractError(
+            "evidence_refs_bounds",
+            f"{RESPONSE_CONTRACT} evidence_refs exceed their bounded registry contract",
+        )
     unregistered_evidence = sorted(
-        set(contribution["evidence_refs"]) - set(lineage["evidence_registry"])
+        set(evidence_refs) - set(lineage["evidence_registry"])
     )
     if unregistered_evidence:
-        raise executive.SeatFailure(
+        raise ContributionContractError(
+            "unregistered_evidence",
             f"{RESPONSE_CONTRACT} evidence_refs are not registered: "
             f"{unregistered_evidence}"
         )
     recommendation = contribution["recommendation"]
     if (
         not isinstance(recommendation, str)
-        or not recommendation.strip()
+        or not recommendation
         or len(recommendation)
         > prompt_producer.CONTRIBUTION_RECOMMENDATION_MAX_CHARS
+        or not recommendation.isascii()
+        or not recommendation.isprintable()
+        or '"' in recommendation
+        or "\\" in recommendation
     ):
-        raise executive.SeatFailure(
+        raise ContributionContractError(
+            "recommendation_bounds",
             f"{RESPONSE_CONTRACT} recommendation must be a non-empty string no "
             f"longer than "
             f"{prompt_producer.CONTRIBUTION_RECOMMENDATION_MAX_CHARS} characters"
@@ -542,9 +604,10 @@ def _validated_contribution(
     if (
         isinstance(confidence, bool)
         or not isinstance(confidence, (int, float))
-        or not 0 <= confidence <= 1
+        or confidence not in {0, 0.25, 0.5, 0.75, 1}
     ):
-        raise executive.SeatFailure(
+        raise ContributionContractError(
+            "confidence_bounds",
             f"{RESPONSE_CONTRACT} confidence must be a number from 0 through 1"
         )
     return contribution
@@ -798,18 +861,23 @@ def _run_dcm_turn(
     def invoke(_wave: dict[str, Any]) -> executive.ProxyResult:
         store.append("turn_attempt", **attempt_fields)
         liveness.assert_healthy()
-        result = proxy.ask(
-            prompt,
-            event_id=event_id,
-            correlation_id=correlation_id,
-            messages=messages,
-            response_format=contribution_format,
-            max_rounds=prompt_producer.COUNCIL_MAX_TOOL_ROUNDS,
-            max_tokens=prompt_producer.COUNCIL_MAX_COMPLETION_TOKENS,
-            tool_profile_receipt=producer_receipt,
-            outbound_request_bytes=outbound_request_bytes,
-        )
+        try:
+            result = proxy.ask(
+                prompt,
+                event_id=event_id,
+                correlation_id=correlation_id,
+                messages=messages,
+                response_format=contribution_format,
+                max_rounds=prompt_producer.COUNCIL_MAX_TOOL_ROUNDS,
+                max_tokens=prompt_producer.COUNCIL_MAX_COMPLETION_TOKENS,
+                tool_profile_receipt=producer_receipt,
+                outbound_request_bytes=outbound_request_bytes,
+            )
+        except executive.CompletionContractError as exc:
+            invoked.update(_completion_diagnostics(error=exc))
+            raise
         invoked["result"] = result
+        invoked.update(_completion_diagnostics(result=result))
         liveness.assert_healthy()
         return result
 
@@ -817,7 +885,11 @@ def _run_dcm_turn(
         result: executive.ProxyResult,
         _wave: dict[str, Any],
     ) -> dict[str, Any]:
-        contribution = _validated_contribution(result.reply, lineage)
+        try:
+            contribution = _validated_contribution(result.reply, lineage)
+        except ContributionContractError as exc:
+            invoked.update(_completion_diagnostics(error=exc, result=result))
+            raise
         invoked["contribution"] = contribution
         return contribution
 
@@ -847,6 +919,15 @@ def _run_dcm_turn(
             dcm_transport_receipt=receipt,
             context_visible=False,
             conversation_visible=False,
+            **{
+                field_name: invoked[field_name]
+                for field_name in (
+                    "validation_error_class",
+                    "validation_error_code",
+                    "model_completion_receipt",
+                )
+                if field_name in invoked
+            },
             **lineage,
         )
         raise executive.SeatFailure(str(exc)) from exc
@@ -884,6 +965,9 @@ def _run_dcm_turn(
         dcm_transport_receipt=receipt,
         context_visible=True,
         conversation_visible=False,
+        model_completion_receipt=(
+            result.completion_receipt if result is not None else None
+        ),
         **lineage,
     )
     store.remember_outcome(prompt, reply, [claim.message_id])
@@ -1060,6 +1144,7 @@ def _run_turn(
         )
     store.append("turn_attempt", **attempt_fields)
     inference_state = "side_effect_uncertain"
+    result: executive.ProxyResult | None = None
     try:
         liveness.assert_healthy()
         result = proxy.ask(
@@ -1097,12 +1182,14 @@ def _run_turn(
             kind="council_contribution",
             context_visible=True,
             conversation_visible=False,
+            model_completion_receipt=result.completion_receipt,
             **lineage,
         )
     except SeatGenerationLost:
         raise
     except Exception as exc:
         try:
+            diagnostics = _completion_diagnostics(error=exc, result=result)
             store.append(
                 "turn_outcome",
                 ok=False,
@@ -1116,6 +1203,7 @@ def _run_turn(
                 inference_state=inference_state,
                 context_visible=False,
                 conversation_visible=False,
+                **diagnostics,
                 **lineage,
             )
             liveness.assert_healthy()

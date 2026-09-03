@@ -118,10 +118,15 @@ EXPECTED = {
     "max_completion_tokens": 1_500,
 }
 OUTPUT_EXPECTED = {
-    "status_chars": 64,
-    "list_items": 3,
-    "item_chars": 240,
-    "recommendation_chars": 480,
+    "status_chars": 24,
+    "list_items": 1,
+    "item_chars": 96,
+    "evidence_items": 2,
+    "evidence_chars": 175,
+    "recommendation_chars": 192,
+    "prompt_revision": 2_147_483_647,
+    "canonical_response_bytes": 1_350,
+    "terminal_token_allowance": 1,
 }
 READ_TOOLS = {
     "check_body_state",
@@ -163,7 +168,14 @@ def validate_contract_values() -> None:
         "status_chars": producer.CONTRIBUTION_STATUS_MAX_CHARS,
         "list_items": producer.CONTRIBUTION_LIST_MAX_ITEMS,
         "item_chars": producer.CONTRIBUTION_ITEM_MAX_CHARS,
+        "evidence_items": producer.CONTRIBUTION_EVIDENCE_MAX_ITEMS,
+        "evidence_chars": producer.CONTRIBUTION_EVIDENCE_MAX_CHARS,
         "recommendation_chars": producer.CONTRIBUTION_RECOMMENDATION_MAX_CHARS,
+        "prompt_revision": producer.CONTRIBUTION_MAX_PROMPT_REVISION,
+        "canonical_response_bytes": producer.COUNCIL_MAX_CANONICAL_RESPONSE_BYTES,
+        "terminal_token_allowance": (
+            producer.COUNCIL_COMPLETION_TERMINAL_TOKEN_ALLOWANCE
+        ),
     }
     require(output == OUTPUT_EXPECTED, f"contribution budget drifted: {output}")
     tools = soma_proxy._tools_for_profile(producer.COUNCIL_TOOL_PROFILE)
@@ -192,17 +204,86 @@ def validate_contract_values() -> None:
     properties = producer.response_format(
         manifest.seats[0], 1, ["fleet_message:budget-gate"]
     )["json_schema"]["schema"]["properties"]
-    require(properties["status"]["maxLength"] == 64, "status bound drifted")
     require(
-        properties["recommendation"]["maxLength"] == 480,
+        properties["status"]["enum"] == list(producer.CONTRIBUTION_STATUS_VALUES),
+        "status values drifted",
+    )
+    require(
+        producer.CONTRIBUTION_ITEM_PATTERN
+        == r"^[\x20-\x21\x23-\x5B\x5D-\x7E]{1,96}$"
+        and producer.CONTRIBUTION_RECOMMENDATION_PATTERN
+        == r"^[\x20-\x21\x23-\x5B\x5D-\x7E]{1,192}$",
+        "response patterns lost their bounded safe-ASCII language",
+    )
+    require(
+        properties["recommendation"]["maxLength"] == 192
+        and properties["recommendation"]["pattern"]
+        == producer.CONTRIBUTION_RECOMMENDATION_PATTERN,
         "recommendation bound drifted",
     )
-    for field_name in producer.CONTRIBUTION_LIST_FIELDS:
+    for field_name in producer.CONTRIBUTION_NARRATIVE_FIELDS:
         require(
-            properties[field_name]["maxItems"] == 3
-            and properties[field_name]["items"]["maxLength"] == 240,
+            properties[field_name]["maxItems"] == 1
+            and properties[field_name]["items"]["maxLength"] == 96
+            and properties[field_name]["items"]["pattern"]
+            == producer.CONTRIBUTION_ITEM_PATTERN,
             f"{field_name} schema bound drifted",
         )
+    require(
+        properties["evidence_refs"]["maxItems"] == 2
+        and properties["evidence_refs"]["items"]["maxLength"] == 175,
+        "evidence_refs schema bound drifted",
+    )
+    for unbounded_reference in (
+        'unsafe"reference',
+        "unsafe\\reference",
+        "unsafe\nreference",
+    ):
+        try:
+            producer.response_format(manifest.seats[0], 1, [unbounded_reference])
+        except ValueError:
+            continue
+        raise RuntimeError("unsafe evidence reference entered the response grammar")
+    longest_role_id = max((seat.role_id for seat in manifest.seats), key=len)
+    maximal_contribution = {
+        "schema_version": 1,
+        "seat_id": "taey-council-7",
+        "role_id": longest_role_id,
+        "status": max(producer.CONTRIBUTION_STATUS_VALUES, key=len),
+        "prompt_revision": producer.CONTRIBUTION_MAX_PROMPT_REVISION,
+        "observations": ["W" * producer.CONTRIBUTION_ITEM_MAX_CHARS],
+        "inferences": ["W" * producer.CONTRIBUTION_ITEM_MAX_CHARS],
+        "unknowns": ["W" * producer.CONTRIBUTION_ITEM_MAX_CHARS],
+        "evidence_refs": [
+            "W" * producer.CONTRIBUTION_EVIDENCE_MAX_CHARS,
+            "W" * producer.CONTRIBUTION_EVIDENCE_MAX_CHARS,
+        ],
+        "concerns": ["W" * producer.CONTRIBUTION_ITEM_MAX_CHARS],
+        "questions": ["W" * producer.CONTRIBUTION_ITEM_MAX_CHARS],
+        "recommendation": "W" * producer.CONTRIBUTION_RECOMMENDATION_MAX_CHARS,
+        "confidence": 0.25,
+    }
+    maximal_bytes = producer.encode_outbound_request_bytes(maximal_contribution)
+    require(
+        len(maximal_bytes) <= producer.COUNCIL_MAX_CANONICAL_RESPONSE_BYTES
+        and producer.COUNCIL_MAX_CANONICAL_RESPONSE_BYTES
+        + producer.COUNCIL_COMPLETION_TERMINAL_TOKEN_ALLOWANCE
+        < producer.COUNCIL_MAX_COMPLETION_TOKENS,
+        f"canonical response envelope is not bounded: {len(maximal_bytes)} bytes",
+    )
+    launcher = (ROOT / "vllm_serve.sh").read_text(encoding="utf-8")
+    require(
+        'STRUCTURED_OUTPUTS_CONFIG="${TAEY_STRUCTURED_OUTPUTS_CONFIG:-'
+        '{\\"disable_any_whitespace\\":true}}"' in launcher
+        and '--structured-outputs-config "${STRUCTURED_OUTPUTS_CONFIG}"' in launcher,
+        "vLLM launcher does not disable unbounded structured-output whitespace",
+    )
+    require(
+        "ghcr.io/nvidia-ai-iot/vllm@sha256:"
+        "b587dd56b4cb076209ad5156a626ac75f5a976d0e8e7d1e6a9fccd56d1bd65e8"
+        in launcher,
+        "deployed tokenizer and xgrammar image pin drifted",
+    )
 
 
 def request_material() -> dict:
@@ -260,7 +341,7 @@ def request_material() -> dict:
         "concerns": [],
         "questions": [],
         "recommendation": "Use the bounded path.",
-        "confidence": 0.9,
+        "confidence": 0.75,
     }
     return {
         "lineage": lineage,
@@ -558,6 +639,77 @@ def validate_council_chat_path() -> None:
             observed_path["lineage"],
         )
     require(contribution == observed_path["contribution"], "seat output validation drifted")
+    completion_receipt = observed_path["result"].completion_receipt
+    require(
+        completion_receipt["finish_reason"] == "stop"
+        and completion_receipt["usage"]["completion_tokens"] == 100
+        and completion_receipt["requested_max_tokens"] == 1_500
+        and completion_receipt["cap_exhausted"] is False,
+        "successful completion receipt drifted",
+    )
+
+
+def validate_proxy_terminal_parser() -> None:
+    payload = {
+        "choices": [{
+            "finish_reason": "length",
+            "message": {"role": "assistant", "content": '{"partial":true'},
+        }],
+        "usage": {
+            "prompt_tokens": 7_590,
+            "completion_tokens": 1_500,
+            "total_tokens": 9_090,
+        },
+    }
+    response = mock.MagicMock()
+    response.read.return_value = json.dumps(payload).encode("utf-8")
+    response.headers = {
+        "X-Taey-Turn-Id": "turn-cap",
+        "X-Taey-Event-Id": "event-cap",
+        "X-Taey-Correlation-Id": "round-cap",
+    }
+    response.__enter__.return_value = response
+    with mock.patch.object(
+        executive.urllib.request,
+        "urlopen",
+        return_value=response,
+    ):
+        try:
+            executive.ProxyClient().ask(
+                "bounded",
+                event_id="event-cap",
+                correlation_id="round-cap",
+                messages=[{"role": "user", "content": "bounded"}],
+                max_tokens=producer.COUNCIL_MAX_COMPLETION_TOKENS,
+            )
+        except executive.CompletionContractError as exc:
+            require(
+                exc.code == "proxy_completion_budget_exhausted"
+                and exc.completion_receipt == {
+                    "contract": "taey-model-completion-receipt/v1",
+                    "finish_reason": "length",
+                    "usage": {
+                        "prompt_tokens": 7_590,
+                        "completion_tokens": 1_500,
+                        "total_tokens": 9_090,
+                    },
+                    "requested_max_tokens": 1_500,
+                    "cap_exhausted": True,
+                },
+                "cap exhaustion was not preserved as a content-free receipt",
+            )
+            diagnostics = council_runtime._completion_diagnostics(error=exc)
+            require(
+                diagnostics["validation_error_class"]
+                == "CompletionContractError"
+                and diagnostics["validation_error_code"]
+                == "proxy_completion_budget_exhausted"
+                and diagnostics["model_completion_receipt"]
+                == exc.completion_receipt,
+                "council did not retain terminal parser diagnostics",
+            )
+            return
+    raise RuntimeError("ProxyClient accepted a completion that exhausted its cap")
 
 
 def validate_profile_receipt_drift_rejected() -> None:
@@ -621,8 +773,27 @@ def validate_seat_output_rejection() -> None:
                 json.dumps(invalid),
                 material["lineage"],
             )
-        except executive.SeatFailure:
-            return
+        except council_runtime.ContributionContractError as exc:
+            require(
+                exc.code == "observations_bounds"
+                and council_runtime._completion_diagnostics(error=exc)
+                == {
+                    "validation_error_class": "ContributionContractError",
+                    "validation_error_code": "observations_bounds",
+                },
+                "oversized contribution did not retain a bounded error code",
+            )
+            try:
+                council_runtime._validated_contribution(
+                    '{"unfinished":',
+                    material["lineage"],
+                )
+            except council_runtime.ContributionContractError as invalid_json:
+                require(
+                    invalid_json.code == "invalid_json",
+                    "invalid JSON did not retain its bounded error code",
+                )
+                return
     raise RuntimeError("oversized council contribution was accepted")
 
 
@@ -787,6 +958,12 @@ def prove_mutation_red() -> list[str]:
         _expect_red("cumulative-byte-limit", validate_council_chat_path, caught)
     with mock.patch.object(producer, "COUNCIL_MAX_COMPLETION_TOKENS", 1_501):
         _expect_red("seat-completion-limit", validate_council_chat_path, caught)
+    with mock.patch.object(
+        producer,
+        "CONTRIBUTION_ITEM_PATTERN",
+        r"^[\x20-\x21\x23-\x5B\x5D-\x7E]+$",
+    ):
+        _expect_red("response-pattern-bound", validate_contract_values, caught)
     original_system_message = producer.system_message
 
     def numeric_budget_prompt(seat):
@@ -820,6 +997,18 @@ def prove_mutation_red() -> list[str]:
             caught,
         )
     with mock.patch.object(
+        executive,
+        "_terminal_reply",
+        side_effect=lambda payload, **_kwargs: payload["choices"][0]["message"][
+            "content"
+        ],
+    ):
+        _expect_red(
+            "proxy-terminal-parser",
+            validate_proxy_terminal_parser,
+            caught,
+        )
+    with mock.patch.object(
         dashboard_app,
         "_terminal_council_synthesis",
         side_effect=lambda data: data["choices"][0]["message"]["content"],
@@ -842,6 +1031,7 @@ def main() -> int:
     validate_call_limit_rejection()
     validate_top_k_rejection()
     validate_seat_output_rejection()
+    validate_proxy_terminal_parser()
     validate_full_profile_unchanged()
     asyncio.run(validate_main_synthesis())
     mutations = prove_mutation_red() if args.prove_mutation_red else []

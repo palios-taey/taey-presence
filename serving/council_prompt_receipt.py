@@ -38,10 +38,28 @@ COUNCIL_MAX_SEARCH_RESULTS = 3
 COUNCIL_MAX_TOOL_RESULT_BYTES = 3_000
 COUNCIL_MAX_TOOL_RESULT_TOTAL_BYTES = 6_000
 COUNCIL_MAX_COMPLETION_TOKENS = 1_500
-CONTRIBUTION_STATUS_MAX_CHARS = 64
-CONTRIBUTION_LIST_MAX_ITEMS = 3
-CONTRIBUTION_ITEM_MAX_CHARS = 240
-CONTRIBUTION_RECOMMENDATION_MAX_CHARS = 480
+COUNCIL_MAX_CANONICAL_RESPONSE_BYTES = 1_350
+COUNCIL_COMPLETION_TERMINAL_TOKEN_ALLOWANCE = 1
+CONTRIBUTION_STATUS_VALUES = (
+    "contributed",
+    "partial",
+    "not_ready",
+    "no_material_contribution",
+)
+CONTRIBUTION_STATUS_MAX_CHARS = max(map(len, CONTRIBUTION_STATUS_VALUES))
+CONTRIBUTION_LIST_MAX_ITEMS = 1
+CONTRIBUTION_ITEM_MAX_CHARS = 96
+CONTRIBUTION_EVIDENCE_MAX_ITEMS = 2
+CONTRIBUTION_EVIDENCE_MAX_CHARS = 175
+CONTRIBUTION_RECOMMENDATION_MAX_CHARS = 192
+CONTRIBUTION_MAX_PROMPT_REVISION = 2_147_483_647
+CONTRIBUTION_ITEM_PATTERN = (
+    rf"^[\x20-\x21\x23-\x5B\x5D-\x7E]{{1,{CONTRIBUTION_ITEM_MAX_CHARS}}}$"
+)
+CONTRIBUTION_RECOMMENDATION_PATTERN = (
+    rf"^[\x20-\x21\x23-\x5B\x5D-\x7E]"
+    rf"{{1,{CONTRIBUTION_RECOMMENDATION_MAX_CHARS}}}$"
+)
 PROMPT_REVISION_MARKER = "<runtime-positive-integer>"
 EVIDENCE_REGISTRY_MARKER = ("<runtime-evidence-registry>",)
 _SEAT_ID_RE = re.compile(r"^taey-council-([1-9][0-9]*)$")
@@ -68,6 +86,11 @@ CONTRIBUTION_LIST_FIELDS = (
     "evidence_refs",
     "concerns",
     "questions",
+)
+CONTRIBUTION_NARRATIVE_FIELDS = tuple(
+    field_name
+    for field_name in CONTRIBUTION_LIST_FIELDS
+    if field_name != "evidence_refs"
 )
 
 
@@ -275,14 +298,29 @@ def response_format(
     prompt_revision: int | str = PROMPT_REVISION_MARKER,
     evidence_registry: list[str] | tuple[str, ...] = EVIDENCE_REGISTRY_MARKER,
 ) -> dict[str, Any]:
+    if (
+        type(prompt_revision) is int
+        and not 1 <= prompt_revision <= CONTRIBUTION_MAX_PROMPT_REVISION
+    ):
+        raise ValueError("prompt_revision exceeds the bounded response contract")
+    if any(
+        not isinstance(reference, str)
+        or not reference
+        or len(reference) > CONTRIBUTION_EVIDENCE_MAX_CHARS
+        or not reference.isascii()
+        or not reference.isprintable()
+        or '"' in reference
+        or "\\" in reference
+        for reference in evidence_registry
+    ):
+        raise ValueError("evidence_registry contains an unbounded reference")
     properties: dict[str, Any] = {
         "schema_version": {"type": "integer", "const": 1},
         "seat_id": {"type": "string", "const": seat.seat_id},
         "role_id": {"type": "string", "const": seat.role_id},
         "status": {
             "type": "string",
-            "minLength": 1,
-            "maxLength": CONTRIBUTION_STATUS_MAX_CHARS,
+            "enum": list(CONTRIBUTION_STATUS_VALUES),
         },
         "prompt_revision": {
             "type": "integer",
@@ -292,22 +330,31 @@ def response_format(
             "type": "string",
             "minLength": 1,
             "maxLength": CONTRIBUTION_RECOMMENDATION_MAX_CHARS,
+            "pattern": CONTRIBUTION_RECOMMENDATION_PATTERN,
         },
-        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+        "confidence": {"type": "number", "enum": [0, 0.25, 0.5, 0.75, 1]},
     }
-    for field_name in CONTRIBUTION_LIST_FIELDS:
-        item_schema: dict[str, Any] = {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": CONTRIBUTION_ITEM_MAX_CHARS,
-        }
-        if field_name == "evidence_refs":
-            item_schema["enum"] = list(evidence_registry)
+    for field_name in CONTRIBUTION_NARRATIVE_FIELDS:
         properties[field_name] = {
             "type": "array",
             "maxItems": CONTRIBUTION_LIST_MAX_ITEMS,
-            "items": item_schema,
+            "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": CONTRIBUTION_ITEM_MAX_CHARS,
+                "pattern": CONTRIBUTION_ITEM_PATTERN,
+            },
         }
+    properties["evidence_refs"] = {
+        "type": "array",
+        "maxItems": CONTRIBUTION_EVIDENCE_MAX_ITEMS,
+        "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": CONTRIBUTION_EVIDENCE_MAX_CHARS,
+            "enum": list(evidence_registry),
+        },
+    }
     return {
         "type": "json_schema",
         "json_schema": {
