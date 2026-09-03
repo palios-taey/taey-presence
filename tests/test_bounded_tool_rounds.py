@@ -137,6 +137,17 @@ class BoundedToolRoundTests(unittest.TestCase):
             started_at=1.0,
         )
 
+    def _inexhaustible_mock_http(self, tool_payload: dict, final_payload: dict) -> mock.AsyncMock:
+        async def mock_post(*args, **kwargs):
+            req_body = kwargs.get("json", {})
+            if req_body.get("tool_choice") == "none" or "tools" not in req_body:
+                return SimpleNamespace(status_code=200, json=lambda: final_payload)
+            return SimpleNamespace(status_code=200, json=lambda: tool_payload)
+
+        http = mock.AsyncMock()
+        http.post.side_effect = mock_post
+        return http
+
     def test_nonstream_request_forces_final_answer_at_round_limit(self):
         tool_payload = {
             "choices": [{
@@ -162,13 +173,7 @@ class BoundedToolRoundTests(unittest.TestCase):
             }],
             "usage": {"prompt_tokens": 10, "completion_tokens": 2},
         }
-        responses = [
-            SimpleNamespace(status_code=200, json=lambda: tool_payload),
-            SimpleNamespace(status_code=200, json=lambda: tool_payload),
-            SimpleNamespace(status_code=200, json=lambda: final_payload),
-        ]
-        http = mock.AsyncMock()
-        http.post.side_effect = responses
+        http = self._inexhaustible_mock_http(tool_payload, final_payload)
         turn = self._make_turn()
         body = {
             "model": "ep3",
@@ -202,6 +207,7 @@ class BoundedToolRoundTests(unittest.TestCase):
                 )
             )
 
+        # Load-bearing assertions: exactly 2 tool calls executed + 1 final answer
         self.assertEqual(http.post.await_count, 3)
         self.assertEqual(execute.await_count, 2)
         first_body = http.post.await_args_list[0].kwargs["json"]
@@ -225,6 +231,7 @@ class BoundedToolRoundTests(unittest.TestCase):
             [2],
             {"rounds": 2},
         ]
+        http = mock.AsyncMock()
         for invalid_value in invalid_types:
             with self.subTest(invalid_type=type(invalid_value), value=invalid_value):
                 body = {
@@ -232,19 +239,21 @@ class BoundedToolRoundTests(unittest.TestCase):
                     "messages": [{"role": "user", "content": "test"}],
                     "max_rounds": invalid_value,
                 }
-                with self.assertRaises(HTTPException) as ctx:
-                    asyncio.run(
-                        soma_proxy._chat_completions_for_turn(
-                            body,
-                            turn,
-                            liveness_registered=False,
+                with mock.patch.object(soma_proxy, "_http", http):
+                    with self.assertRaises(HTTPException) as ctx:
+                        asyncio.run(
+                            soma_proxy._chat_completions_for_turn(
+                                body,
+                                turn,
+                                liveness_registered=False,
+                            )
                         )
+                    self.assertEqual(ctx.exception.status_code, 422)
+                    self.assertEqual(
+                        ctx.exception.detail,
+                        "max_rounds must be an integer from 1 through 32",
                     )
-                self.assertEqual(ctx.exception.status_code, 422)
-                self.assertEqual(
-                    ctx.exception.detail,
-                    "max_rounds must be an integer from 1 through 32",
-                )
+        self.assertEqual(http.post.await_count, 0)
 
     def test_invalid_max_rounds_range_raises_http_422(self):
         turn = self._make_turn()
@@ -256,6 +265,7 @@ class BoundedToolRoundTests(unittest.TestCase):
             34,
             100,
         ]
+        http = mock.AsyncMock()
         for invalid_value in invalid_ranges:
             with self.subTest(value=invalid_value):
                 body = {
@@ -263,21 +273,23 @@ class BoundedToolRoundTests(unittest.TestCase):
                     "messages": [{"role": "user", "content": "test"}],
                     "max_rounds": invalid_value,
                 }
-                with self.assertRaises(HTTPException) as ctx:
-                    asyncio.run(
-                        soma_proxy._chat_completions_for_turn(
-                            body,
-                            turn,
-                            liveness_registered=False,
+                with mock.patch.object(soma_proxy, "_http", http):
+                    with self.assertRaises(HTTPException) as ctx:
+                        asyncio.run(
+                            soma_proxy._chat_completions_for_turn(
+                                body,
+                                turn,
+                                liveness_registered=False,
+                            )
                         )
+                    self.assertEqual(ctx.exception.status_code, 422)
+                    self.assertEqual(
+                        ctx.exception.detail,
+                        "max_rounds must be an integer from 1 through 32",
                     )
-                self.assertEqual(ctx.exception.status_code, 422)
-                self.assertEqual(
-                    ctx.exception.detail,
-                    "max_rounds must be an integer from 1 through 32",
-                )
+        self.assertEqual(http.post.await_count, 0)
 
-    def test_valid_max_rounds_boundaries_accepted(self):
+    def test_valid_max_rounds_boundaries_accepted_without_tools(self):
         final_payload = {
             "choices": [{
                 "finish_reason": "stop",
@@ -343,13 +355,8 @@ class BoundedToolRoundTests(unittest.TestCase):
             }],
             "usage": {"prompt_tokens": 10, "completion_tokens": 2},
         }
-        # Test with ceiling = 3: 3 tool rounds + 1 forced final answer
         ceiling = 3
-        responses = [SimpleNamespace(status_code=200, json=lambda: tool_payload)] * ceiling + [
-            SimpleNamespace(status_code=200, json=lambda: final_payload)
-        ]
-        http = mock.AsyncMock()
-        http.post.side_effect = responses
+        http = self._inexhaustible_mock_http(tool_payload, final_payload)
         turn = self._make_turn()
         body = {
             "model": "ep3",
@@ -386,6 +393,7 @@ class BoundedToolRoundTests(unittest.TestCase):
                 )
             )
 
+        # Invariant: omission terminates at exactly ceiling rounds
         self.assertEqual(http.post.await_count, ceiling + 1)
         self.assertEqual(execute.await_count, ceiling)
         final_body = http.post.await_args_list[-1].kwargs["json"]
@@ -418,13 +426,8 @@ class BoundedToolRoundTests(unittest.TestCase):
             }],
             "usage": {"prompt_tokens": 10, "completion_tokens": 2},
         }
-        # Proxy ceiling is 2; caller requests 10 -> effective is clamped to 2
         ceiling = 2
-        responses = [SimpleNamespace(status_code=200, json=lambda: tool_payload)] * ceiling + [
-            SimpleNamespace(status_code=200, json=lambda: final_payload)
-        ]
-        http = mock.AsyncMock()
-        http.post.side_effect = responses
+        http = self._inexhaustible_mock_http(tool_payload, final_payload)
         turn = self._make_turn()
         body = {
             "model": "ep3",
@@ -461,6 +464,7 @@ class BoundedToolRoundTests(unittest.TestCase):
                 )
             )
 
+        # Invariant: caller request for 10 is clamped to ceiling 2
         self.assertEqual(http.post.await_count, ceiling + 1)
         self.assertEqual(execute.await_count, ceiling)
         final_body = http.post.await_args_list[-1].kwargs["json"]
