@@ -251,6 +251,9 @@ echo "[deploy] serve + model-identity units installed + daemon-reload"
 if [ "$RESTART" -eq 1 ]; then
   ssh "$TARGET" "sudo test -s /etc/taey/model-identity-attestor.env && sudo test -s /etc/taey/model-identity-attestor.key && sudo test -s '${MODEL_PATH}/ARTIFACT_SHA256SUMS'" \
     || { echo "FATAL: restart requires the attestor environment, private key, and artifact seal" >&2; exit 1; }
+  echo "[deploy] validating structured-output config inside the pinned image"
+  ssh "$TARGET" "'${ROOT}/serving/vllm_serve.sh' --validate-structured-outputs-config"
+  echo "[deploy] structured-output config accepted with compact xgrammar semantics"
   echo "[deploy] restarting — you asserted consumers are quiesced"
   ssh "$TARGET" "sudo systemctl restart taey-ep3"
   ready=0

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import asyncio
 import copy
 import hashlib
@@ -17,6 +18,18 @@ from unittest import mock
 REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+
+STRUCTURED_OUTPUTS_CONFIG = {
+    "backend": "xgrammar",
+    "disable_any_whitespace": True,
+}
+STRUCTURED_OUTPUTS_DECLARATION = (
+    "readonly STRUCTURED_OUTPUTS_CONFIG="
+    "'{\"backend\":\"xgrammar\",\"disable_any_whitespace\":true}'"
+)
+STRUCTURED_OUTPUTS_PREFLIGHT = (
+    "'${ROOT}/serving/vllm_serve.sh' --validate-structured-outputs-config"
+)
 
 
 if importlib.util.find_spec("redis") is None:
@@ -162,6 +175,61 @@ def observed() -> dict[str, int | str]:
     }
 
 
+def validate_launcher_contract(launcher: str, deployer: str) -> None:
+    declaration = re.search(
+        r"^readonly STRUCTURED_OUTPUTS_CONFIG='([^']+)'$",
+        launcher,
+        re.MULTILINE,
+    )
+    require(declaration is not None, "vLLM launcher has no fixed structured-output config")
+    try:
+        config = json.loads(declaration.group(1))
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("vLLM structured-output config is not JSON") from exc
+    require(
+        config == STRUCTURED_OUTPUTS_CONFIG,
+        "vLLM launcher must select xgrammar with free whitespace disabled",
+    )
+    require(
+        "--validate-structured-outputs-config" in launcher
+        and "from vllm.config import StructuredOutputsConfig" in launcher
+        and 'config.backend == "xgrammar"' in launcher
+        and "config.disable_any_whitespace is True" in launcher
+        and '--structured-outputs-config "${STRUCTURED_OUTPUTS_CONFIG}"' in launcher,
+        "vLLM launcher does not parse and enforce its effective structured-output semantics",
+    )
+    require(
+        STRUCTURED_OUTPUTS_PREFLIGHT in deployer
+        and deployer.index(STRUCTURED_OUTPUTS_PREFLIGHT)
+        < deployer.index('sudo systemctl restart taey-ep3'),
+        "Thor deploy does not parse the pinned-image config before restart",
+    )
+
+
+def validate_structured_output_callers() -> None:
+    callers: set[str] = set()
+    for source in REPO_ROOT.rglob("*.py"):
+        relative = source.relative_to(REPO_ROOT)
+        if (
+            relative.parts[0] == "tests"
+            or source.name.startswith("validate_")
+            or ".git" in relative.parts
+        ):
+            continue
+        tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(relative))
+        if any(
+            isinstance(node, ast.Call)
+            and any(keyword.arg == "response_format" for keyword in node.keywords)
+            for node in ast.walk(tree)
+        ):
+            callers.add(str(relative))
+    require(
+        callers == {"serving/taey_council_seat.py"},
+        "non-council production response_format callers reached the xgrammar-pinned endpoint: "
+        f"{sorted(callers)}",
+    )
+
+
 def validate_contract_values() -> None:
     require(observed() == EXPECTED, f"council budget drifted: {observed()}")
     output = {
@@ -276,12 +344,9 @@ def validate_contract_values() -> None:
         f"{len(maximal_structured_bytes)} bytes",
     )
     launcher = (ROOT / "vllm_serve.sh").read_text(encoding="utf-8")
-    require(
-        'STRUCTURED_OUTPUTS_CONFIG="${TAEY_STRUCTURED_OUTPUTS_CONFIG:-'
-        '{\\"backend\\":\\"xgrammar\\",\\"disable_any_whitespace\\":true}}"' in launcher
-        and '--structured-outputs-config "${STRUCTURED_OUTPUTS_CONFIG}"' in launcher,
-        "vLLM launcher does not disable unbounded structured-output whitespace",
-    )
+    deployer = (ROOT / "deploy_thor.sh").read_text(encoding="utf-8")
+    validate_launcher_contract(launcher, deployer)
+    validate_structured_output_callers()
     require(
         "ghcr.io/nvidia-ai-iot/vllm@sha256:"
         "b587dd56b4cb076209ad5156a626ac75f5a976d0e8e7d1e6a9fccd56d1bd65e8"
@@ -968,6 +1033,40 @@ def prove_mutation_red() -> list[str]:
         r"^[\x20-\x21\x23-\x5B\x5D-\x7E]+$",
     ):
         _expect_red("response-pattern-bound", validate_contract_values, caught)
+    launcher = (ROOT / "vllm_serve.sh").read_text(encoding="utf-8")
+    deployer = (ROOT / "deploy_thor.sh").read_text(encoding="utf-8")
+    _expect_red(
+        "structured-config-missing-backend",
+        lambda: validate_launcher_contract(
+            launcher.replace(
+                STRUCTURED_OUTPUTS_DECLARATION,
+                "readonly STRUCTURED_OUTPUTS_CONFIG="
+                "'{\"disable_any_whitespace\":true}'",
+            ),
+            deployer,
+        ),
+        caught,
+    )
+    _expect_red(
+        "structured-config-whitespace-enabled",
+        lambda: validate_launcher_contract(
+            launcher.replace(
+                STRUCTURED_OUTPUTS_DECLARATION,
+                "readonly STRUCTURED_OUTPUTS_CONFIG="
+                "'{\"backend\":\"xgrammar\",\"disable_any_whitespace\":false}'",
+            ),
+            deployer,
+        ),
+        caught,
+    )
+    _expect_red(
+        "structured-config-missing-pre-restart-image-gate",
+        lambda: validate_launcher_contract(
+            launcher,
+            deployer.replace(STRUCTURED_OUTPUTS_PREFLIGHT, "missing-runtime-gate"),
+        ),
+        caught,
+    )
     original_system_message = producer.system_message
 
     def numeric_budget_prompt(seat):
