@@ -180,6 +180,8 @@ def main() -> int:
         raise RuntimeError("single-byte outbound mutation still verified")
 
     prove_soma_proxy_posts_encoded_bytes()
+    prove_canonical_codec_golden_bytes()
+    prove_proxy_client_ask_binds_outbound_bytes()
     print(
         json.dumps(
             {
@@ -192,6 +194,82 @@ def main() -> int:
         )
     )
     return 0
+
+
+def prove_canonical_codec_golden_bytes() -> None:
+    require(
+        producer.MODEL_REQUEST_RECEIPT_CONTRACT
+        == "taey-council-model-request-producer-receipt/v2",
+        f"expected receipt contract v2, got {producer.MODEL_REQUEST_RECEIPT_CONTRACT}",
+    )
+    test_payload = {
+        "z_key": 123,
+        "a_key": "simple",
+        "nested": {"beta": [3, 2, 1], "alpha": True},
+        "unicode_text": "日本語 / ñoño / §¶",
+        "empty_list": [],
+    }
+    # Exact golden bytes with sorted keys, compact separators, UTF-8 (no ascii escapes)
+    expected_golden = (
+        b'{"a_key":"simple","empty_list":[],"nested":{"alpha":true,"beta":[3,2,1]},'
+        b'"unicode_text":"\xe6\x97\xa5\xe6\x9c\xac\xe8\xaa\x9e / \xc3\xb1o\xc3\xb1o / \xc2\xa7\xc2\xb6","z_key":123}'
+    )
+    actual_bytes = encode_outbound_request_bytes(test_payload)
+    require(
+        actual_bytes == expected_golden,
+        f"encode_outbound_request_bytes drifted from golden bytes:\nexpected: {expected_golden!r}\nactual:   {actual_bytes!r}",
+    )
+
+
+def prove_proxy_client_ask_binds_outbound_bytes() -> None:
+    import taey_seat
+
+    client = taey_seat.ProxyClient()
+    messages = [
+        {"role": "system", "content": "system prompt"},
+        {"role": "user", "content": "user query"},
+    ]
+    mismatched_request = {
+        "model": taey_seat.MODEL,
+        "messages": [
+            {"role": "system", "content": "system prompt"},
+            {"role": "user", "content": "DIFFERENT query"},
+        ],
+        "chat_template_kwargs": {"enable_thinking": False},
+    }
+    mismatched_bytes = encode_outbound_request_bytes(mismatched_request)
+
+    # Driving ask() with mismatched bytes MUST raise SeatFailure
+    try:
+        client.ask(
+            prompt="user query",
+            event_id="evt-1",
+            correlation_id="corr-1",
+            messages=messages,
+            outbound_request_bytes=mismatched_bytes,
+        )
+    except taey_seat.SeatFailure as exc:
+        require("drifted" in str(exc), f"unexpected SeatFailure message: {exc}")
+    else:
+        raise RuntimeError(
+            "ProxyClient.ask() accepted mismatched outbound_request_bytes without SeatFailure"
+        )
+
+    # Non-bytes outbound_request_bytes MUST raise SeatFailure
+    try:
+        client.ask(
+            prompt="user query",
+            event_id="evt-1",
+            correlation_id="corr-1",
+            messages=messages,
+            outbound_request_bytes="not-bytes",  # type: ignore
+        )
+    except taey_seat.SeatFailure:
+        pass
+    else:
+        raise RuntimeError(
+            "ProxyClient.ask() accepted non-bytes outbound_request_bytes without SeatFailure"
+        )
 
 
 if __name__ == "__main__":
