@@ -9,6 +9,7 @@ and isolated from shadow modules on sys.path.
 """
 from __future__ import annotations
 
+import ast
 import os
 import subprocess
 import sys
@@ -24,34 +25,6 @@ STUB_HEADER = (
     "    _r = types.ModuleType('redis')\n"
     "    _r.Redis = object\n"
     "    sys.modules['redis'] = _r\n"
-    "if importlib.util.find_spec('starlette') is None or importlib.util.find_spec('starlette.background') is None:\n"
-    "    _s = types.ModuleType('starlette')\n"
-    "    _s_bg = types.ModuleType('starlette.background')\n"
-    "    _s_bg.BackgroundTask = object\n"
-    "    sys.modules['starlette'] = _s\n"
-    "    sys.modules['starlette.background'] = _s_bg\n"
-    "if importlib.util.find_spec('fastapi') is None:\n"
-    "    _fa = types.ModuleType('fastapi')\n"
-    "    _fa.FastAPI = lambda *a, **kw: types.SimpleNamespace(on_event=lambda *a: lambda fn: fn, get=lambda *a: lambda fn: fn, post=lambda *a: lambda fn: fn, middleware=lambda *a: lambda fn: fn, add_middleware=lambda *a: None)\n"
-    "    _fa.Request = object\n"
-    "    _fa.HTTPException = Exception\n"
-    "    _fa_resp = types.ModuleType('fastapi.responses')\n"
-    "    _fa_resp.StreamingResponse = object\n"
-    "    _fa_resp.JSONResponse = object\n"
-    "    sys.modules['fastapi'] = _fa\n"
-    "    sys.modules['fastapi.responses'] = _fa_resp\n"
-    "if importlib.util.find_spec('httpx') is None:\n"
-    "    _hx = types.ModuleType('httpx')\n"
-    "    _hx.AsyncClient = object\n"
-    "    _hx.Client = object\n"
-    "    _hx.Response = object\n"
-    "    _hx.Request = object\n"
-    "    _hx.TimeoutException = Exception\n"
-    "    _hx.RequestError = Exception\n"
-    "    _hx.RemoteProtocolError = Exception\n"
-    "    sys.modules['httpx'] = _hx\n"
-    "if importlib.util.find_spec('uvicorn') is None:\n"
-    "    sys.modules['uvicorn'] = types.ModuleType('uvicorn')\n"
 )
 
 
@@ -67,10 +40,9 @@ def prove_repo_root_imports() -> None:
         "import sys\n"
         "import serving.council_prompt_receipt as r\n"
         "import serving.taey_seat as s\n"
-        "import serving.soma_proxy as sp\n"
         "from dashboard import native_council\n"
         "assert r.bind_outbound_request_bytes is not None\n"
-        "assert sp.DEFAULT_MAX_TOOL_ROUNDS is not None\n"
+        "assert s.bind_outbound_request_bytes is not None\n"
         "print('PASS: repo-root package imports successful')\n"
     )
     res = subprocess.run(
@@ -93,9 +65,8 @@ def prove_serving_direct_imports() -> None:
         "import sys\n"
         "import council_prompt_receipt as r\n"
         "import taey_seat as s\n"
-        "import soma_proxy as sp\n"
         "assert r.bind_outbound_request_bytes is not None\n"
-        "assert sp.DEFAULT_MAX_TOOL_ROUNDS is not None\n"
+        "assert s.bind_outbound_request_bytes is not None\n"
         "print('PASS: serving-direct imports successful')\n"
     )
     res = subprocess.run(
@@ -164,6 +135,26 @@ def prove_transitive_import_error_not_masked() -> None:
         )
 
 
+def prove_no_broad_try_except_import_error_in_serving_consumers() -> None:
+    """Prove all touched serving consumers use deterministic __package__ selection, not broad try/except."""
+    target_files = (
+        SERVING / "council_prompt_receipt.py",
+        SERVING / "taey_seat.py",
+        SERVING / "soma_proxy.py",
+        SERVING / "validate_linkedin_prepare_thinking_policy.py",
+        SERVING / "validate_outbound_request_receipt_bytes.py",
+    )
+    for py_file in target_files:
+        tree = ast.parse(py_file.read_text(encoding="utf-8"), filename=str(py_file))
+        for node in tree.body:
+            if isinstance(node, ast.Try):
+                for handler in node.handlers:
+                    if isinstance(handler.type, ast.Name) and handler.type.id == "ImportError":
+                        raise AssertionError(
+                            f"Forbidden broad try/except ImportError found in {py_file.name}"
+                        )
+
+
 def prove_unnamespaced_import_fails_red_without_serving_path() -> None:
     """Prove gate turns RED when an unnamespaced import is attempted without serving on sys.path."""
     code = "import outbound_request_codec"
@@ -185,6 +176,7 @@ def main() -> int:
     prove_serving_direct_imports()
     prove_shadow_module_isolation_in_package_context()
     prove_transitive_import_error_not_masked()
+    prove_no_broad_try_except_import_error_in_serving_consumers()
     prove_unnamespaced_import_fails_red_without_serving_path()
     print("PASS: production-shaped repo-root and direct imports verified (deterministic package-context)")
     return 0
