@@ -183,6 +183,7 @@ def handler_namespace(fake_http: FakeHTTP) -> dict[str, object]:
         "_turn_headers": lambda turn: {},
         "JSONResponse": FakeJSONResponse,
         "MAX_CONTEXT_TOKENS": 262144,
+        "DEFAULT_MAX_TOOL_ROUNDS": 16,
     }
     node = source_function(SOMA_PROXY, "_chat_completions_for_turn")
     module = ast.Module(body=[node], type_ignores=[])
