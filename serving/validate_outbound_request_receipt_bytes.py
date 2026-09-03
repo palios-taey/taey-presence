@@ -233,6 +233,8 @@ def prove_canonical_codec_golden_bytes() -> None:
 def prove_proxy_client_ask_binds_outbound_bytes() -> None:
     import taey_seat
 
+    # Hermetic safety barrier: urlopen MUST NEVER be called during test execution.
+    # If the outbound bind is bypassed (e.g. during mutation testing), urlopen fails fast in 0ms.
     client = taey_seat.ProxyClient()
     messages = [
         {"role": "system", "content": "system prompt"},
@@ -248,37 +250,50 @@ def prove_proxy_client_ask_binds_outbound_bytes() -> None:
     }
     mismatched_bytes = encode_outbound_request_bytes(mismatched_request)
 
-    # Driving ask() with mismatched bytes MUST raise SeatFailure
-    try:
-        client.ask(
-            prompt="user query",
-            event_id="evt-1",
-            correlation_id="corr-1",
-            messages=messages,
-            outbound_request_bytes=mismatched_bytes,
-        )
-    except taey_seat.SeatFailure as exc:
-        require("drifted" in str(exc), f"unexpected SeatFailure message: {exc}")
-    else:
-        raise RuntimeError(
-            "ProxyClient.ask() accepted mismatched outbound_request_bytes without SeatFailure"
-        )
+    with (
+        mock.patch(
+            "urllib.request.urlopen",
+            side_effect=AssertionError(
+                "urlopen reached: outbound request bind bypassed"
+            ),
+        ),
+        mock.patch.object(
+            taey_seat,
+            "PROXY_URL",
+            "http://127.0.0.1:9999/hermetic-test-only",
+        ),
+    ):
+        # Driving ask() with mismatched bytes MUST raise SeatFailure
+        try:
+            client.ask(
+                prompt="user query",
+                event_id="evt-1",
+                correlation_id="corr-1",
+                messages=messages,
+                outbound_request_bytes=mismatched_bytes,
+            )
+        except taey_seat.SeatFailure as exc:
+            require("drifted" in str(exc), f"unexpected SeatFailure message: {exc}")
+        else:
+            raise RuntimeError(
+                "ProxyClient.ask() accepted mismatched outbound_request_bytes without SeatFailure"
+            )
 
-    # Non-bytes outbound_request_bytes MUST raise SeatFailure
-    try:
-        client.ask(
-            prompt="user query",
-            event_id="evt-1",
-            correlation_id="corr-1",
-            messages=messages,
-            outbound_request_bytes="not-bytes",  # type: ignore
-        )
-    except taey_seat.SeatFailure:
-        pass
-    else:
-        raise RuntimeError(
-            "ProxyClient.ask() accepted non-bytes outbound_request_bytes without SeatFailure"
-        )
+        # Non-bytes outbound_request_bytes MUST raise SeatFailure
+        try:
+            client.ask(
+                prompt="user query",
+                event_id="evt-1",
+                correlation_id="corr-1",
+                messages=messages,
+                outbound_request_bytes="not-bytes",  # type: ignore
+            )
+        except taey_seat.SeatFailure:
+            pass
+        else:
+            raise RuntimeError(
+                "ProxyClient.ask() accepted non-bytes outbound_request_bytes without SeatFailure"
+            )
 
 
 if __name__ == "__main__":
