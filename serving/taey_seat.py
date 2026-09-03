@@ -24,8 +24,10 @@ from typing import Any
 import redis
 
 if __package__:
+    from . import council_prompt_receipt as council_receipt
     from .outbound_request_codec import bind_outbound_request_bytes
 else:
+    import council_prompt_receipt as council_receipt
     from outbound_request_codec import bind_outbound_request_bytes
 
 
@@ -726,6 +728,7 @@ class ProxyClient:
         max_rounds: int | None = None,
         max_tokens: int | None = None,
         tool_profile: str | None = None,
+        tool_profile_receipt: dict[str, Any] | None = None,
         outbound_request_bytes: bytes | None = None,
     ) -> ProxyResult:
         request_body = self.model_request_body(
@@ -746,6 +749,19 @@ class ProxyClient:
                 raise SeatFailure(
                     f"outbound request bytes drifted from the encoded model request "
                     f"for correlation={correlation_id}: {exc}"
+                ) from exc
+        if tool_profile_receipt is not None:
+            if tool_profile is not None:
+                raise SeatFailure("tool profile must have one operational source")
+            try:
+                tool_profile = council_receipt.verified_model_request_tool_profile(
+                    tool_profile_receipt,
+                    body,
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                raise SeatFailure(
+                    f"council tool-profile receipt is invalid for "
+                    f"correlation={correlation_id}: {exc}"
                 ) from exc
         headers = {
             "Content-Type": "application/json",

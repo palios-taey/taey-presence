@@ -1,18 +1,24 @@
 #!/usr/bin/env python3
-"""Hermetic mechanical gate for the council inference budget."""
+"""No-network chat-path and mutation gate for council inference budgets."""
 from __future__ import annotations
 
 import argparse
 import asyncio
+import copy
 import hashlib
 import importlib.util
 import json
 import sys
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from unittest import mock
 
-if "redis" not in sys.modules and importlib.util.find_spec("redis") is None:
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+
+if importlib.util.find_spec("redis") is None:
     redis_stub = ModuleType("redis")
     redis_stub.Redis = mock.MagicMock
     sys.modules["redis"] = redis_stub
@@ -44,30 +50,77 @@ if importlib.util.find_spec("fastapi") is None:
             self.detail = detail
             super().__init__(f"{status_code}: {detail}")
 
-    fastapi_stub.FastAPI = mock.MagicMock
-    fastapi_stub.Request = object
+    class StubApp:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def _route(self, *_args, **_kwargs):
+            return lambda function: function
+
+        on_event = get = post = middleware = websocket = _route
+
+        def mount(self, *_args, **_kwargs):
+            return None
+
+    class StubResponse:
+        def __init__(self, content=None, *, headers=None, status_code=200, **_kwargs):
+            self.body = json.dumps(content).encode("utf-8")
+            self.headers = headers or {}
+            self.status_code = status_code
+
+    fastapi_stub.FastAPI = StubApp
     fastapi_stub.HTTPException = StubHTTPException
+    fastapi_stub.Request = object
+    fastapi_stub.WebSocket = object
+    fastapi_stub.WebSocketDisconnect = type(
+        "WebSocketDisconnect", (Exception,), {}
+    )
     fastapi_responses_stub = ModuleType("fastapi.responses")
-    fastapi_responses_stub.StreamingResponse = mock.MagicMock
-    fastapi_responses_stub.JSONResponse = mock.MagicMock
+    fastapi_responses_stub.HTMLResponse = StubResponse
+    fastapi_responses_stub.JSONResponse = StubResponse
+    fastapi_responses_stub.StreamingResponse = StubResponse
+    fastapi_staticfiles_stub = ModuleType("fastapi.staticfiles")
+    fastapi_staticfiles_stub.StaticFiles = mock.MagicMock
     sys.modules["fastapi"] = fastapi_stub
     sys.modules["fastapi.responses"] = fastapi_responses_stub
+    sys.modules["fastapi.staticfiles"] = fastapi_staticfiles_stub
 
 if importlib.util.find_spec("uvicorn") is None:
     sys.modules["uvicorn"] = ModuleType("uvicorn")
 
+if importlib.util.find_spec("taey_adapter") is None:
+    sys.modules["taey_adapter"] = ModuleType("taey_adapter")
+
 import council_prompt_receipt as producer
+import httpx
+import redis
 import soma_proxy
+import taey_council_seat as council_runtime
+import taey_seat as executive
+
+with mock.patch.object(redis, "Redis", mock.MagicMock), mock.patch.object(
+    httpx,
+    "AsyncClient",
+    mock.MagicMock,
+):
+    from dashboard import app as dashboard_app
 
 
+ROOT = Path(__file__).resolve().parent
 EXPECTED = {
     "tool_profile": "council-read",
     "max_rounds": 1,
     "max_tool_calls": 2,
     "max_search_results": 3,
-    "max_tool_result_chars": 3_000,
-    "max_tool_result_total_chars": 6_000,
+    "max_tool_result_bytes": 3_000,
+    "max_tool_result_total_bytes": 6_000,
     "max_completion_tokens": 512,
+}
+OUTPUT_EXPECTED = {
+    "status_chars": 64,
+    "list_items": 3,
+    "item_chars": 240,
+    "recommendation_chars": 480,
 }
 READ_TOOLS = {
     "check_body_state",
@@ -78,7 +131,6 @@ READ_TOOLS = {
     "retrieve_document",
     "search_isma",
 }
-ROOT = Path(__file__).resolve().parent
 
 
 def require(condition: bool, detail: str) -> None:
@@ -92,153 +144,653 @@ def observed() -> dict[str, int | str]:
         "max_rounds": producer.COUNCIL_MAX_TOOL_ROUNDS,
         "max_tool_calls": producer.COUNCIL_MAX_TOOL_CALLS,
         "max_search_results": producer.COUNCIL_MAX_SEARCH_RESULTS,
-        "max_tool_result_chars": producer.COUNCIL_MAX_TOOL_RESULT_CHARS,
-        "max_tool_result_total_chars": (
-            producer.COUNCIL_MAX_TOOL_RESULT_TOTAL_CHARS
+        "max_tool_result_bytes": producer.COUNCIL_MAX_TOOL_RESULT_BYTES,
+        "max_tool_result_total_bytes": (
+            producer.COUNCIL_MAX_TOOL_RESULT_TOTAL_BYTES
         ),
         "max_completion_tokens": producer.COUNCIL_MAX_COMPLETION_TOKENS,
     }
 
 
-def validate_static_contract() -> None:
-    budget = observed()
-    require(budget == EXPECTED, f"council budget drifted: {budget}")
-    require(
-        budget["max_tool_result_total_chars"]
-        == budget["max_tool_calls"] * budget["max_tool_result_chars"],
-        "aggregate result budget differs from its two per-call allocations",
-    )
+def validate_contract_values() -> None:
+    require(observed() == EXPECTED, f"council budget drifted: {observed()}")
+    output = {
+        "status_chars": producer.CONTRIBUTION_STATUS_MAX_CHARS,
+        "list_items": producer.CONTRIBUTION_LIST_MAX_ITEMS,
+        "item_chars": producer.CONTRIBUTION_ITEM_MAX_CHARS,
+        "recommendation_chars": producer.CONTRIBUTION_RECOMMENDATION_MAX_CHARS,
+    }
+    require(output == OUTPUT_EXPECTED, f"contribution budget drifted: {output}")
     tools = soma_proxy._tools_for_profile(producer.COUNCIL_TOOL_PROFILE)
     require(
         {tool["function"]["name"] for tool in tools} == READ_TOOLS,
         "council-read is not exactly the non-mutating evidence surface",
     )
-    search = next(
-        tool for tool in tools if tool["function"]["name"] == "search_isma"
-    )
+    search = next(tool for tool in tools if tool["function"]["name"] == "search_isma")
     top_k = search["function"]["parameters"]["properties"]["top_k"]
     require(
         (top_k.get("minimum"), top_k.get("maximum"), top_k.get("default"))
         == (1, 3, 3),
         "council search schema is not bound to one through three results",
     )
-    runtime = (ROOT / "taey_council_seat.py").read_text(encoding="utf-8")
+    manifest = producer.load_manifest(ROOT / "council_seats.json")
+    properties = producer.response_format(
+        manifest.seats[0], 1, ["fleet_message:budget-gate"]
+    )["json_schema"]["schema"]["properties"]
+    require(properties["status"]["maxLength"] == 64, "status bound drifted")
     require(
-        runtime.count(
-            "tool_profile=prompt_producer.COUNCIL_TOOL_PROFILE"
-        ) == 2,
-        "both council proxy paths must select the council-read profile",
+        properties["recommendation"]["maxLength"] == 480,
+        "recommendation bound drifted",
     )
-    require(
-        runtime.count(
-            "max_tokens=prompt_producer.COUNCIL_MAX_COMPLETION_TOKENS"
-        ) == 3,
-        "receipted request and both council proxy paths must carry max_tokens",
-    )
-    synthesis = (ROOT.parent / "dashboard/app.py").read_text(encoding="utf-8")
-    require('"max_tokens": 768' in synthesis, "Main synthesis max_tokens is not 768")
-    require(
-        'choice.get("finish_reason") != "stop"' in synthesis,
-        "Main synthesis accepts a non-terminal completion",
-    )
-
-
-async def validate_runtime_contract() -> None:
-    turn = soma_proxy.TurnContext(
-        turn_id="turn-1",
-        seat_id="taey-council-1",
-        event_id="event-1",
-        correlation_id="round-1",
-        tool_profile=producer.COUNCIL_TOOL_PROFILE,
-        proxy_namespace="taey",
-        process_generation="generation-1",
-        started_at=0.0,
-    )
-    original = "evidence-" + ("x" * 4_000)
-    executed: list[tuple[str, dict]] = []
-
-    async def fake(name: str, arguments: dict, **_kwargs) -> str:
-        executed.append((name, arguments))
-        return original
-
-    state = {"terminal": None}
-    token = soma_proxy._request_context.set({
-        **soma_proxy._turn_payload(turn),
-        "_tool_profile_state": state,
-    })
-    try:
-        soma_proxy._require_council_tool_batch([{}, {}], turn)
-        with mock.patch.object(soma_proxy, "execute_tool_call_async", side_effect=fake):
-            first = await soma_proxy._execute_profile_tool_call_async(
-                "search_isma",
-                {"query": "one fact"},
-                turn=turn,
-                tool_call_id="call-1",
-                round_num=1,
-            )
-            second = await soma_proxy._execute_profile_tool_call_async(
-                "read_file",
-                {"path": "one file"},
-                turn=turn,
-                tool_call_id="call-2",
-                round_num=1,
-            )
-        digest = hashlib.sha256(original.encode("utf-8")).hexdigest()
-        marker = (
-            "[COUNCIL TOOL RESULT EXCERPT "
-            f"original_chars={len(original)} sha256:{digest}]\n"
-        )
-        require(first.startswith(marker) and second.startswith(marker), "excerpt receipt is absent")
+    for field_name in producer.CONTRIBUTION_LIST_FIELDS:
         require(
-            len(first) + len(second) == producer.COUNCIL_MAX_TOOL_RESULT_TOTAL_CHARS,
-            "returned evidence escaped the aggregate character budget",
+            properties[field_name]["maxItems"] == 3
+            and properties[field_name]["items"]["maxLength"] == 240,
+            f"{field_name} schema bound drifted",
         )
-        require(executed[0][1]["top_k"] == 3, "bounded search default was not applied")
-        try:
-            soma_proxy._require_council_tool_batch([{}], turn)
-        except soma_proxy.HTTPException as exc:
-            require(exc.status_code == 502, "third-call refusal used the wrong status")
-        else:
-            raise RuntimeError("a third council tool call was accepted")
-    finally:
-        soma_proxy._request_context.reset(token)
 
-    token = soma_proxy._request_context.set({
-        **soma_proxy._turn_payload(turn),
-        "_tool_profile_state": {"terminal": None},
-    })
-    try:
-        with mock.patch.object(
-            soma_proxy,
-            "execute_tool_call_async",
-            side_effect=AssertionError("invalid top_k reached execution"),
-        ):
-            try:
-                await soma_proxy._execute_profile_tool_call_async(
-                    "search_isma",
-                    {"query": "too many", "top_k": 4},
-                    turn=turn,
-                    tool_call_id="invalid",
-                    round_num=1,
+
+def request_material() -> dict:
+    manifest = producer.load_manifest(ROOT / "council_seats.json")
+    seat = manifest.seats[0]
+    evidence_registry = ["fleet_message:budget-gate"]
+    lineage = {
+        "request_contract": producer.DCM_REQUEST_CONTRACT,
+        "prompt_contract_sha256": producer.prompt_contract_receipt(
+            manifest, seat
+        )["prompt_contract_sha256"],
+        "request_id": "sha256:" + ("1" * 64),
+        "council_run_id": "dcm-budget-gate",
+        "round_id": "dcm-budget-gate",
+        "prompt_revision": 1,
+        "model_identity_receipt_sha256": "sha256:" + ("2" * 64),
+        "evidence_registry": evidence_registry,
+    }
+    messages = [
+        producer.system_message(seat),
+        {"role": "user", "content": "Bounded council production decision."},
+    ]
+    response_format = producer.response_format(seat, 1, evidence_registry)
+    model_request = executive.ProxyClient.model_request_body(
+        messages,
+        response_format,
+        max_rounds=producer.COUNCIL_MAX_TOOL_ROUNDS,
+        max_tokens=producer.COUNCIL_MAX_COMPLETION_TOKENS,
+    )
+    outbound = producer.encode_outbound_request_bytes(model_request)
+    claim = SimpleNamespace(
+        source=SimpleNamespace(name="inbox"),
+        message_id="budget-gate",
+        raw='{"body":"bounded council production decision"}',
+        payload={"attachments": []},
+    )
+    receipt = producer.model_request_receipt(
+        manifest=manifest,
+        seat=seat,
+        lineage=lineage,
+        model_request=model_request,
+        outbound_request_bytes=outbound,
+        claims=[claim],
+    )
+    contribution = {
+        "schema_version": 1,
+        "seat_id": seat.seat_id,
+        "role_id": seat.role_id,
+        "status": "contributed",
+        "prompt_revision": 1,
+        "observations": ["Observed: bounded path exercised."],
+        "inferences": [],
+        "unknowns": [],
+        "evidence_refs": evidence_registry,
+        "concerns": [],
+        "questions": [],
+        "recommendation": "Use the bounded path.",
+        "confidence": 0.9,
+    }
+    return {
+        "lineage": lineage,
+        "model_request": model_request,
+        "outbound": outbound,
+        "receipt": receipt,
+        "seat": seat,
+        "contribution": contribution,
+    }
+
+
+def _tool_calls(count: int, *, top_k: int | None = None) -> list[dict]:
+    names = ["search_isma", "read_file", "check_body_state"]
+    calls = []
+    for index in range(count):
+        name = names[index]
+        arguments = {"query": "one fact"} if name == "search_isma" else {}
+        if name == "read_file":
+            arguments = {"path": "/tmp/evidence"}
+        if top_k is not None and name == "search_isma":
+            arguments["top_k"] = top_k
+        calls.append({
+            "id": f"call-{index + 1}",
+            "function": {
+                "name": name,
+                "arguments": json.dumps(arguments, separators=(",", ":")),
+            },
+        })
+    return calls
+
+
+def exercise_council_chat(
+    *,
+    call_count: int = 2,
+    top_k: int | None = None,
+    tool_result: str | None = None,
+) -> dict:
+    material = request_material()
+    upstream_bodies: list[dict] = []
+    client_headers: list[dict[str, str]] = []
+    executed: list[tuple[str, dict]] = []
+    original_result = tool_result or ("evidence-" + ("🌍" * 2_000))
+    tool_payload = {
+        "choices": [{
+            "finish_reason": "tool_calls",
+            "message": {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": _tool_calls(call_count, top_k=top_k),
+            },
+        }],
+        "usage": {"completion_tokens": 1},
+    }
+    final_payload = {
+        "choices": [{
+            "finish_reason": "stop",
+            "message": {
+                "role": "assistant",
+                "content": json.dumps(material["contribution"], separators=(",", ":")),
+            },
+        }],
+        "usage": {"prompt_tokens": 40, "completion_tokens": 100},
+    }
+
+    async def upstream_post(*_args, **kwargs):
+        body = json.loads(bytes(kwargs["content"]).decode("utf-8"))
+        upstream_bodies.append(body)
+        payload = tool_payload if len(upstream_bodies) == 1 else final_payload
+        return SimpleNamespace(status_code=200, json=lambda: payload)
+
+    async def execute(name: str, arguments: dict, **_kwargs) -> str:
+        executed.append((name, arguments))
+        return original_result
+
+    upstream = SimpleNamespace(post=mock.AsyncMock(side_effect=upstream_post))
+    invoked_result: dict[str, object] = {}
+
+    def urlopen(request):
+        headers = {key.lower(): value for key, value in request.header_items()}
+        client_headers.append(headers)
+        body = json.loads(request.data)
+        turn = soma_proxy._turn_context(SimpleNamespace(headers=headers), body)
+        payload = {
+            **soma_proxy._turn_payload(turn),
+            "_tool_profile_state": {"terminal": None},
+        }
+        token = soma_proxy._request_context.set(payload)
+        try:
+            with mock.patch.object(
+                soma_proxy, "inject_preamble", side_effect=lambda value: value
+            ), mock.patch.object(
+                soma_proxy, "_http", upstream
+            ), mock.patch.object(
+                soma_proxy, "execute_tool_call_async", side_effect=execute
+            ):
+                response = asyncio.run(
+                    soma_proxy._chat_completions_for_turn(
+                        body,
+                        turn,
+                        liveness_registered=False,
+                    )
                 )
-            except soma_proxy.HTTPException as exc:
-                require(exc.status_code == 502, "invalid top_k used the wrong status")
-            else:
-                raise RuntimeError("top_k=4 was accepted")
-    finally:
-        soma_proxy._request_context.reset(token)
+        finally:
+            soma_proxy._request_context.reset(token)
+        wrapped = mock.MagicMock()
+        wrapped.__enter__.return_value = wrapped
+        wrapped.read.return_value = bytes(response.body)
+        wrapped.headers = soma_proxy._turn_headers(turn)
+        return wrapped
+
+    claim = executive.ClaimedMessage(
+        source=SimpleNamespace(name="inbox"),
+        raw='{"body":"bounded council production decision"}',
+        payload={
+            "dcm_session_id": "dcm-budget-gate",
+            "wave_id": "wave-budget-gate",
+            "request_id": material["lineage"]["request_id"],
+        },
+        message_id="budget-gate",
+    )
+    contribution_id = "contrib-budget-gate"
+    transport_receipt = {
+        "terminal_outcome": "contributed",
+        "contrib_id": contribution_id,
+    }
+
+    def execute_wave_request(
+        _request,
+        _observation,
+        *,
+        invoke,
+        validate_response,
+        acknowledge,
+        **_kwargs,
+    ):
+        result = invoke({})
+        invoked_result["proxy"] = result
+        validated = validate_response(result, {})
+        require(
+            validated == material["contribution"],
+            "DCM runtime did not validate the bounded contribution",
+        )
+        acknowledge(transport_receipt)
+        return {
+            "graph": {"contrib_id": contribution_id},
+            "transport_receipt": transport_receipt,
+        }
+
+    proxy = executive.ProxyClient()
+    store = SimpleNamespace(
+        append=mock.MagicMock(),
+        remember_outcome=mock.MagicMock(),
+    )
+    inbox = SimpleNamespace(acknowledge_dcm=mock.MagicMock())
+    liveness = SimpleNamespace(assert_healthy=mock.MagicMock())
+    wave = {
+        "slots": [{
+            "request_id": material["lineage"]["request_id"],
+            "state": "pending",
+        }],
+    }
+    wave_error = type("WaveRequestExecutionError", (Exception,), {})
+    with mock.patch.object(
+        executive.urllib.request,
+        "urlopen",
+        side_effect=urlopen,
+    ), mock.patch.object(
+        proxy,
+        "ask",
+        wraps=proxy.ask,
+    ) as ask, mock.patch.object(
+        council_runtime.dcm_adapter,
+        "mesh",
+        SimpleNamespace(read_wave=lambda *_args: wave),
+        create=True,
+    ), mock.patch.object(
+        council_runtime.dcm_adapter,
+        "execute_wave_request",
+        side_effect=execute_wave_request,
+        create=True,
+    ), mock.patch.object(
+        council_runtime.dcm_adapter,
+        "WaveRequestExecutionError",
+        wave_error,
+        create=True,
+    ), mock.patch.object(
+        council_runtime,
+        "_dcm_claim_observation",
+        return_value={},
+    ), mock.patch.object(
+        council_runtime,
+        "_graph_contribution",
+        return_value=material["contribution"],
+    ), mock.patch.object(
+        council_runtime.executive,
+        "SESSION",
+        material["seat"].seat_id,
+    ), mock.patch.object(
+        council_runtime,
+        "ROLE_ID",
+        material["seat"].role_id,
+    ):
+        dcm_reply = council_runtime._run_dcm_turn(
+            claim=claim,
+            inbox=inbox,
+            store=store,
+            proxy=proxy,
+            liveness=liveness,
+            lineage=material["lineage"],
+            prompt="bounded council production decision",
+            messages=material["model_request"]["messages"],
+            contribution_format=material["model_request"]["response_format"],
+            attempt_fields={},
+            event_id="event-budget-gate",
+            correlation_id="dcm-budget-gate",
+            previously_attempted=False,
+            outbound_request_bytes=material["outbound"],
+            producer_receipt=material["receipt"],
+        )
+    forwarded = ask.call_args.kwargs
+    require(
+        forwarded.get("tool_profile_receipt") is material["receipt"]
+        and "tool_profile" not in forwarded,
+        "DCM seat did not forward the producer receipt as the sole profile source",
+    )
+    require(
+        json.loads(dcm_reply) == material["contribution"],
+        "DCM seat result differs from the validated contribution",
+    )
+    return {
+        **material,
+        "client_headers": client_headers,
+        "executed": executed,
+        "original_result": original_result,
+        "result": invoked_result["proxy"],
+        "upstream_bodies": upstream_bodies,
+    }
 
 
-def prove_mutation_red() -> int:
-    caught = 0
-    for field, value in EXPECTED.items():
-        mutated = dict(EXPECTED)
-        mutated[field] = value + 1 if isinstance(value, int) else value + "-mutated"
+def validate_council_chat_path() -> None:
+    observed_path = exercise_council_chat()
+    require(len(observed_path["client_headers"]) == 1, "client did not send once")
+    require(
+        observed_path["client_headers"][0].get("x-taey-tool-profile")
+        == EXPECTED["tool_profile"],
+        "receipt-bound council profile did not reach the actual header",
+    )
+    require(len(observed_path["upstream_bodies"]) == 2, "round limit was not one")
+    first, final = observed_path["upstream_bodies"]
+    require(first.get("max_tokens") == 512, "seat completion cap did not reach vLLM")
+    require(
+        {tool["function"]["name"] for tool in first.get("tools", [])}
+        == READ_TOOLS,
+        "council chat path did not expose the exact read-only profile",
+    )
+    require("tools" not in final and final.get("tool_choice") == "none", "round did not terminate")
+    require(
+        len(observed_path["executed"]) == 2
+        and observed_path["executed"][0][1].get("top_k") == 3,
+        "tool-call or top_k bound did not execute",
+    )
+    results = [
+        message["content"]
+        for message in final["messages"]
+        if message.get("role") == "tool"
+    ]
+    result_bytes = [len(value.encode("utf-8")) for value in results]
+    require(
+        len(results) == 2
+        and all(size <= EXPECTED["max_tool_result_bytes"] for size in result_bytes)
+        and sum(result_bytes) <= EXPECTED["max_tool_result_total_bytes"],
+        "UTF-8 tool evidence escaped its per-result or cumulative budget",
+    )
+    original = observed_path["original_result"]
+    marker = (
+        f"original_chars={len(original)} "
+        f"original_bytes={len(original.encode('utf-8'))} "
+        f"sha256:{hashlib.sha256(original.encode('utf-8')).hexdigest()}]"
+    )
+    require(all(marker in value for value in results), "excerpt byte receipt is absent")
+    with mock.patch.object(
+        council_runtime.executive,
+        "SESSION",
+        observed_path["seat"].seat_id,
+    ), mock.patch.object(
+        council_runtime,
+        "ROLE_ID",
+        observed_path["seat"].role_id,
+    ):
+        contribution = council_runtime._validated_contribution(
+            observed_path["result"].reply,
+            observed_path["lineage"],
+        )
+    require(contribution == observed_path["contribution"], "seat output validation drifted")
+
+
+def validate_profile_receipt_drift_rejected() -> None:
+    material = request_material()
+    receipt = copy.deepcopy(material["receipt"])
+    receipt["tool_profile"] = "full"
+    unsigned = {key: value for key, value in receipt.items() if key != "receipt_sha256"}
+    receipt["receipt_sha256"] = producer.canonical_sha256(unsigned)
+    urlopen = mock.MagicMock(side_effect=AssertionError("invalid receipt reached transport"))
+    with mock.patch.object(executive.urllib.request, "urlopen", urlopen):
         try:
-            require(mutated == EXPECTED, "mutation detected")
+            executive.ProxyClient().ask(
+                "drift",
+                event_id="event-drift",
+                correlation_id="round-drift",
+                messages=material["model_request"]["messages"],
+                response_format=material["model_request"]["response_format"],
+                max_rounds=material["model_request"]["max_rounds"],
+                max_tokens=material["model_request"]["max_tokens"],
+                tool_profile_receipt=receipt,
+                outbound_request_bytes=material["outbound"],
+            )
+        except executive.SeatFailure:
+            pass
+        else:
+            raise RuntimeError("receipt/header profile drift was accepted")
+    require(urlopen.call_count == 0, "invalid profile receipt reached transport")
+
+
+def validate_call_limit_rejection() -> None:
+    try:
+        exercise_council_chat(call_count=3, tool_result="small evidence")
+    except executive.SeatFailure:
+        return
+    raise RuntimeError("three council tool calls were accepted")
+
+
+def validate_top_k_rejection() -> None:
+    try:
+        exercise_council_chat(call_count=1, top_k=4)
+    except executive.SeatFailure:
+        return
+    raise RuntimeError("council top_k=4 was accepted")
+
+
+def validate_seat_output_rejection() -> None:
+    material = request_material()
+    invalid = copy.deepcopy(material["contribution"])
+    invalid["observations"] = ["one", "two", "three", "four"]
+    with mock.patch.object(
+        council_runtime.executive,
+        "SESSION",
+        material["seat"].seat_id,
+    ), mock.patch.object(
+        council_runtime,
+        "ROLE_ID",
+        material["seat"].role_id,
+    ):
+        try:
+            council_runtime._validated_contribution(
+                json.dumps(invalid),
+                material["lineage"],
+            )
+        except executive.SeatFailure:
+            return
+    raise RuntimeError("oversized council contribution was accepted")
+
+
+def validate_full_profile_unchanged() -> None:
+    client_headers: list[dict[str, str]] = []
+    upstream_bodies: list[dict] = []
+    final_payload = {
+        "choices": [{
+            "finish_reason": "stop",
+            "message": {"role": "assistant", "content": "generic answer"},
+        }],
+        "usage": {"prompt_tokens": 4, "completion_tokens": 2},
+    }
+
+    async def upstream_post(*_args, **kwargs):
+        upstream_bodies.append(json.loads(bytes(kwargs["content"]).decode("utf-8")))
+        return SimpleNamespace(status_code=200, json=lambda: final_payload)
+
+    upstream = SimpleNamespace(post=mock.AsyncMock(side_effect=upstream_post))
+
+    def urlopen(request):
+        headers = {key.lower(): value for key, value in request.header_items()}
+        client_headers.append(headers)
+        body = json.loads(request.data)
+        turn = soma_proxy._turn_context(SimpleNamespace(headers=headers), body)
+        token = soma_proxy._request_context.set({
+            **soma_proxy._turn_payload(turn),
+            "_tool_profile_state": {"terminal": None},
+        })
+        try:
+            with mock.patch.object(
+                soma_proxy, "inject_preamble", side_effect=lambda value: value
+            ), mock.patch.object(soma_proxy, "_http", upstream):
+                response = asyncio.run(
+                    soma_proxy._chat_completions_for_turn(body, turn, False)
+                )
+        finally:
+            soma_proxy._request_context.reset(token)
+        wrapped = mock.MagicMock()
+        wrapped.__enter__.return_value = wrapped
+        wrapped.read.return_value = bytes(response.body)
+        wrapped.headers = soma_proxy._turn_headers(turn)
+        return wrapped
+
+    with mock.patch.object(executive.urllib.request, "urlopen", side_effect=urlopen):
+        result = executive.ProxyClient().ask(
+            "generic",
+            event_id="event-generic",
+            correlation_id="round-generic",
+            messages=[{"role": "user", "content": "generic"}],
+        )
+    require(result.reply == "generic answer", "generic full-profile answer drifted")
+    require(
+        "x-taey-tool-profile" not in client_headers[0],
+        "generic client gained a specialized profile header",
+    )
+    require(
+        {tool["function"]["name"] for tool in upstream_bodies[0]["tools"]}
+        == {tool["function"]["name"] for tool in soma_proxy.TOOLS},
+        "generic request no longer receives the full profile",
+    )
+    require(
+        "max_rounds" not in upstream_bodies[0]
+        and "max_tokens" not in upstream_bodies[0],
+        "generic request inherited council budgets",
+    )
+
+
+async def validate_main_synthesis() -> None:
+    packet = {
+        "conversation_id": "main-budget-gate",
+        "round_id": "dcm-main-budget-gate",
+        "prompt_revision": 1,
+    }
+
+    def response(finish_reason: str):
+        return SimpleNamespace(
+            headers={
+                "X-Taey-Event-Id": "dcm-main-budget-gate:1:synthesis",
+                "X-Taey-Correlation-Id": "dcm-main-budget-gate",
+                "X-Taey-Turn-Id": "turn-main-budget-gate",
+            },
+            raise_for_status=lambda: None,
+            json=lambda: {
+                "model": "ep3",
+                "choices": [{
+                    "finish_reason": finish_reason,
+                    "message": {"role": "assistant", "content": "Main decision."},
+                }],
+            },
+        )
+
+    post = mock.AsyncMock(return_value=response("stop"))
+    with mock.patch.object(dashboard_app, "_http", SimpleNamespace(post=post)):
+        result = await dashboard_app._synthesize_native_council(
+            "main-budget-gate", packet
+        )
+    require(result["answer"] == "Main decision.", "Main synthesis answer drifted")
+    require(
+        post.await_args.kwargs["json"].get("max_tokens") == 768
+        and post.await_args.kwargs["json"].get("tools") == [],
+        "Main synthesis cap or no-tool contract did not reach the request",
+    )
+    post = mock.AsyncMock(return_value=response("length"))
+    with mock.patch.object(dashboard_app, "_http", SimpleNamespace(post=post)):
+        try:
+            await dashboard_app._synthesize_native_council(
+                "main-budget-gate", packet
+            )
         except RuntimeError:
-            caught += 1
-    require(caught == len(EXPECTED), "gate missed an in-memory budget mutation")
+            return
+    raise RuntimeError("Main accepted a non-terminal synthesis")
+
+
+def _expect_red(label: str, operation, caught: list[str]) -> None:
+    try:
+        operation()
+    except Exception:
+        caught.append(label)
+        return
+    raise RuntimeError(f"production mutation stayed green: {label}")
+
+
+def prove_mutation_red() -> list[str]:
+    caught: list[str] = []
+    profile = producer.COUNCIL_TOOL_PROFILE
+    allowed = soma_proxy._TOOL_PROFILE_ALLOWED[profile]
+    require(isinstance(allowed, frozenset), "council tool profile is not finite")
+    with mock.patch.dict(
+        soma_proxy._TOOL_PROFILE_ALLOWED,
+        {profile: allowed | {"drive_chat"}},
+    ):
+        _expect_red("profile-tool-surface", validate_council_chat_path, caught)
+    with mock.patch.object(
+        producer,
+        "verified_model_request_tool_profile",
+        return_value="full",
+    ):
+        _expect_red("receipt-profile-selection", validate_council_chat_path, caught)
+    original_turn_headers = soma_proxy._turn_headers
+
+    def wrong_echo(turn):
+        headers = original_turn_headers(turn)
+        headers["X-Taey-Tool-Profile"] = "full"
+        return headers
+
+    with mock.patch.object(soma_proxy, "_turn_headers", side_effect=wrong_echo):
+        _expect_red("profile-echo", validate_council_chat_path, caught)
+    with mock.patch.object(producer, "COUNCIL_MAX_TOOL_ROUNDS", 2):
+        _expect_red("round-limit", validate_council_chat_path, caught)
+    with mock.patch.object(producer, "COUNCIL_MAX_TOOL_CALLS", 3):
+        _expect_red("total-call-limit", validate_call_limit_rejection, caught)
+    with mock.patch.object(producer, "COUNCIL_MAX_SEARCH_RESULTS", 4):
+        _expect_red("top-k-limit", validate_top_k_rejection, caught)
+    with mock.patch.object(producer, "COUNCIL_MAX_TOOL_RESULT_BYTES", 4_000):
+        _expect_red("per-result-byte-limit", validate_council_chat_path, caught)
+    with mock.patch.object(
+        producer,
+        "COUNCIL_MAX_TOOL_RESULT_TOTAL_BYTES",
+        5_000,
+    ):
+        _expect_red("cumulative-byte-limit", validate_council_chat_path, caught)
+    with mock.patch.object(producer, "COUNCIL_MAX_COMPLETION_TOKENS", 513):
+        _expect_red("seat-completion-limit", validate_council_chat_path, caught)
+    with mock.patch.object(
+        council_runtime,
+        "_validated_contribution",
+        side_effect=lambda reply, _lineage: json.loads(reply),
+    ):
+        _expect_red("seat-output-validation", validate_seat_output_rejection, caught)
+    with mock.patch.object(dashboard_app, "COUNCIL_SYNTHESIS_MAX_TOKENS", 4_096):
+        _expect_red(
+            "main-completion-limit",
+            lambda: asyncio.run(validate_main_synthesis()),
+            caught,
+        )
+    with mock.patch.object(
+        dashboard_app,
+        "_terminal_council_synthesis",
+        side_effect=lambda data: data["choices"][0]["message"]["content"],
+    ):
+        _expect_red(
+            "main-terminal-stop",
+            lambda: asyncio.run(validate_main_synthesis()),
+            caught,
+        )
     return caught
 
 
@@ -246,12 +798,18 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--prove-mutation-red", action="store_true")
     args = parser.parse_args()
-    validate_static_contract()
-    asyncio.run(validate_runtime_contract())
-    caught = prove_mutation_red() if args.prove_mutation_red else 0
+    validate_contract_values()
+    validate_council_chat_path()
+    validate_profile_receipt_drift_rejected()
+    validate_call_limit_rejection()
+    validate_top_k_rejection()
+    validate_seat_output_rejection()
+    validate_full_profile_unchanged()
+    asyncio.run(validate_main_synthesis())
+    mutations = prove_mutation_red() if args.prove_mutation_red else []
     print(json.dumps({
         "budget": observed(),
-        "mutation_red": caught,
+        "mutation_red": {"count": len(mutations), "cases": mutations},
         "network_calls": 0,
         "status": "PASS",
     }, separators=(",", ":"), sort_keys=True))

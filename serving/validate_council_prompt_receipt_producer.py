@@ -101,9 +101,9 @@ def main() -> int:
             "max_rounds": producer.COUNCIL_MAX_TOOL_ROUNDS,
             "max_tool_calls": producer.COUNCIL_MAX_TOOL_CALLS,
             "max_search_results": producer.COUNCIL_MAX_SEARCH_RESULTS,
-            "max_tool_result_chars": producer.COUNCIL_MAX_TOOL_RESULT_CHARS,
-            "max_tool_result_total_chars": (
-                producer.COUNCIL_MAX_TOOL_RESULT_TOTAL_CHARS
+            "max_tool_result_bytes": producer.COUNCIL_MAX_TOOL_RESULT_BYTES,
+            "max_tool_result_total_bytes": (
+                producer.COUNCIL_MAX_TOOL_RESULT_TOTAL_BYTES
             ),
             "max_completion_tokens": producer.COUNCIL_MAX_COMPLETION_TOKENS,
             "attachments": {"state": "none", "items": []},
@@ -227,6 +227,14 @@ def main() -> int:
         "canonical digest drifted from outbound bytes",
     )
     producer.verify_model_request_receipt_outbound(receipt, outbound_request_bytes)
+    require(
+        producer.verified_model_request_tool_profile(
+            receipt,
+            outbound_request_bytes,
+        )
+        == producer.COUNCIL_TOOL_PROFILE,
+        "verified receipt did not yield the council tool profile",
+    )
     require(
         receipt["attachments"] == {"state": "none", "items": []},
         "no-attachment state is not explicit",

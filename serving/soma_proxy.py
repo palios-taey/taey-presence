@@ -1059,6 +1059,15 @@ def _require_council_tool_batch(tool_calls: list[dict], turn: TurnContext) -> No
     )
 
 
+def _utf8_prefix(value: str, max_bytes: int) -> str:
+    if max_bytes < 0:
+        raise ValueError("UTF-8 prefix budget cannot be negative")
+    encoded = value.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return value
+    return encoded[:max_bytes].decode("utf-8", errors="ignore")
+
+
 async def _execute_profile_tool_call_async(
     name: str,
     arguments: dict,
@@ -1113,36 +1122,48 @@ async def _execute_profile_tool_call_async(
     if not isinstance(result, str):
         result = str(result)
     original_chars = len(result)
-    if original_chars > council_prompt.COUNCIL_MAX_TOOL_RESULT_CHARS:
-        digest = hashlib.sha256(result.encode("utf-8")).hexdigest()
+    original_bytes = result.encode("utf-8")
+    if len(original_bytes) > council_prompt.COUNCIL_MAX_TOOL_RESULT_BYTES:
+        digest = hashlib.sha256(original_bytes).hexdigest()
         marker = (
             "[COUNCIL TOOL RESULT EXCERPT "
-            f"original_chars={original_chars} sha256:{digest}]"
+            f"original_chars={original_chars} original_bytes={len(original_bytes)} "
+            f"sha256:{digest}]"
         )
-        excerpt_chars = council_prompt.COUNCIL_MAX_TOOL_RESULT_CHARS - len(marker) - 1
-        if excerpt_chars < 0:
+        excerpt_bytes = (
+            council_prompt.COUNCIL_MAX_TOOL_RESULT_BYTES
+            - len(marker.encode("utf-8"))
+            - 1
+        )
+        if excerpt_bytes < 0:
             raise RuntimeError("council tool-result budget cannot contain its receipt")
-        result = f"{marker}\n{result[:excerpt_chars]}"
+        result = f"{marker}\n{_utf8_prefix(result, excerpt_bytes)}"
+        returned_bytes = len(result.encode("utf-8"))
         _audit(
             "council_tool_result_excerpt",
             {
                 "original_chars": original_chars,
+                "original_bytes": len(original_bytes),
                 "returned_chars": len(result),
+                "returned_bytes": returned_bytes,
                 "sha256": f"sha256:{digest}",
                 "tool": name,
             },
         )
-    prompt_chars = profile_state.get("council_prompt_result_chars", 0)
+    result_bytes = len(result.encode("utf-8"))
+    if result_bytes > council_prompt.COUNCIL_MAX_TOOL_RESULT_BYTES:
+        raise RuntimeError("council-read tool result escaped its byte budget")
+    prompt_bytes = profile_state.get("council_prompt_result_bytes", 0)
     if (
-        isinstance(prompt_chars, bool)
-        or not isinstance(prompt_chars, int)
-        or prompt_chars < 0
+        isinstance(prompt_bytes, bool)
+        or not isinstance(prompt_bytes, int)
+        or prompt_bytes < 0
     ):
-        raise RuntimeError("council-read prompt-result count is invalid")
-    prompt_chars += len(result)
-    if prompt_chars > council_prompt.COUNCIL_MAX_TOOL_RESULT_TOTAL_CHARS:
+        raise RuntimeError("council-read prompt-result byte count is invalid")
+    prompt_bytes += result_bytes
+    if prompt_bytes > council_prompt.COUNCIL_MAX_TOOL_RESULT_TOTAL_BYTES:
         raise RuntimeError("council-read prompt-result budget exceeded")
-    profile_state["council_prompt_result_chars"] = prompt_chars
+    profile_state["council_prompt_result_bytes"] = prompt_bytes
     return result
 
 

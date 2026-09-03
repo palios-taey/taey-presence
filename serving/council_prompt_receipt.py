@@ -35,8 +35,8 @@ COUNCIL_TOOL_PROFILE = "council-read"
 COUNCIL_MAX_TOOL_ROUNDS = 1
 COUNCIL_MAX_TOOL_CALLS = 2
 COUNCIL_MAX_SEARCH_RESULTS = 3
-COUNCIL_MAX_TOOL_RESULT_CHARS = 3_000
-COUNCIL_MAX_TOOL_RESULT_TOTAL_CHARS = 6_000
+COUNCIL_MAX_TOOL_RESULT_BYTES = 3_000
+COUNCIL_MAX_TOOL_RESULT_TOTAL_BYTES = 6_000
 COUNCIL_MAX_COMPLETION_TOKENS = 512
 CONTRIBUTION_STATUS_MAX_CHARS = 64
 CONTRIBUTION_LIST_MAX_ITEMS = 3
@@ -373,8 +373,8 @@ def prompt_contract(manifest: CouncilManifest, seat: SeatConfig) -> dict[str, An
             "max_rounds": COUNCIL_MAX_TOOL_ROUNDS,
             "max_tool_calls": COUNCIL_MAX_TOOL_CALLS,
             "max_search_results": COUNCIL_MAX_SEARCH_RESULTS,
-            "max_tool_result_chars": COUNCIL_MAX_TOOL_RESULT_CHARS,
-            "max_tool_result_total_chars": COUNCIL_MAX_TOOL_RESULT_TOTAL_CHARS,
+            "max_tool_result_bytes": COUNCIL_MAX_TOOL_RESULT_BYTES,
+            "max_tool_result_total_bytes": COUNCIL_MAX_TOOL_RESULT_TOTAL_BYTES,
             "max_completion_tokens": COUNCIL_MAX_COMPLETION_TOKENS,
             "attachments": {"state": "none", "items": []},
         },
@@ -512,7 +512,30 @@ def verify_model_request_receipt_outbound(
         raise ValueError("receipt model-request digest does not match the request object")
     if receipt.get("model_request_sha256") != receipt.get("outbound_request_sha256"):
         raise ValueError("receipt canonical digest drifted from outbound bytes")
+    prompt_contract = receipt.get("prompt_contract")
+    if (
+        not isinstance(prompt_contract, dict)
+        or receipt.get("prompt_contract_sha256")
+        != canonical_sha256(prompt_contract)
+    ):
+        raise ValueError("receipt prompt-contract digest does not verify")
     unsigned = {key: value for key, value in receipt.items() if key != "receipt_sha256"}
     if receipt.get("receipt_sha256") != canonical_sha256(unsigned):
         raise ValueError("receipt digest does not verify")
     return outbound
+
+
+def verified_model_request_tool_profile(
+    receipt: dict[str, Any],
+    outbound_request_bytes: bytes,
+) -> str:
+    verify_model_request_receipt_outbound(receipt, outbound_request_bytes)
+    profile = receipt.get("tool_profile")
+    renderer = receipt["prompt_contract"].get("request_renderer")
+    if (
+        profile != COUNCIL_TOOL_PROFILE
+        or not isinstance(renderer, dict)
+        or renderer.get("tool_profile") != profile
+    ):
+        raise ValueError("receipt tool profile is not the bound council profile")
+    return profile

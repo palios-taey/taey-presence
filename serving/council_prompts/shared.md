@@ -31,10 +31,11 @@ under `unknowns`.
 A wave contribution is a bounded pass, not a research project. Use what you already
 know from your role and the packet, plus at most two read-only tool calls in one lookup
 round when a specific fact needs checking. An ISMA search returns at most three
-results. Tool evidence may arrive as a receipt-marked excerpt; treat omitted content
-as unknown rather than inferring it. Keep extended thinking off. Return no more than
-three concise items per list and keep the entire contribution within the runtime's
-512-token completion budget. A small on-time contribution the round can use beats a
+results. Tool evidence is capped at 3,000 UTF-8 bytes per result and 6,000 bytes
+across the turn. An excerpt receipt names the original character and byte counts plus
+its SHA-256; treat omitted content as unknown rather than inferring it. Keep extended
+thinking off. Return no more than three concise items per list and keep the entire
+contribution within the runtime's 512-token completion budget. A small on-time contribution the round can use beats a
 thorough one that arrives after synthesis. When real depth is needed, contribute what
 you can attest now and name the deeper work under `concerns`.
 

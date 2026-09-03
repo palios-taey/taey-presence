@@ -652,6 +652,7 @@ def _run_dcm_turn(
     correlation_id: str,
     previously_attempted: bool,
     outbound_request_bytes: bytes,
+    producer_receipt: dict[str, Any],
 ) -> str:
     request = claim.payload
 
@@ -805,7 +806,7 @@ def _run_dcm_turn(
             response_format=contribution_format,
             max_rounds=prompt_producer.COUNCIL_MAX_TOOL_ROUNDS,
             max_tokens=prompt_producer.COUNCIL_MAX_COMPLETION_TOKENS,
-            tool_profile=prompt_producer.COUNCIL_TOOL_PROFILE,
+            tool_profile_receipt=producer_receipt,
             outbound_request_bytes=outbound_request_bytes,
         )
         invoked["result"] = result
@@ -1055,6 +1056,7 @@ def _run_turn(
             correlation_id=correlation_id,
             previously_attempted=previously_attempted,
             outbound_request_bytes=outbound_request_bytes,
+            producer_receipt=producer_receipt,
         )
     store.append("turn_attempt", **attempt_fields)
     inference_state = "side_effect_uncertain"
