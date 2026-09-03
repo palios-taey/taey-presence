@@ -114,7 +114,7 @@ EXPECTED = {
     "max_search_results": 3,
     "max_tool_result_bytes": 3_000,
     "max_tool_result_total_bytes": 6_000,
-    "max_completion_tokens": 1_536,
+    "max_completion_tokens": 1_500,
 }
 OUTPUT_EXPECTED = {
     "status_chars": 64,
@@ -496,7 +496,7 @@ def validate_council_chat_path() -> None:
     require(len(observed_path["upstream_bodies"]) == 2, "round limit was not one")
     first, final = observed_path["upstream_bodies"]
     require(
-        first.get("max_tokens") == 1_536,
+        first.get("max_tokens") == 1_500,
         "seat completion cap did not reach vLLM",
     )
     require(
@@ -770,7 +770,7 @@ def prove_mutation_red() -> list[str]:
         5_000,
     ):
         _expect_red("cumulative-byte-limit", validate_council_chat_path, caught)
-    with mock.patch.object(producer, "COUNCIL_MAX_COMPLETION_TOKENS", 1_537):
+    with mock.patch.object(producer, "COUNCIL_MAX_COMPLETION_TOKENS", 1_501):
         _expect_red("seat-completion-limit", validate_council_chat_path, caught)
     with mock.patch.object(
         council_runtime,
