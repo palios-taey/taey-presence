@@ -8,10 +8,16 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
-from outbound_request_codec import (
-    bind_outbound_request_bytes,
-    encode_outbound_request_bytes,
-)
+if __package__:
+    from .outbound_request_codec import (
+        bind_outbound_request_bytes,
+        encode_outbound_request_bytes,
+    )
+else:
+    from outbound_request_codec import (
+        bind_outbound_request_bytes,
+        encode_outbound_request_bytes,
+    )
 
 
 SERVING_ROOT = Path(__file__).resolve().parent

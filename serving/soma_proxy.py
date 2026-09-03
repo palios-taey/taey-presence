@@ -27,30 +27,56 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
-from outbound_request_codec import (
-    bind_outbound_request_bytes,
-    encode_outbound_request_bytes,
-)
-from revenue_ui_contract import (
-    SEMANTIC_OUTWARD,
-    canonical_json_bytes,
-    semantic_input,
-    scroll_postcondition_exact,
-    validate_operation_evidence,
-    validate_operation_card,
-    validate_semantic_receipt,
-)
-from linkedin_unit1_prepare_publisher import (
-    LinkedInUnit1PreparePublisherError,
-    NOTIFICATION_EXCLUSIONS_SCHEMA,
-    build_exclusions,
-    build_final_bundle,
-    build_selection,
-    canonical_sha256 as linkedin_prepare_sha256,
-    preparation_transaction_sha256,
-    selection_decision_input,
-    validate_bootstrap,
-)
+if __package__:
+    from .outbound_request_codec import (
+        bind_outbound_request_bytes,
+        encode_outbound_request_bytes,
+    )
+    from .revenue_ui_contract import (
+        SEMANTIC_OUTWARD,
+        canonical_json_bytes,
+        semantic_input,
+        scroll_postcondition_exact,
+        validate_operation_evidence,
+        validate_operation_card,
+        validate_semantic_receipt,
+    )
+    from .linkedin_unit1_prepare_publisher import (
+        LinkedInUnit1PreparePublisherError,
+        NOTIFICATION_EXCLUSIONS_SCHEMA,
+        build_exclusions,
+        build_final_bundle,
+        build_selection,
+        canonical_sha256 as linkedin_prepare_sha256,
+        preparation_transaction_sha256,
+        selection_decision_input,
+        validate_bootstrap,
+    )
+else:
+    from outbound_request_codec import (
+        bind_outbound_request_bytes,
+        encode_outbound_request_bytes,
+    )
+    from revenue_ui_contract import (
+        SEMANTIC_OUTWARD,
+        canonical_json_bytes,
+        semantic_input,
+        scroll_postcondition_exact,
+        validate_operation_evidence,
+        validate_operation_card,
+        validate_semantic_receipt,
+    )
+    from linkedin_unit1_prepare_publisher import (
+        LinkedInUnit1PreparePublisherError,
+        NOTIFICATION_EXCLUSIONS_SCHEMA,
+        build_exclusions,
+        build_final_bundle,
+        build_selection,
+        canonical_sha256 as linkedin_prepare_sha256,
+        preparation_transaction_sha256,
+        selection_decision_input,
+        validate_bootstrap,
+    )
 
 import asyncio
 import redis

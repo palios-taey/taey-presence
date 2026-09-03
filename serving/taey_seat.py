@@ -23,7 +23,10 @@ from typing import Any
 
 import redis
 
-from outbound_request_codec import bind_outbound_request_bytes
+if __package__:
+    from .outbound_request_codec import bind_outbound_request_bytes
+else:
+    from outbound_request_codec import bind_outbound_request_bytes
 
 
 PROXY_URL = os.environ.get(

@@ -29,6 +29,8 @@ jobs:
         run: python3 serving/validate_council_prompt_receipt_producer.py
       - name: Prove outbound model-request bytes bind the receipt
         run: python3 serving/validate_outbound_request_receipt_bytes.py
+      - name: Prove production-shaped repo-root and direct imports
+        run: python3 serving/validate_repo_root_imports.py
       - name: Prove council recovery outcome anti-forgery contract
         run: python3 serving/validate_council_session_recovery_anti_forgery.py
       - name: Prove bounded tool rounds enforcement

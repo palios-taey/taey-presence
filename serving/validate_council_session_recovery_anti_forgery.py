@@ -19,7 +19,11 @@ if importlib.util.find_spec("taey_adapter") is None:
     sys.modules["taey_adapter"] = ModuleType("taey_adapter")
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
+SERVING = str(Path(__file__).resolve().parent)
+while SERVING in sys.path:
+    sys.path.remove(SERVING)
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 import serving.council_prompt_receipt as producer
 from dashboard import native_council
