@@ -29,6 +29,14 @@ STRUCTURED_OUTPUTS_DECLARATION = (
 STRUCTURED_OUTPUTS_PREFLIGHT = (
     "'${ROOT}/serving/vllm_serve.sh' --validate-structured-outputs-config"
 )
+INDEX_WORKFLOW_TRIGGER_BLOCK = (
+    "on:\n"
+    "  pull_request:\n"
+    "  push:\n"
+    "    branches: [main]\n"
+    "\n"
+    "jobs:\n"
+)
 
 
 if importlib.util.find_spec("redis") is None:
@@ -243,17 +251,11 @@ def validate_index_workflow_trigger(workflow: str | None = None) -> None:
         on_separator and jobs_separator,
         "knowledge-index workflow has no bounded trigger block",
     )
-    pull_request_block, separator, push_block = trigger_block.partition("\n  push:")
-    require(separator, "knowledge-index workflow has no push trigger")
+    actual_trigger_block = "on:\n" + trigger_block + "\njobs:\n"
     require(
-        re.search(r"(?m)^  pull_request:\s*$", pull_request_block) is not None
-        and re.search(r"(?m)^    paths:\s*$", pull_request_block) is None,
-        "knowledge-index pull_request trigger must run without path filtering",
-    )
-    require(
-        re.search(r"(?m)^    branches: \[main\]\s*$", push_block) is not None
-        and re.search(r"(?m)^    paths:\s*$", push_block) is None,
-        "knowledge-index main-push trigger must run without path filtering",
+        actual_trigger_block == INDEX_WORKFLOW_TRIGGER_BLOCK,
+        "knowledge-index trigger must contain only an unfiltered pull_request and "
+        "an unfiltered main push",
     )
 
 
@@ -1099,7 +1101,7 @@ def prove_mutation_red() -> list[str]:
         REPO_ROOT / ".github/workflows/knowledge-index.yml"
     ).read_text(encoding="utf-8")
     _expect_red(
-        "index-workflow-pr-unfiltered",
+        "index-workflow-pr-paths-filter",
         lambda: validate_index_workflow_trigger(
             workflow.replace(
                 "  pull_request:\n",
@@ -1110,11 +1112,44 @@ def prove_mutation_red() -> list[str]:
         caught,
     )
     _expect_red(
-        "index-workflow-main-push-unfiltered",
+        "index-workflow-pr-paths-ignore-filter",
+        lambda: validate_index_workflow_trigger(
+            workflow.replace(
+                "  pull_request:\n",
+                "  pull_request:\n    paths-ignore :\n      - 'dashboard/**'\n",
+                1,
+            )
+        ),
+        caught,
+    )
+    _expect_red(
+        "index-workflow-unknown-extra-key",
+        lambda: validate_index_workflow_trigger(
+            workflow.replace(
+                "  pull_request:\n",
+                "  pull_request:\n    future-filter: anything\n",
+                1,
+            )
+        ),
+        caught,
+    )
+    _expect_red(
+        "index-workflow-main-push-paths-filter",
         lambda: validate_index_workflow_trigger(
             workflow.replace(
                 "    branches: [main]\n",
                 "    branches: [main]\n    paths:\n      - 'serving/**'\n",
+                1,
+            )
+        ),
+        caught,
+    )
+    _expect_red(
+        "index-workflow-main-push-paths-ignore-filter",
+        lambda: validate_index_workflow_trigger(
+            workflow.replace(
+                "    branches: [main]\n",
+                "    branches: [main]\n    paths-ignore:\n      - 'dashboard/**'\n",
                 1,
             )
         ),
