@@ -49,7 +49,15 @@ if importlib.util.find_spec("fastapi") is None:
     class _StubResponse:
         def __init__(self, content=None, *args, **kwargs):
             self.content = content
-            self.body = content if isinstance(content, (bytes, str)) else json.dumps(content) if content is not None else ""
+            if hasattr(content, "__aiter__"):
+                self.body_iterator = content
+                self.body = b""
+            elif isinstance(content, (bytes, str)):
+                self.body = content
+            elif content is not None:
+                self.body = json.dumps(content)
+            else:
+                self.body = ""
             self.status_code = kwargs.get("status_code", 200)
 
     fastapi_responses.StreamingResponse = _StubResponse
