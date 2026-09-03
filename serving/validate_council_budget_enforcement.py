@@ -278,7 +278,7 @@ def validate_contract_values() -> None:
     launcher = (ROOT / "vllm_serve.sh").read_text(encoding="utf-8")
     require(
         'STRUCTURED_OUTPUTS_CONFIG="${TAEY_STRUCTURED_OUTPUTS_CONFIG:-'
-        '{\\"disable_any_whitespace\\":true}}"' in launcher
+        '{\\"backend\\":\\"xgrammar\\",\\"disable_any_whitespace\\":true}}"' in launcher
         and '--structured-outputs-config "${STRUCTURED_OUTPUTS_CONFIG}"' in launcher,
         "vLLM launcher does not disable unbounded structured-output whitespace",
     )

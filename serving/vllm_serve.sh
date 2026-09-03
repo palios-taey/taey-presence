@@ -13,7 +13,7 @@
 #     VLLM_GPU_UTIL     (default: 0.85)
 #     VLLM_IMAGE        (default: a PINNED digest — see below)
 #     TAEY_LORA_PATH    (optional)  LoRA adapter dir (its basename is mounted under /models)
-#     TAEY_STRUCTURED_OUTPUTS_CONFIG (default: compact JSON with no free whitespace)
+#     TAEY_STRUCTURED_OUTPUTS_CONFIG (default: xgrammar with no free whitespace)
 #
 # IMAGE IS PINNED TO A DIGEST, NOT :latest-jetson-thor. A floating tag lets two nodes
 # silently resolve to different vLLM builds at their own pull times, so one can hang under
@@ -59,7 +59,7 @@ MAX_MODEL_LEN="${TAEY_MAX_MODEL_LEN:-16384}"
 # A pre-quantized checkpoint carries its own quantization_config and needs no value here.
 QUANTIZATION="${TAEY_QUANTIZATION:-}"
 VLLM_IMAGE="${VLLM_IMAGE:-ghcr.io/nvidia-ai-iot/vllm@sha256:b587dd56b4cb076209ad5156a626ac75f5a976d0e8e7d1e6a9fccd56d1bd65e8}"
-STRUCTURED_OUTPUTS_CONFIG="${TAEY_STRUCTURED_OUTPUTS_CONFIG:-{\"disable_any_whitespace\":true}}"
+STRUCTURED_OUTPUTS_CONFIG="${TAEY_STRUCTURED_OUTPUTS_CONFIG:-{\"backend\":\"xgrammar\",\"disable_any_whitespace\":true}}"
 SERVE_LAUNCHER_SHA256="$(sha256sum "${BASH_SOURCE[0]}" | cut -d' ' -f1)"
 SERVE_INVOCATION_ID="${INVOCATION_ID:?systemd INVOCATION_ID is required}"
 
