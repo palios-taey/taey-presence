@@ -85,6 +85,36 @@ VLLM_HEALTH_CACHE_SECS = max(
     1.0,
     float(os.environ.get("VLLM_HEALTH_CACHE_SECS", "30")),
 )
+# Proxy-owned finite tool-round ceiling for turns where max_rounds is omitted or higher.
+# Production provenance (measured across N=812 turns from 2026-08-18 09:35:27 to 2026-09-03 11:39:55 UTC
+# on units taey-soma-proxy-mira.service and taey-worker-proxy.service):
+#   - p50 (median): 3.0 rounds
+#   - p90: 32.0 rounds, p95: 41.0 rounds, p99: 48.0 rounds, max: 89 rounds
+#   - Count > 16 rounds: 118 / 812 turns (14.53%)
+# Reproducible command:
+#   journalctl --user -u taey-soma-proxy-mira.service -u taey-worker-proxy.service --no-pager | grep -E "(\d+)\s+tool rounds"
+# Setting the generic ceiling to 16 rounds is a conservative operator-selected safety tradeoff motivated
+# by observed 28-round / 900s failure modes. In the sampled window, this forces final-answer mode for the
+# upper 14.53% of turns; it remains configurable via SOMA_PROXY_MAX_TOOL_ROUNDS (strict 1..32 startup validation)
+# subject to controlled production observation. Callers may lower this bound (e.g. council seats require
+# max_rounds=2), but cannot raise it above the ceiling.
+def _resolve_default_max_tool_rounds(raw: Optional[str] = None) -> int:
+    if raw is None:
+        raw = os.environ.get("SOMA_PROXY_MAX_TOOL_ROUNDS", "16")
+    try:
+        val = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"SOMA_PROXY_MAX_TOOL_ROUNDS must be an integer from 1 through 32, got {raw!r}"
+        ) from exc
+    if not (1 <= val <= 32):
+        raise ValueError(
+            f"SOMA_PROXY_MAX_TOOL_ROUNDS must be an integer from 1 through 32, got {val}"
+        )
+    return val
+
+
+DEFAULT_MAX_TOOL_ROUNDS = _resolve_default_max_tool_rounds()
 REDIS_HOST = os.environ.get("REDIS_HOST", "127.0.0.1")
 REDIS_PORT = int(os.environ.get("REDIS_PORT", "6379"))
 MIRA_REDIS_HOST = os.environ.get("MIRA_REDIS_HOST", "")
@@ -10466,16 +10496,21 @@ async def _chat_completions_for_turn(
     turn: TurnContext,
     liveness_registered: bool,
 ):
-    max_rounds = body.pop("max_rounds", None)
-    if max_rounds is not None and (
-        isinstance(max_rounds, bool)
-        or not isinstance(max_rounds, int)
-        or not 1 <= max_rounds <= 32
+    caller_max_rounds = body.pop("max_rounds", None)
+    if caller_max_rounds is not None and (
+        isinstance(caller_max_rounds, bool)
+        or not isinstance(caller_max_rounds, int)
+        or not 1 <= caller_max_rounds <= 32
     ):
         raise HTTPException(
             status_code=422,
             detail="max_rounds must be an integer from 1 through 32",
         )
+    # Effective max tool rounds: proxy ceiling applies on omission; callers may lower but cannot raise.
+    effective_max_rounds = min(
+        caller_max_rounds if caller_max_rounds is not None else DEFAULT_MAX_TOOL_ROUNDS,
+        DEFAULT_MAX_TOOL_ROUNDS,
+    )
     one_shot_spec = _private_transaction_spec_for_profile(turn.tool_profile)
 
     # Strip model field -- let vLLM use its loaded model
@@ -10767,6 +10802,9 @@ async def _chat_completions_for_turn(
                     "tool_call_id": tc.get("id", ""),
                     "content": result,
                 })
+            if rounds >= effective_max_rounds:
+                body.pop("tools", None)
+                body["tool_choice"] = "none"
     if is_stream:
         async def stream_and_measure():
             context_token = _request_context.set(_turn_payload(turn))
@@ -10993,7 +11031,7 @@ async def _chat_completions_for_turn(
 
                 # Update body with extended messages for next round
                 body["messages"] = messages
-                if max_rounds is not None and round_num >= max_rounds:
+                if round_num >= effective_max_rounds:
                     resp = await _final_answer()
                     result = resp.json()
                     total_tokens += result.get("usage", {}).get("completion_tokens", 0)
