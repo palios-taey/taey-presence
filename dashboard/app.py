@@ -95,6 +95,7 @@ TAEY_COUNCIL_POLL_INTERVAL = max(
     0.05,
     float(os.environ.get("TAEY_COUNCIL_POLL_INTERVAL", "0.25")),
 )
+COUNCIL_SYNTHESIS_MAX_TOKENS = 768
 TAEY_COUNCIL_LOG_DIR = Path(
     os.environ.get(
         "TAEY_COUNCIL_LOG_DIR",
@@ -353,6 +354,16 @@ def _append_session_event(session_id: str, event: dict) -> None:
             os.close(directory)
 
 
+def _terminal_council_synthesis(data: object) -> str:
+    choice = (data.get("choices") or [{}])[0] if isinstance(data, dict) else {}
+    if not isinstance(choice, dict) or choice.get("finish_reason") != "stop":
+        raise RuntimeError("council synthesis did not reach a terminal stop")
+    answer = (choice.get("message") or {}).get("content")
+    if not isinstance(answer, str) or not answer.strip():
+        raise RuntimeError("council synthesis returned no assistant content")
+    return answer.strip()
+
+
 async def _synthesize_native_council(
     conversation_id: str,
     packet: dict,
@@ -367,7 +378,9 @@ async def _synthesize_native_council(
         "Synthesize the decision-relevant result. Explicitly label missing or "
         "failed seats, material dissent, and unresolved uncertainty. Do not "
         "expose hidden chain-of-thought or claim execution that the packet "
-        "does not evidence."
+        "does not evidence. Be concise: state the decision, strongest evidence, "
+        "material dissent or uncertainty, and the next action without restating "
+        "every seat."
     )
     messages = [{"role": "user", "content": synthesis_request}]
     round_id = str(packet["round_id"])
@@ -377,6 +390,7 @@ async def _synthesize_native_council(
         "model": MODEL or "ep3",
         "messages": messages,
         "chat_template_kwargs": {"enable_thinking": False},
+        "max_tokens": COUNCIL_SYNTHESIS_MAX_TOKENS,
         "tools": [],
     }
     headers = {
@@ -409,17 +423,9 @@ async def _synthesize_native_council(
             f"turn={proxy_turn_id!r}"
         )
     data = response.json()
-    answer = (
-        ((data.get("choices") or [{}])[0].get("message") or {}).get(
-            "content"
-        )
-        if isinstance(data, dict)
-        else None
-    )
-    if not isinstance(answer, str) or not answer.strip():
-        raise RuntimeError("council synthesis returned no assistant content")
+    answer = _terminal_council_synthesis(data)
     return {
-        "answer": answer.strip(),
+        "answer": answer,
         "proxy_turn_id": proxy_turn_id,
         "event_id": returned_event_id,
         "correlation_id": returned_correlation_id,

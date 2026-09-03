@@ -144,6 +144,7 @@ def main() -> int:
         ],
         "chat_template_kwargs": {"enable_thinking": False},
         "max_rounds": producer.COUNCIL_MAX_TOOL_ROUNDS,
+        "max_tokens": producer.COUNCIL_MAX_COMPLETION_TOKENS,
         "response_format": producer.response_format(
             seat,
             lineage["prompt_revision"],
@@ -197,7 +198,7 @@ def main() -> int:
 
     prove_soma_proxy_posts_encoded_bytes()
     prove_canonical_codec_golden_bytes()
-    prove_proxy_client_ask_binds_outbound_bytes()
+    prove_proxy_client_ask_binds_outbound_bytes(receipt, outbound)
     print(
         json.dumps(
             {
@@ -237,16 +238,17 @@ def prove_canonical_codec_golden_bytes() -> None:
     )
 
 
-def prove_proxy_client_ask_binds_outbound_bytes() -> None:
+def prove_proxy_client_ask_binds_outbound_bytes(
+    receipt: dict,
+    bounded_bytes: bytes,
+) -> None:
     import taey_seat
 
     # Hermetic safety barrier: urlopen MUST NEVER be called during test execution.
     # If the outbound bind is bypassed (e.g. during mutation testing), urlopen fails fast in 0ms.
     client = taey_seat.ProxyClient()
-    messages = [
-        {"role": "system", "content": "system prompt"},
-        {"role": "user", "content": "user query"},
-    ]
+    bounded_request = receipt["model_request"]
+    messages = bounded_request["messages"]
     mismatched_request = {
         "model": taey_seat.MODEL,
         "messages": [
@@ -256,6 +258,104 @@ def prove_proxy_client_ask_binds_outbound_bytes() -> None:
         "chat_template_kwargs": {"enable_thinking": False},
     }
     mismatched_bytes = encode_outbound_request_bytes(mismatched_request)
+
+    def proxy_response(tool_profile: str):
+        response = mock.MagicMock()
+        response.read.return_value = json.dumps({
+            "choices": [{
+                "message": {"role": "assistant", "content": "ok"},
+                "finish_reason": "stop",
+            }],
+        }).encode("utf-8")
+        response.headers = {
+            "X-Taey-Turn-Id": "turn-1",
+            "X-Taey-Event-Id": "evt-1",
+            "X-Taey-Correlation-Id": "corr-1",
+            "X-Taey-Tool-Profile": tool_profile,
+        }
+        response.__enter__.return_value = response
+        return response
+
+    with mock.patch(
+        "urllib.request.urlopen",
+        return_value=proxy_response(producer.COUNCIL_TOOL_PROFILE),
+    ) as urlopen:
+        client.ask(
+            prompt="user query",
+            event_id="evt-1",
+            correlation_id="corr-1",
+            messages=messages,
+            response_format=bounded_request["response_format"],
+            max_rounds=producer.COUNCIL_MAX_TOOL_ROUNDS,
+            max_tokens=producer.COUNCIL_MAX_COMPLETION_TOKENS,
+            tool_profile_receipt=receipt,
+            outbound_request_bytes=bounded_bytes,
+        )
+        sent = urlopen.call_args.args[0]
+        headers = {key.lower(): value for key, value in sent.header_items()}
+        require(
+            headers.get("x-taey-tool-profile") == producer.COUNCIL_TOOL_PROFILE,
+            "ProxyClient did not send the receipted council tool profile",
+        )
+
+    with mock.patch(
+        "urllib.request.urlopen",
+        return_value=proxy_response("full"),
+    ):
+        try:
+            client.ask(
+                prompt="user query",
+                event_id="evt-1",
+                correlation_id="corr-1",
+                messages=messages,
+                response_format=bounded_request["response_format"],
+                max_rounds=producer.COUNCIL_MAX_TOOL_ROUNDS,
+                max_tokens=producer.COUNCIL_MAX_COMPLETION_TOKENS,
+                tool_profile_receipt=receipt,
+                outbound_request_bytes=bounded_bytes,
+            )
+        except taey_seat.SeatFailure as exc:
+            require(
+                "tool-profile mismatch" in str(exc),
+                f"unexpected tool-profile failure: {exc}",
+            )
+        else:
+            raise RuntimeError("ProxyClient accepted a mismatched tool-profile echo")
+
+    drifted_receipt = dict(receipt)
+    drifted_receipt["tool_profile"] = "full"
+    drifted_unsigned = {
+        key: value
+        for key, value in drifted_receipt.items()
+        if key != "receipt_sha256"
+    }
+    drifted_receipt["receipt_sha256"] = producer.canonical_sha256(
+        drifted_unsigned
+    )
+    with mock.patch(
+        "urllib.request.urlopen",
+        side_effect=AssertionError("drifted profile receipt reached transport"),
+    ) as urlopen:
+        try:
+            client.ask(
+                prompt="user query",
+                event_id="evt-1",
+                correlation_id="corr-1",
+                messages=messages,
+                response_format=bounded_request["response_format"],
+                max_rounds=producer.COUNCIL_MAX_TOOL_ROUNDS,
+                max_tokens=producer.COUNCIL_MAX_COMPLETION_TOKENS,
+                tool_profile_receipt=drifted_receipt,
+                outbound_request_bytes=bounded_bytes,
+            )
+        except taey_seat.SeatFailure as exc:
+            require(
+                "tool-profile receipt is invalid" in str(exc),
+                f"unexpected receipt/profile failure: {exc}",
+            )
+        else:
+            raise RuntimeError("ProxyClient accepted a drifted tool-profile receipt")
+    require(urlopen.call_count == 0, "drifted profile receipt reached transport")
 
     with (
         mock.patch(

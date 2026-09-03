@@ -31,7 +31,17 @@ MODEL_REQUEST_RECEIPT_CONTRACT = (
 )
 RESPONSE_CONTRACT = "taey-council-contribution/v1"
 ROLE_CONTRACT_REVISION = 1
-COUNCIL_MAX_TOOL_ROUNDS = 2
+COUNCIL_TOOL_PROFILE = "council-read"
+COUNCIL_MAX_TOOL_ROUNDS = 1
+COUNCIL_MAX_TOOL_CALLS = 2
+COUNCIL_MAX_SEARCH_RESULTS = 3
+COUNCIL_MAX_TOOL_RESULT_BYTES = 3_000
+COUNCIL_MAX_TOOL_RESULT_TOTAL_BYTES = 6_000
+COUNCIL_MAX_COMPLETION_TOKENS = 512
+CONTRIBUTION_STATUS_MAX_CHARS = 64
+CONTRIBUTION_LIST_MAX_ITEMS = 3
+CONTRIBUTION_ITEM_MAX_CHARS = 240
+CONTRIBUTION_RECOMMENDATION_MAX_CHARS = 480
 PROMPT_REVISION_MARKER = "<runtime-positive-integer>"
 EVIDENCE_REGISTRY_MARKER = ("<runtime-evidence-registry>",)
 _SEAT_ID_RE = re.compile(r"^taey-council-([1-9][0-9]*)$")
@@ -269,20 +279,33 @@ def response_format(
         "schema_version": {"type": "integer", "const": 1},
         "seat_id": {"type": "string", "const": seat.seat_id},
         "role_id": {"type": "string", "const": seat.role_id},
-        "status": {"type": "string", "minLength": 1},
+        "status": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": CONTRIBUTION_STATUS_MAX_CHARS,
+        },
         "prompt_revision": {
             "type": "integer",
             "const": prompt_revision,
         },
-        "recommendation": {"type": "string", "minLength": 1},
+        "recommendation": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": CONTRIBUTION_RECOMMENDATION_MAX_CHARS,
+        },
         "confidence": {"type": "number", "minimum": 0, "maximum": 1},
     }
     for field_name in CONTRIBUTION_LIST_FIELDS:
-        item_schema: dict[str, Any] = {"type": "string", "minLength": 1}
+        item_schema: dict[str, Any] = {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": CONTRIBUTION_ITEM_MAX_CHARS,
+        }
         if field_name == "evidence_refs":
             item_schema["enum"] = list(evidence_registry)
         properties[field_name] = {
             "type": "array",
+            "maxItems": CONTRIBUTION_LIST_MAX_ITEMS,
             "items": item_schema,
         }
     return {
@@ -346,7 +369,13 @@ def prompt_contract(manifest: CouncilManifest, seat: SeatConfig) -> dict[str, An
             "contract": "openai-chat-completions-request/v1",
             "message_order": ["system", "user"],
             "chat_template_kwargs": {"enable_thinking": False},
+            "tool_profile": COUNCIL_TOOL_PROFILE,
             "max_rounds": COUNCIL_MAX_TOOL_ROUNDS,
+            "max_tool_calls": COUNCIL_MAX_TOOL_CALLS,
+            "max_search_results": COUNCIL_MAX_SEARCH_RESULTS,
+            "max_tool_result_bytes": COUNCIL_MAX_TOOL_RESULT_BYTES,
+            "max_tool_result_total_bytes": COUNCIL_MAX_TOOL_RESULT_TOTAL_BYTES,
+            "max_completion_tokens": COUNCIL_MAX_COMPLETION_TOKENS,
             "attachments": {"state": "none", "items": []},
         },
     }
@@ -394,6 +423,7 @@ def model_request_receipt(
         "messages",
         "chat_template_kwargs",
         "max_rounds",
+        "max_tokens",
         "response_format",
     }:
         raise ValueError("model request fields differ from the council request contract")
@@ -403,6 +433,7 @@ def model_request_receipt(
         or not model_request["model"].strip()
         or model_request.get("chat_template_kwargs") != {"enable_thinking": False}
         or model_request.get("max_rounds") != COUNCIL_MAX_TOOL_ROUNDS
+        or model_request.get("max_tokens") != COUNCIL_MAX_COMPLETION_TOKENS
         or not isinstance(messages, list)
         or len(messages) != 2
         or messages[0] != system_message(seat)
@@ -455,6 +486,7 @@ def model_request_receipt(
         "attachments": attachment_state,
         "attachments_sha256": canonical_sha256(attachment_state),
         "response_format_sha256": canonical_sha256(expected_response_format),
+        "tool_profile": COUNCIL_TOOL_PROFILE,
         "model_request": model_request,
         "model_request_sha256": object_digest,
         "outbound_request_sha256": byte_digest,
@@ -480,7 +512,30 @@ def verify_model_request_receipt_outbound(
         raise ValueError("receipt model-request digest does not match the request object")
     if receipt.get("model_request_sha256") != receipt.get("outbound_request_sha256"):
         raise ValueError("receipt canonical digest drifted from outbound bytes")
+    prompt_contract = receipt.get("prompt_contract")
+    if (
+        not isinstance(prompt_contract, dict)
+        or receipt.get("prompt_contract_sha256")
+        != canonical_sha256(prompt_contract)
+    ):
+        raise ValueError("receipt prompt-contract digest does not verify")
     unsigned = {key: value for key, value in receipt.items() if key != "receipt_sha256"}
     if receipt.get("receipt_sha256") != canonical_sha256(unsigned):
         raise ValueError("receipt digest does not verify")
     return outbound
+
+
+def verified_model_request_tool_profile(
+    receipt: dict[str, Any],
+    outbound_request_bytes: bytes,
+) -> str:
+    verify_model_request_receipt_outbound(receipt, outbound_request_bytes)
+    profile = receipt.get("tool_profile")
+    renderer = receipt["prompt_contract"].get("request_renderer")
+    if (
+        profile != COUNCIL_TOOL_PROFILE
+        or not isinstance(renderer, dict)
+        or renderer.get("tool_profile") != profile
+    ):
+        raise ValueError("receipt tool profile is not the bound council profile")
+    return profile

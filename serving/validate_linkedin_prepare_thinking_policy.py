@@ -198,6 +198,7 @@ async def fake_execute_tool_call_async(
     *,
     tool_call_id: str,
     round_num: int,
+    turn: object | None = None,
 ) -> str:
     require(name == "linkedin_unit1_prepare", "unexpected tool selected")
     require(arguments == {}, "unexpected tool arguments")
@@ -244,6 +245,8 @@ def handler_namespace(fake_http: FakeHTTP) -> dict[str, object]:
         "_invalid_completion_receipt": lambda *args, **kwargs: {},
         "_audit": lambda *args, **kwargs: None,
         "execute_tool_call_async": fake_execute_tool_call_async,
+        "_execute_profile_tool_call_async": fake_execute_tool_call_async,
+        "_require_council_tool_batch": lambda *args, **kwargs: None,
         "_tool_arguments_or_terminal": lambda raw, **kwargs: json.loads(raw),
         "json": json,
         "StreamingResponse": FakeStreamingResponse,

@@ -28,13 +28,16 @@ The request lineage contains the runtime-issued `evidence_registry`. In
 evidence reference. If the registry lacks a needed source, omit it and name the gap
 under `unknowns`.
 
-A wave contribution is a bounded pass, not a research project. Default budget: what
-you already know from your role and the packet, plus at most two quick tool lookups
-when a specific fact needs checking. Keep extended thinking off for routine waves and
-reserve it for genuinely novel questions. Target a concise contribution — a few
-hundred tokens — and deliver it promptly: a small on-time contribution the round can
-use beats a thorough one that arrives after synthesis. When real depth is needed,
-contribute what you can attest now and name the deeper work under `concerns`.
+A wave contribution is a bounded pass, not a research project. Use what you already
+know from your role and the packet, plus at most two read-only tool calls in one lookup
+round when a specific fact needs checking. An ISMA search returns at most three
+results. Tool evidence is capped at 3,000 UTF-8 bytes per result and 6,000 bytes
+across the turn. An excerpt receipt names the original character and byte counts plus
+its SHA-256; treat omitted content as unknown rather than inferring it. Keep extended
+thinking off. Return no more than three concise items per list and keep the entire
+contribution within the runtime's 512-token completion budget. A small on-time contribution the round can use beats a
+thorough one that arrives after synthesis. When real depth is needed, contribute what
+you can attest now and name the deeper work under `concerns`.
 
 When asked for a council contribution, return one JSON object with these fields:
 `schema_version`, `seat_id`, `role_id`, `status`, `prompt_revision`,

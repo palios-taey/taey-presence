@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 if __package__:
+    from . import council_prompt_receipt as council_prompt
     from .outbound_request_codec import (
         bind_outbound_request_bytes,
         encode_outbound_request_bytes,
@@ -53,6 +54,7 @@ if __package__:
         validate_bootstrap,
     )
 else:
+    import council_prompt_receipt as council_prompt
     from outbound_request_codec import (
         bind_outbound_request_bytes,
         encode_outbound_request_bytes,
@@ -333,6 +335,7 @@ _serving_socket_reserved = False
 _active_turns: dict[str, TurnContext] = {}
 
 _FULL_TOOL_PROFILE = "full"
+_COUNCIL_READ_TOOL_PROFILE = council_prompt.COUNCIL_TOOL_PROFILE
 _MANUAL_CHAT_UI_TOOL_PROFILE = "manual-chat-ui"
 _MANUAL_CHAT_UI_SEND_TOOL_PROFILE = "manual-chat-ui-send"
 _REVENUE_UI_TOOL_PROFILE = "revenue-ui"
@@ -428,6 +431,15 @@ GREENHOUSE_ATS_TIMEOUT_SECS = int(
 )
 _TOOL_PROFILE_ALLOWED: dict[str, frozenset[str] | None] = {
     _FULL_TOOL_PROFILE: None,
+    _COUNCIL_READ_TOOL_PROFILE: frozenset({
+        "check_body_state",
+        "compute",
+        "fetch_url",
+        "list_dir",
+        "read_file",
+        "retrieve_document",
+        "search_isma",
+    }),
     _MANUAL_CHAT_UI_TOOL_PROFILE: frozenset({
         "drive_chat",
     }),
@@ -1008,6 +1020,151 @@ async def execute_tool_call_async(
         raise
     finally:
         _request_context.reset(token)
+
+
+def _require_council_tool_batch(tool_calls: list[dict], turn: TurnContext) -> None:
+    if turn.tool_profile != _COUNCIL_READ_TOOL_PROFILE:
+        return
+    profile_state = _request_context.get().get("_tool_profile_state")
+    if not isinstance(profile_state, dict):
+        raise RuntimeError("council-read tool profile state is missing")
+    used = profile_state.get("council_tool_calls", 0)
+    if isinstance(used, bool) or not isinstance(used, int) or used < 0:
+        raise RuntimeError("council-read tool call count is invalid")
+    remaining = council_prompt.COUNCIL_MAX_TOOL_CALLS - used
+    if len(tool_calls) <= remaining:
+        return
+    reason = (
+        f"council-read requested {len(tool_calls)} calls with {remaining} remaining; "
+        f"maximum is {council_prompt.COUNCIL_MAX_TOOL_CALLS}"
+    )
+    profile_state["terminal"] = {
+        "tool": "batch",
+        "reason": reason,
+    }
+    _audit(
+        "council_tool_budget_refusal",
+        {
+            "requested": len(tool_calls),
+            "remaining": remaining,
+            "reason": reason,
+        },
+    )
+    raise HTTPException(
+        status_code=502,
+        detail={
+            "error": "council_tool_call_budget_exceeded",
+            "turn_id": turn.turn_id,
+        },
+    )
+
+
+def _utf8_prefix(value: str, max_bytes: int) -> str:
+    if max_bytes < 0:
+        raise ValueError("UTF-8 prefix budget cannot be negative")
+    encoded = value.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return value
+    return encoded[:max_bytes].decode("utf-8", errors="ignore")
+
+
+async def _execute_profile_tool_call_async(
+    name: str,
+    arguments: dict,
+    *,
+    turn: TurnContext,
+    tool_call_id: str,
+    round_num: int,
+) -> str:
+    if turn.tool_profile != _COUNCIL_READ_TOOL_PROFILE:
+        return await execute_tool_call_async(
+            name,
+            arguments,
+            tool_call_id=tool_call_id,
+            round_num=round_num,
+        )
+    profile_state = _request_context.get().get("_tool_profile_state")
+    if not isinstance(profile_state, dict):
+        raise RuntimeError("council-read tool profile state is missing")
+    used = profile_state.get("council_tool_calls", 0)
+    if (
+        isinstance(used, bool)
+        or not isinstance(used, int)
+        or not 0 <= used < council_prompt.COUNCIL_MAX_TOOL_CALLS
+    ):
+        raise RuntimeError("council-read tool call budget was not reserved")
+    bounded_arguments = dict(arguments)
+    if name == "search_isma":
+        top_k = bounded_arguments.get(
+            "top_k",
+            council_prompt.COUNCIL_MAX_SEARCH_RESULTS,
+        )
+        if (
+            isinstance(top_k, bool)
+            or not isinstance(top_k, int)
+            or not 1 <= top_k <= council_prompt.COUNCIL_MAX_SEARCH_RESULTS
+        ):
+            raise HTTPException(
+                status_code=502,
+                detail={
+                    "error": "council_search_result_budget_invalid",
+                    "turn_id": turn.turn_id,
+                },
+            )
+        bounded_arguments["top_k"] = top_k
+    profile_state["council_tool_calls"] = used + 1
+    result = await execute_tool_call_async(
+        name,
+        bounded_arguments,
+        tool_call_id=tool_call_id,
+        round_num=round_num,
+    )
+    if not isinstance(result, str):
+        result = str(result)
+    original_chars = len(result)
+    original_bytes = result.encode("utf-8")
+    if len(original_bytes) > council_prompt.COUNCIL_MAX_TOOL_RESULT_BYTES:
+        digest = hashlib.sha256(original_bytes).hexdigest()
+        marker = (
+            "[COUNCIL TOOL RESULT EXCERPT "
+            f"original_chars={original_chars} original_bytes={len(original_bytes)} "
+            f"sha256:{digest}]"
+        )
+        excerpt_bytes = (
+            council_prompt.COUNCIL_MAX_TOOL_RESULT_BYTES
+            - len(marker.encode("utf-8"))
+            - 1
+        )
+        if excerpt_bytes < 0:
+            raise RuntimeError("council tool-result budget cannot contain its receipt")
+        result = f"{marker}\n{_utf8_prefix(result, excerpt_bytes)}"
+        returned_bytes = len(result.encode("utf-8"))
+        _audit(
+            "council_tool_result_excerpt",
+            {
+                "original_chars": original_chars,
+                "original_bytes": len(original_bytes),
+                "returned_chars": len(result),
+                "returned_bytes": returned_bytes,
+                "sha256": f"sha256:{digest}",
+                "tool": name,
+            },
+        )
+    result_bytes = len(result.encode("utf-8"))
+    if result_bytes > council_prompt.COUNCIL_MAX_TOOL_RESULT_BYTES:
+        raise RuntimeError("council-read tool result escaped its byte budget")
+    prompt_bytes = profile_state.get("council_prompt_result_bytes", 0)
+    if (
+        isinstance(prompt_bytes, bool)
+        or not isinstance(prompt_bytes, int)
+        or prompt_bytes < 0
+    ):
+        raise RuntimeError("council-read prompt-result byte count is invalid")
+    prompt_bytes += result_bytes
+    if prompt_bytes > council_prompt.COUNCIL_MAX_TOOL_RESULT_TOTAL_BYTES:
+        raise RuntimeError("council-read prompt-result budget exceeded")
+    profile_state["council_prompt_result_bytes"] = prompt_bytes
+    return result
 
 
 _CAPTURE_COMPONENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$")
@@ -2086,6 +2243,25 @@ def _tools_for_profile(profile: str) -> list[dict]:
         raise RuntimeError(
             f"tool profile {profile!r} references missing tools: {missing}"
         )
+    if profile == _COUNCIL_READ_TOOL_PROFILE:
+        bounded = json.loads(json.dumps(selected))
+        for tool in bounded:
+            function = tool["function"]
+            if function["name"] != "search_isma":
+                continue
+            function["description"] = (
+                "Search shared ISMA memory for one specific fact needed by this "
+                "council contribution. Use at most three results. The entire council "
+                "turn permits no more than two read-only tool calls."
+            )
+            top_k = function["parameters"]["properties"]["top_k"]
+            top_k.update({
+                "minimum": 1,
+                "maximum": council_prompt.COUNCIL_MAX_SEARCH_RESULTS,
+                "default": council_prompt.COUNCIL_MAX_SEARCH_RESULTS,
+                "description": "Return one through three results.",
+            })
+        return bounded
     if profile == _MANUAL_CHAT_UI_SEND_TOOL_PROFILE:
         if len(selected) != 1:
             raise RuntimeError("manual chat UI SEND profile requires one drive_chat tool")
@@ -10802,6 +10978,7 @@ async def _chat_completions_for_turn(
                 # does not silently blank the panel a second time.
                 resolved_thinking = thinking
                 break
+            _require_council_tool_batch(tool_calls, turn)
             rounds += 1
             log.info("Stream tool calls (round %d): %s", rounds,
                      [tc.get("function", {}).get("name") for tc in tool_calls])
@@ -10839,9 +11016,10 @@ async def _chat_completions_for_turn(
                     turn=turn,
                     round_num=rounds,
                 )
-                result = await execute_tool_call_async(
+                result = await _execute_profile_tool_call_async(
                     func.get("name", ""),
                     arguments,
+                    turn=turn,
                     tool_call_id=tc.get("id", ""),
                     round_num=rounds,
                 )
@@ -10971,9 +11149,8 @@ async def _chat_completions_for_turn(
                 total_tokens += usage.get("completion_tokens", 0)
 
                 choice = result.get("choices", [{}])[0]
-                message = choice.get("message", {})
-                finish_reason = choice.get("finish_reason", "")
-                tool_calls = message.get("tool_calls", [])
+                message = choice.get("message", {}) or {}
+                tool_calls = message.get("tool_calls") or []
 
                 if one_shot_spec is not None and (
                     len(tool_calls) != 1
@@ -10988,10 +11165,7 @@ async def _chat_completions_for_turn(
                         },
                     )
 
-                if not tool_calls or (
-                    one_shot_spec is None
-                    and finish_reason != "tool_calls"
-                ):
+                if not tool_calls:
                     # No tool calls -- final response. If a schema was held aside for the tool
                     # rounds, the answer the caller contracted for has not been produced yet.
                     if held_response_format is not None:
@@ -11001,6 +11175,7 @@ async def _chat_completions_for_turn(
                     break
 
                 # Execute tool calls
+                _require_council_tool_batch(tool_calls, turn)
                 round_num += 1
                 log.info("Tool calls (round %d): %s",
                          round_num,
@@ -11060,9 +11235,10 @@ async def _chat_completions_for_turn(
                         round_num=round_num,
                     )
 
-                    tool_result = await execute_tool_call_async(
+                    tool_result = await _execute_profile_tool_call_async(
                         name,
                         arguments,
+                        turn=turn,
                         tool_call_id=tc.get("id", ""),
                         round_num=round_num,
                     )

@@ -24,8 +24,10 @@ from typing import Any
 import redis
 
 if __package__:
+    from . import council_prompt_receipt as council_receipt
     from .outbound_request_codec import bind_outbound_request_bytes
 else:
+    import council_prompt_receipt as council_receipt
     from outbound_request_codec import bind_outbound_request_bytes
 
 
@@ -700,6 +702,7 @@ class ProxyClient:
         response_format: dict[str, Any] | None = None,
         *,
         max_rounds: int | None = None,
+        max_tokens: int | None = None,
     ) -> dict[str, Any]:
         request_body: dict[str, Any] = {
             "model": MODEL,
@@ -710,6 +713,8 @@ class ProxyClient:
             request_body["response_format"] = response_format
         if max_rounds is not None:
             request_body["max_rounds"] = max_rounds
+        if max_tokens is not None:
+            request_body["max_tokens"] = max_tokens
         return request_body
 
     def ask(
@@ -721,12 +726,16 @@ class ProxyClient:
         messages: list[dict[str, str]],
         response_format: dict[str, Any] | None = None,
         max_rounds: int | None = None,
+        max_tokens: int | None = None,
+        tool_profile: str | None = None,
+        tool_profile_receipt: dict[str, Any] | None = None,
         outbound_request_bytes: bytes | None = None,
     ) -> ProxyResult:
         request_body = self.model_request_body(
             messages,
             response_format,
             max_rounds=max_rounds,
+            max_tokens=max_tokens,
         )
         if outbound_request_bytes is None:
             body = json.dumps(request_body).encode("utf-8")
@@ -741,16 +750,32 @@ class ProxyClient:
                     f"outbound request bytes drifted from the encoded model request "
                     f"for correlation={correlation_id}: {exc}"
                 ) from exc
+        if tool_profile_receipt is not None:
+            if tool_profile is not None:
+                raise SeatFailure("tool profile must have one operational source")
+            try:
+                tool_profile = council_receipt.verified_model_request_tool_profile(
+                    tool_profile_receipt,
+                    body,
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                raise SeatFailure(
+                    f"council tool-profile receipt is invalid for "
+                    f"correlation={correlation_id}: {exc}"
+                ) from exc
+        headers = {
+            "Content-Type": "application/json",
+            "X-Taey-Seat-Id": SESSION,
+            "X-Taey-Event-Id": event_id,
+            "X-Taey-Correlation-Id": correlation_id,
+        }
+        if tool_profile is not None:
+            headers["X-Taey-Tool-Profile"] = tool_profile
         request = urllib.request.Request(
             PROXY_URL,
             data=body,
             method="POST",
-            headers={
-                "Content-Type": "application/json",
-                "X-Taey-Seat-Id": SESSION,
-                "X-Taey-Event-Id": event_id,
-                "X-Taey-Correlation-Id": correlation_id,
-            },
+            headers=headers,
         )
         try:
             with urllib.request.urlopen(request) as response:
@@ -786,6 +811,9 @@ class ProxyClient:
         returned_correlation_id = str(
             response_headers.get("X-Taey-Correlation-Id") or ""
         )
+        returned_tool_profile = str(
+            response_headers.get("X-Taey-Tool-Profile") or ""
+        )
         if not returned_turn_id:
             raise SeatFailure(
                 f"proxy omitted X-Taey-Turn-Id for correlation={correlation_id}"
@@ -795,6 +823,11 @@ class ProxyClient:
                 "proxy lineage mismatch "
                 f"expected=({event_id},{correlation_id}) "
                 f"returned=({returned_event_id},{returned_correlation_id})"
+            )
+        if tool_profile is not None and returned_tool_profile != tool_profile:
+            raise SeatFailure(
+                "proxy tool-profile mismatch "
+                f"expected={tool_profile!r} returned={returned_tool_profile!r}"
             )
         return ProxyResult(
             reply=reply,
