@@ -67,8 +67,23 @@ if importlib.util.find_spec("httpx") is None:
         def __init__(self, *args, **kwargs):
             pass
 
+    class _StubClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
     httpx_stub.AsyncClient = _StubAsyncClient
+    httpx_stub.Client = _StubClient
     httpx_stub.Response = object
+    httpx_stub.Request = object
+    httpx_stub.TimeoutException = type("TimeoutException", (Exception,), {})
+    httpx_stub.RequestError = type("RequestError", (Exception,), {})
+    httpx_stub.RemoteProtocolError = type("RemoteProtocolError", (Exception,), {})
     sys.modules["httpx"] = httpx_stub
 
 if importlib.util.find_spec("redis") is None:
