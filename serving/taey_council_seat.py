@@ -781,6 +781,7 @@ def _run_dcm_turn(
             correlation_id=correlation_id,
             messages=messages,
             response_format=contribution_format,
+            max_rounds=prompt_producer.COUNCIL_MAX_TOOL_ROUNDS,
         )
         invoked["result"] = result
         liveness.assert_healthy()
@@ -965,7 +966,11 @@ def _run_turn(
     )
     messages = store.messages_for(prompt)
     contribution_format = _contribution_response_format(lineage, store.seat)
-    model_request = proxy.model_request_body(messages, contribution_format)
+    model_request = proxy.model_request_body(
+        messages,
+        contribution_format,
+        max_rounds=prompt_producer.COUNCIL_MAX_TOOL_ROUNDS,
+    )
     producer_receipt = None
     if request_contract == prompt_producer.DCM_REQUEST_CONTRACT:
         try:
@@ -1030,6 +1035,7 @@ def _run_turn(
             correlation_id=correlation_id,
             messages=messages,
             response_format=contribution_format,
+            max_rounds=prompt_producer.COUNCIL_MAX_TOOL_ROUNDS,
         )
         inference_state = "completed_invalid"
         liveness.assert_healthy()

@@ -18,6 +18,7 @@ MODEL_REQUEST_RECEIPT_CONTRACT = (
 )
 RESPONSE_CONTRACT = "taey-council-contribution/v1"
 ROLE_CONTRACT_REVISION = 1
+COUNCIL_MAX_TOOL_ROUNDS = 2
 PROMPT_REVISION_MARKER = "<runtime-positive-integer>"
 EVIDENCE_REGISTRY_MARKER = ("<runtime-evidence-registry>",)
 _SEAT_ID_RE = re.compile(r"^taey-council-([1-9][0-9]*)$")
@@ -338,6 +339,7 @@ def prompt_contract(manifest: CouncilManifest, seat: SeatConfig) -> dict[str, An
             "contract": "openai-chat-completions-request/v1",
             "message_order": ["system", "user"],
             "chat_template_kwargs": {"enable_thinking": False},
+            "max_rounds": COUNCIL_MAX_TOOL_ROUNDS,
             "attachments": {"state": "none", "items": []},
         },
     }
@@ -383,6 +385,7 @@ def model_request_receipt(
         "model",
         "messages",
         "chat_template_kwargs",
+        "max_rounds",
         "response_format",
     }:
         raise ValueError("model request fields differ from the council request contract")
@@ -391,6 +394,7 @@ def model_request_receipt(
         not isinstance(model_request.get("model"), str)
         or not model_request["model"].strip()
         or model_request.get("chat_template_kwargs") != {"enable_thinking": False}
+        or model_request.get("max_rounds") != COUNCIL_MAX_TOOL_ROUNDS
         or not isinstance(messages, list)
         or len(messages) != 2
         or messages[0] != system_message(seat)

@@ -164,6 +164,7 @@ def main() -> int:
             {"role": "user", "content": "exact dynamic wave body"},
         ],
         "chat_template_kwargs": {"enable_thinking": False},
+        "max_rounds": producer.COUNCIL_MAX_TOOL_ROUNDS,
         "response_format": response_format,
     }
     receipt = producer.model_request_receipt(
@@ -306,6 +307,7 @@ def main() -> int:
         runtime_request = runtime.executive.ProxyClient.model_request_body(
             runtime_messages,
             runtime_format,
+            max_rounds=producer.COUNCIL_MAX_TOOL_ROUNDS,
         )
         runtime_receipt = producer.model_request_receipt(
             manifest=runtime_manifest,

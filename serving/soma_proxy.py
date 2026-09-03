@@ -10466,7 +10466,16 @@ async def _chat_completions_for_turn(
     turn: TurnContext,
     liveness_registered: bool,
 ):
-    body.pop("max_rounds", None)
+    max_rounds = body.pop("max_rounds", None)
+    if max_rounds is not None and (
+        isinstance(max_rounds, bool)
+        or not isinstance(max_rounds, int)
+        or not 1 <= max_rounds <= 32
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="max_rounds must be an integer from 1 through 32",
+        )
     one_shot_spec = _private_transaction_spec_for_profile(turn.tool_profile)
 
     # Strip model field -- let vLLM use its loaded model
@@ -10860,12 +10869,11 @@ async def _chat_completions_for_turn(
                 final_body["tool_choice"] = "none"
                 if held_response_format is not None:
                     final_body["response_format"] = held_response_format
-                r = await _http.post(
+                return await _http.post(
                     "/v1/chat/completions",
                     json=final_body,
                     headers=_upstream_headers(turn),
                 )
-                return r.json()
 
             while True:
                 resp = await _http.post(
@@ -10902,7 +10910,8 @@ async def _chat_completions_for_turn(
                     # No tool calls -- final response. If a schema was held aside for the tool
                     # rounds, the answer the caller contracted for has not been produced yet.
                     if held_response_format is not None:
-                        result = await _final_answer()
+                        resp = await _final_answer()
+                        result = resp.json()
                         total_tokens += result.get("usage", {}).get("completion_tokens", 0)
                     break
 
@@ -10984,6 +10993,11 @@ async def _chat_completions_for_turn(
 
                 # Update body with extended messages for next round
                 body["messages"] = messages
+                if max_rounds is not None and round_num >= max_rounds:
+                    resp = await _final_answer()
+                    result = resp.json()
+                    total_tokens += result.get("usage", {}).get("completion_tokens", 0)
+                    break
 
             elapsed_ms = (time.time() - t0) * 1000
             final_usage = result.get("usage", {})
