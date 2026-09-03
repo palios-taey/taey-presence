@@ -11,9 +11,8 @@
 #     TAEY_CACHE_DIR    (default: $HOME/.cache)  host cache root (compile/triton/vllm caches)
 #     VLLM_PORT         (default: 8000)
 #     VLLM_GPU_UTIL     (default: 0.85)
-#     VLLM_IMAGE        (default: a PINNED digest — see below)
+#     VLLM_IMAGE        fixed to the PINNED digest below
 #     TAEY_LORA_PATH    (optional)  LoRA adapter dir (its basename is mounted under /models)
-#     TAEY_STRUCTURED_OUTPUTS_CONFIG (default: compact JSON with no free whitespace)
 #
 # IMAGE IS PINNED TO A DIGEST, NOT :latest-jetson-thor. A floating tag lets two nodes
 # silently resolve to different vLLM builds at their own pull times, so one can hang under
@@ -26,6 +25,34 @@
 # `vllm serve ...` argument block below is identical; drop the `docker run` wrapper and
 # point at your local model path. See serving/SERVING.md.
 set -euo pipefail
+
+readonly VLLM_IMAGE="ghcr.io/nvidia-ai-iot/vllm@sha256:b587dd56b4cb076209ad5156a626ac75f5a976d0e8e7d1e6a9fccd56d1bd65e8"
+readonly STRUCTURED_OUTPUTS_CONFIG='{"backend":"xgrammar","disable_any_whitespace":true}'
+
+if [ "${1:-}" = "--validate-structured-outputs-config" ]; then
+  [ "$#" -eq 1 ] || { echo "[vLLM] structured-output validation takes no other arguments" >&2; exit 2; }
+  validator_name="taey-vllm-structured-config-validator-$$"
+  cleanup_validator() {
+    docker rm -f "${validator_name}" >/dev/null 2>&1 || true
+  }
+  trap cleanup_validator EXIT INT TERM
+  docker run --rm \
+    --name "${validator_name}" \
+    --runtime nvidia \
+    --network none \
+    --entrypoint /opt/venv/bin/python \
+    "${VLLM_IMAGE}" \
+    -c 'import json, sys
+from vllm.config import StructuredOutputsConfig
+config = StructuredOutputsConfig(**json.loads(sys.argv[1]))
+if config.backend != "xgrammar" or config.disable_any_whitespace is not True:
+    raise SystemExit("structured-output config must use backend=xgrammar with disable_any_whitespace=true")
+print(json.dumps({"backend": config.backend, "disable_any_whitespace": config.disable_any_whitespace}, sort_keys=True))' \
+    "${STRUCTURED_OUTPUTS_CONFIG}"
+  trap - EXIT INT TERM
+  exit 0
+fi
+[ "$#" -eq 0 ] || { echo "[vLLM] unsupported launcher argument: $1" >&2; exit 2; }
 
 exec 9>/run/taey-model-artifact-seal.lock
 flock -s -n 9 || { echo "[vLLM] model artifact sealing is in progress" >&2; exit 1; }
@@ -58,8 +85,6 @@ MAX_MODEL_LEN="${TAEY_MAX_MODEL_LEN:-16384}"
 # compute capability 11.0, which has native FP8 tensor cores). Unset = serve the weights as stored.
 # A pre-quantized checkpoint carries its own quantization_config and needs no value here.
 QUANTIZATION="${TAEY_QUANTIZATION:-}"
-VLLM_IMAGE="${VLLM_IMAGE:-ghcr.io/nvidia-ai-iot/vllm@sha256:b587dd56b4cb076209ad5156a626ac75f5a976d0e8e7d1e6a9fccd56d1bd65e8}"
-STRUCTURED_OUTPUTS_CONFIG="${TAEY_STRUCTURED_OUTPUTS_CONFIG:-{\"disable_any_whitespace\":true}}"
 SERVE_LAUNCHER_SHA256="$(sha256sum "${BASH_SOURCE[0]}" | cut -d' ' -f1)"
 SERVE_INVOCATION_ID="${INVOCATION_ID:?systemd INVOCATION_ID is required}"
 

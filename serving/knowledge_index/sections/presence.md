@@ -58,7 +58,8 @@ production status, which is exactly a new artifact commit.
     "serving/deploy_thor.sh",
     "serving/gates_manifest.json",
     "serving/list_ep3_consumers.sh",
-    "serving/promote_model.sh"
+    "serving/promote_model.sh",
+    "serving/vllm_serve.sh"
   ],
   "bootstrap": {
     "cmd": "bash serving/deploy_thor.sh --check",

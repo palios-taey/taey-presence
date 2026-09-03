@@ -18,6 +18,26 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+STRUCTURED_OUTPUTS_CONFIG = {
+    "backend": "xgrammar",
+    "disable_any_whitespace": True,
+}
+STRUCTURED_OUTPUTS_DECLARATION = (
+    "readonly STRUCTURED_OUTPUTS_CONFIG="
+    "'{\"backend\":\"xgrammar\",\"disable_any_whitespace\":true}'"
+)
+STRUCTURED_OUTPUTS_PREFLIGHT = (
+    "'${ROOT}/serving/vllm_serve.sh' --validate-structured-outputs-config"
+)
+INDEX_WORKFLOW_TRIGGER_BLOCK = (
+    "on:\n"
+    "  pull_request:\n"
+    "  push:\n"
+    "    branches: [main]\n"
+    "\n"
+    "jobs:\n"
+)
+
 
 if importlib.util.find_spec("redis") is None:
     redis_stub = ModuleType("redis")
@@ -162,6 +182,83 @@ def observed() -> dict[str, int | str]:
     }
 
 
+def validate_launcher_contract(launcher: str, deployer: str) -> None:
+    declaration = re.search(
+        r"^readonly STRUCTURED_OUTPUTS_CONFIG='([^']+)'$",
+        launcher,
+        re.MULTILINE,
+    )
+    require(declaration is not None, "vLLM launcher has no fixed structured-output config")
+    try:
+        config = json.loads(declaration.group(1))
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("vLLM structured-output config is not JSON") from exc
+    require(
+        config == STRUCTURED_OUTPUTS_CONFIG,
+        "vLLM launcher must select xgrammar with free whitespace disabled",
+    )
+    require(
+        "--validate-structured-outputs-config" in launcher
+        and "from vllm.config import StructuredOutputsConfig" in launcher
+        and 'if config.backend != "xgrammar"' in launcher
+        and "config.disable_any_whitespace is not True" in launcher
+        and "raise SystemExit(" in launcher
+        and '--structured-outputs-config "${STRUCTURED_OUTPUTS_CONFIG}"' in launcher,
+        "vLLM launcher does not parse and enforce its effective structured-output semantics",
+    )
+    require(
+        STRUCTURED_OUTPUTS_PREFLIGHT in deployer
+        and deployer.index(STRUCTURED_OUTPUTS_PREFLIGHT)
+        < deployer.index('sudo systemctl restart taey-ep3'),
+        "Thor deploy does not parse the pinned-image config before restart",
+    )
+
+
+def validate_repo_local_structured_output_sources() -> None:
+    sources_with_literal: set[str] = set()
+    for source in REPO_ROOT.rglob("*.py"):
+        relative = source.relative_to(REPO_ROOT)
+        if (
+            relative.parts[0] == "tests"
+            or source.name.startswith("validate_")
+            or ".git" in relative.parts
+        ):
+            continue
+        if "response_format" in source.read_text(encoding="utf-8"):
+            sources_with_literal.add(str(relative))
+    require(
+        sources_with_literal
+        == {
+            "serving/council_prompt_receipt.py",
+            "serving/soma_proxy.py",
+            "serving/taey_council_seat.py",
+            "serving/taey_seat.py",
+        },
+        "taey-presence repo-local committed production Python sources containing the "
+        "literal response_format drifted from the receipt, council, request-builder, "
+        f"and proxy paths: {sorted(sources_with_literal)}",
+    )
+
+
+def validate_index_workflow_trigger(workflow: str | None = None) -> None:
+    if workflow is None:
+        workflow = (
+            REPO_ROOT / ".github/workflows/knowledge-index.yml"
+        ).read_text(encoding="utf-8")
+    _, on_separator, after_on = workflow.partition("\non:\n")
+    trigger_block, jobs_separator, _ = after_on.partition("\njobs:\n")
+    require(
+        on_separator and jobs_separator,
+        "knowledge-index workflow has no bounded trigger block",
+    )
+    actual_trigger_block = "on:\n" + trigger_block + "\njobs:\n"
+    require(
+        actual_trigger_block == INDEX_WORKFLOW_TRIGGER_BLOCK,
+        "knowledge-index trigger must contain only an unfiltered pull_request and "
+        "an unfiltered main push",
+    )
+
+
 def validate_contract_values() -> None:
     require(observed() == EXPECTED, f"council budget drifted: {observed()}")
     output = {
@@ -276,12 +373,10 @@ def validate_contract_values() -> None:
         f"{len(maximal_structured_bytes)} bytes",
     )
     launcher = (ROOT / "vllm_serve.sh").read_text(encoding="utf-8")
-    require(
-        'STRUCTURED_OUTPUTS_CONFIG="${TAEY_STRUCTURED_OUTPUTS_CONFIG:-'
-        '{\\"disable_any_whitespace\\":true}}"' in launcher
-        and '--structured-outputs-config "${STRUCTURED_OUTPUTS_CONFIG}"' in launcher,
-        "vLLM launcher does not disable unbounded structured-output whitespace",
-    )
+    deployer = (ROOT / "deploy_thor.sh").read_text(encoding="utf-8")
+    validate_launcher_contract(launcher, deployer)
+    validate_repo_local_structured_output_sources()
+    validate_index_workflow_trigger()
     require(
         "ghcr.io/nvidia-ai-iot/vllm@sha256:"
         "b587dd56b4cb076209ad5156a626ac75f5a976d0e8e7d1e6a9fccd56d1bd65e8"
@@ -968,6 +1063,98 @@ def prove_mutation_red() -> list[str]:
         r"^[\x20-\x21\x23-\x5B\x5D-\x7E]+$",
     ):
         _expect_red("response-pattern-bound", validate_contract_values, caught)
+    launcher = (ROOT / "vllm_serve.sh").read_text(encoding="utf-8")
+    deployer = (ROOT / "deploy_thor.sh").read_text(encoding="utf-8")
+    _expect_red(
+        "structured-config-missing-backend",
+        lambda: validate_launcher_contract(
+            launcher.replace(
+                STRUCTURED_OUTPUTS_DECLARATION,
+                "readonly STRUCTURED_OUTPUTS_CONFIG="
+                "'{\"disable_any_whitespace\":true}'",
+            ),
+            deployer,
+        ),
+        caught,
+    )
+    _expect_red(
+        "structured-config-whitespace-enabled",
+        lambda: validate_launcher_contract(
+            launcher.replace(
+                STRUCTURED_OUTPUTS_DECLARATION,
+                "readonly STRUCTURED_OUTPUTS_CONFIG="
+                "'{\"backend\":\"xgrammar\",\"disable_any_whitespace\":false}'",
+            ),
+            deployer,
+        ),
+        caught,
+    )
+    _expect_red(
+        "structured-config-missing-pre-restart-image-gate",
+        lambda: validate_launcher_contract(
+            launcher,
+            deployer.replace(STRUCTURED_OUTPUTS_PREFLIGHT, "missing-runtime-gate"),
+        ),
+        caught,
+    )
+    workflow = (
+        REPO_ROOT / ".github/workflows/knowledge-index.yml"
+    ).read_text(encoding="utf-8")
+    _expect_red(
+        "index-workflow-pr-paths-filter",
+        lambda: validate_index_workflow_trigger(
+            workflow.replace(
+                "  pull_request:\n",
+                "  pull_request:\n    paths:\n      - 'serving/**'\n",
+                1,
+            )
+        ),
+        caught,
+    )
+    _expect_red(
+        "index-workflow-pr-paths-ignore-filter",
+        lambda: validate_index_workflow_trigger(
+            workflow.replace(
+                "  pull_request:\n",
+                "  pull_request:\n    paths-ignore :\n      - 'dashboard/**'\n",
+                1,
+            )
+        ),
+        caught,
+    )
+    _expect_red(
+        "index-workflow-unknown-extra-key",
+        lambda: validate_index_workflow_trigger(
+            workflow.replace(
+                "  pull_request:\n",
+                "  pull_request:\n    future-filter: anything\n",
+                1,
+            )
+        ),
+        caught,
+    )
+    _expect_red(
+        "index-workflow-main-push-paths-filter",
+        lambda: validate_index_workflow_trigger(
+            workflow.replace(
+                "    branches: [main]\n",
+                "    branches: [main]\n    paths:\n      - 'serving/**'\n",
+                1,
+            )
+        ),
+        caught,
+    )
+    _expect_red(
+        "index-workflow-main-push-paths-ignore-filter",
+        lambda: validate_index_workflow_trigger(
+            workflow.replace(
+                "    branches: [main]\n",
+                "    branches: [main]\n    paths-ignore:\n      - 'dashboard/**'\n",
+                1,
+            )
+        ),
+        caught,
+    )
     original_system_message = producer.system_message
 
     def numeric_budget_prompt(seat):
