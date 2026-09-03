@@ -630,6 +630,7 @@ def _run_dcm_turn(
     event_id: str,
     correlation_id: str,
     previously_attempted: bool,
+    outbound_request_bytes: bytes,
 ) -> str:
     request = claim.payload
 
@@ -782,6 +783,7 @@ def _run_dcm_turn(
             messages=messages,
             response_format=contribution_format,
             max_rounds=prompt_producer.COUNCIL_MAX_TOOL_ROUNDS,
+            outbound_request_bytes=outbound_request_bytes,
         )
         invoked["result"] = result
         liveness.assert_healthy()
@@ -971,6 +973,9 @@ def _run_turn(
         contribution_format,
         max_rounds=prompt_producer.COUNCIL_MAX_TOOL_ROUNDS,
     )
+    outbound_request_bytes = prompt_producer.encode_outbound_request_bytes(
+        model_request
+    )
     producer_receipt = None
     if request_contract == prompt_producer.DCM_REQUEST_CONTRACT:
         try:
@@ -979,6 +984,7 @@ def _run_turn(
                 seat=store.seat,
                 lineage=lineage,
                 model_request=model_request,
+                outbound_request_bytes=outbound_request_bytes,
                 claims=claims,
             )
         except (KeyError, TypeError, ValueError) as exc:
@@ -1024,6 +1030,7 @@ def _run_turn(
             event_id=event_id,
             correlation_id=correlation_id,
             previously_attempted=previously_attempted,
+            outbound_request_bytes=outbound_request_bytes,
         )
     store.append("turn_attempt", **attempt_fields)
     inference_state = "side_effect_uncertain"

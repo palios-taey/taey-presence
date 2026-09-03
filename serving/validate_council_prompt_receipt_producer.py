@@ -167,11 +167,13 @@ def main() -> int:
         "max_rounds": producer.COUNCIL_MAX_TOOL_ROUNDS,
         "response_format": response_format,
     }
+    outbound_request_bytes = producer.encode_outbound_request_bytes(request)
     receipt = producer.model_request_receipt(
         manifest=manifest,
         seat=seat,
         lineage=lineage,
         model_request=request,
+        outbound_request_bytes=outbound_request_bytes,
         claims=[claim],
     )
     repeated = producer.model_request_receipt(
@@ -179,6 +181,7 @@ def main() -> int:
         seat=seat,
         lineage=lineage,
         model_request=request,
+        outbound_request_bytes=outbound_request_bytes,
         claims=[claim],
     )
     require(receipt == repeated, "producer output is not deterministic")
@@ -193,6 +196,16 @@ def main() -> int:
         == producer.canonical_sha256(receipt["model_request"]),
         "model request digest does not bind the exact request",
     )
+    require(
+        receipt["outbound_request_sha256"]
+        == producer.outbound_request_sha256(outbound_request_bytes),
+        "receipt does not bind the exact outbound request bytes",
+    )
+    require(
+        receipt["outbound_request_sha256"] == receipt["model_request_sha256"],
+        "canonical digest drifted from outbound bytes",
+    )
+    producer.verify_model_request_receipt_outbound(receipt, outbound_request_bytes)
     require(
         receipt["attachments"] == {"state": "none", "items": []},
         "no-attachment state is not explicit",
@@ -314,6 +327,9 @@ def main() -> int:
             seat=runtime_seat,
             lineage=runtime_lineage,
             model_request=runtime_request,
+            outbound_request_bytes=producer.encode_outbound_request_bytes(
+                runtime_request
+            ),
             claims=[runtime_claim],
         )
         require(
@@ -333,6 +349,7 @@ def main() -> int:
         seat=seat,
         lineage=lineage,
         model_request=changed_request,
+        outbound_request_bytes=producer.encode_outbound_request_bytes(changed_request),
         claims=[claim],
     )
     require(
@@ -351,6 +368,7 @@ def main() -> int:
         seat=seat,
         lineage=lineage,
         model_request=request,
+        outbound_request_bytes=outbound_request_bytes,
         claims=[changed_claim],
     )
     require(
@@ -366,6 +384,7 @@ def main() -> int:
             seat=seat,
             lineage=lineage,
             model_request=bad_request,
+            outbound_request_bytes=producer.encode_outbound_request_bytes(bad_request),
             claims=[claim],
         )
     except ValueError as exc:
@@ -385,12 +404,41 @@ def main() -> int:
             seat=seat,
             lineage=lineage,
             model_request=request,
+            outbound_request_bytes=outbound_request_bytes,
             claims=[attachment_claim],
         )
     except ValueError as exc:
         require("do not support attachments" in str(exc), "wrong attachment rejection")
     else:
         raise RuntimeError("unsupported attachment was accepted")
+
+    reconstructed_equivalent = json.dumps(request).encode("utf-8")
+    require(
+        reconstructed_equivalent != outbound_request_bytes,
+        "default JSON dumps already matched canonical outbound bytes",
+    )
+    try:
+        producer.model_request_receipt(
+            manifest=manifest,
+            seat=seat,
+            lineage=lineage,
+            model_request=request,
+            outbound_request_bytes=reconstructed_equivalent,
+            claims=[claim],
+        )
+    except ValueError as exc:
+        require("drifted" in str(exc), "equivalent reconstructed body was not fail-closed")
+    else:
+        raise RuntimeError("reconstructed equivalent outbound body was accepted")
+    try:
+        producer.verify_model_request_receipt_outbound(
+            receipt,
+            reconstructed_equivalent,
+        )
+    except ValueError:
+        pass
+    else:
+        raise RuntimeError("mutating outbound bytes did not invalidate the receipt")
 
     print(
         json.dumps(

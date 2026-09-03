@@ -23,6 +23,8 @@ from typing import Any
 
 import redis
 
+from outbound_request_codec import bind_outbound_request_bytes
+
 
 PROXY_URL = os.environ.get(
     "TAEY_SEAT_PROXY",
@@ -716,13 +718,26 @@ class ProxyClient:
         messages: list[dict[str, str]],
         response_format: dict[str, Any] | None = None,
         max_rounds: int | None = None,
+        outbound_request_bytes: bytes | None = None,
     ) -> ProxyResult:
         request_body = self.model_request_body(
             messages,
             response_format,
             max_rounds=max_rounds,
         )
-        body = json.dumps(request_body).encode("utf-8")
+        if outbound_request_bytes is None:
+            body = json.dumps(request_body).encode("utf-8")
+        else:
+            try:
+                body = bind_outbound_request_bytes(
+                    request_body,
+                    outbound_request_bytes,
+                )
+            except (TypeError, ValueError) as exc:
+                raise SeatFailure(
+                    f"outbound request bytes drifted from the encoded model request "
+                    f"for correlation={correlation_id}: {exc}"
+                ) from exc
         request = urllib.request.Request(
             PROXY_URL,
             data=body,
