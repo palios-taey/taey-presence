@@ -318,6 +318,173 @@ class BoundedToolRoundTests(unittest.TestCase):
                 self.assertNotIn("max_rounds", sent_body)
                 self.assertEqual(json.loads(response.body), final_payload)
 
+    def test_proxy_ceiling_default_is_production_finite_bound(self):
+        self.assertEqual(soma_proxy.PROXY_MAX_TOOL_ROUNDS, 32)
+        self.assertEqual(soma_proxy.load_proxy_max_tool_rounds("32"), 32)
+        self.assertEqual(soma_proxy.load_proxy_max_tool_rounds("1"), 1)
+        self.assertEqual(soma_proxy.load_proxy_max_tool_rounds(None), 32)
+        for invalid in ("", "0", "33", "16x", "2.0"):
+            with self.subTest(raw=invalid):
+                with self.assertRaises(ValueError):
+                    soma_proxy.load_proxy_max_tool_rounds(invalid)
+
+    def test_omitted_max_rounds_terminates_at_proxy_ceiling(self):
+        tool_payload = {
+            "choices": [{
+                "finish_reason": "tool_calls",
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [{
+                        "id": "call-1",
+                        "function": {
+                            "name": "search_isma",
+                            "arguments": '{"query":"bounded"}',
+                        },
+                    }],
+                },
+            }],
+            "usage": {"completion_tokens": 1},
+        }
+        final_payload = {
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {"role": "assistant", "content": '{"status":"ok"}'},
+            }],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 2},
+        }
+        ceiling = 3
+        responses = [
+            SimpleNamespace(status_code=200, json=lambda: tool_payload)
+            for _ in range(ceiling)
+        ] + [SimpleNamespace(status_code=200, json=lambda: final_payload)]
+        http = mock.AsyncMock()
+        http.post.side_effect = responses
+        body = {
+            "model": "ep3",
+            "messages": [{"role": "user", "content": "omitted ceiling"}],
+            "tools": [{
+                "type": "function",
+                "function": {"name": "search_isma"},
+            }],
+            "response_format": {"type": "json_schema"},
+        }
+        with mock.patch.object(
+            soma_proxy, "PROXY_MAX_TOOL_ROUNDS", ceiling
+        ), mock.patch.object(
+            soma_proxy, "inject_preamble", side_effect=lambda value: value
+        ), mock.patch.object(
+            soma_proxy, "_http", http
+        ), mock.patch.object(
+            soma_proxy,
+            "execute_tool_call_async",
+            new=mock.AsyncMock(return_value="evidence"),
+        ) as execute:
+            response = asyncio.run(
+                soma_proxy._chat_completions_for_turn(
+                    body,
+                    self._make_turn(),
+                    liveness_registered=False,
+                )
+            )
+        self.assertEqual(http.post.await_count, ceiling + 1)
+        self.assertEqual(execute.await_count, ceiling)
+        final_body = http.post.await_args_list[-1].kwargs["json"]
+        self.assertNotIn("tools", final_body)
+        self.assertEqual(final_body["tool_choice"], "none")
+        self.assertEqual(json.loads(response.body), final_payload)
+
+    def test_stream_omitted_max_rounds_terminates_at_proxy_ceiling(self):
+        tool_payload = {
+            "choices": [{
+                "finish_reason": "tool_calls",
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [{
+                        "id": "call-1",
+                        "function": {
+                            "name": "search_isma",
+                            "arguments": '{"query":"bounded"}',
+                        },
+                    }],
+                },
+            }],
+            "usage": {"completion_tokens": 1},
+        }
+        final_payload = {
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {"role": "assistant", "content": "stream-final"},
+            }],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 2},
+        }
+        ceiling = 3
+        responses = [
+            SimpleNamespace(status_code=200, json=lambda: tool_payload)
+            for _ in range(ceiling)
+        ] + [SimpleNamespace(status_code=200, json=lambda: final_payload)]
+        http = mock.AsyncMock()
+        http.post.side_effect = responses
+        body = {
+            "model": "ep3",
+            "stream": True,
+            "messages": [{"role": "user", "content": "omitted stream ceiling"}],
+            "tools": [{
+                "type": "function",
+                "function": {"name": "search_isma"},
+            }],
+        }
+        async def _run():
+            response = await soma_proxy._chat_completions_for_turn(
+                body,
+                self._make_turn(),
+                liveness_registered=False,
+            )
+            async for _chunk in response.body_iterator:
+                pass
+            return response
+
+        with mock.patch.object(
+            soma_proxy, "PROXY_MAX_TOOL_ROUNDS", ceiling
+        ), mock.patch.object(
+            soma_proxy, "inject_preamble", side_effect=lambda value: value
+        ), mock.patch.object(
+            soma_proxy, "_http", http
+        ), mock.patch.object(
+            soma_proxy,
+            "execute_tool_call_async",
+            new=mock.AsyncMock(return_value="evidence"),
+        ) as execute:
+            asyncio.run(_run())
+        self.assertEqual(http.post.await_count, ceiling + 1)
+        self.assertEqual(execute.await_count, ceiling)
+        last_probe = http.post.await_args_list[-1].kwargs["json"]
+        self.assertNotIn("tools", last_probe)
+        self.assertEqual(last_probe.get("tool_choice"), "none")
+
+    def test_caller_cannot_raise_above_proxy_ceiling(self):
+        turn = self._make_turn()
+        body = {
+            "model": "ep3",
+            "messages": [{"role": "user", "content": "raise"}],
+            "max_rounds": 16,
+        }
+        with mock.patch.object(soma_proxy, "PROXY_MAX_TOOL_ROUNDS", 8):
+            with self.assertRaises(HTTPException) as ctx:
+                asyncio.run(
+                    soma_proxy._chat_completions_for_turn(
+                        body,
+                        turn,
+                        liveness_registered=False,
+                    )
+                )
+        self.assertEqual(ctx.exception.status_code, 422)
+        self.assertEqual(
+            ctx.exception.detail,
+            "max_rounds must be an integer from 1 through 8",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

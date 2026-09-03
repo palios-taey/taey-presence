@@ -85,6 +85,39 @@ VLLM_HEALTH_CACHE_SECS = max(
     1.0,
     float(os.environ.get("VLLM_HEALTH_CACHE_SECS", "30")),
 )
+# Proxy-owned finite tool-round ceiling when max_rounds is omitted.
+#
+# Production journals for taey-soma-proxy-mira.service and
+# taey-worker-proxy.service (n=813, 2026-08-18..2026-09-03):
+#   p50=3, p90=32, p95=41, max=89; 81/813 turns (10%) exceeded 32.
+# The caller contract already documents 1..32. Omission used to mean
+# unbounded; that is the 42-round / 89-round class. The generic default
+# is that same 32, not council's max_rounds=2. Callers may only request
+# a stricter lower bound. Invalid env or caller values fail closed.
+#
+# Recompute: journalctl --user -u taey-soma-proxy-mira.service
+#   -u taey-worker-proxy.service --no-pager | rg -o '[0-9]+ tool rounds'
+def load_proxy_max_tool_rounds(raw: Optional[str] = None) -> int:
+    if raw is None:
+        raw = os.environ.get("SOMA_PROXY_MAX_TOOL_ROUNDS", "32")
+    if not isinstance(raw, str) or not raw.strip():
+        raise ValueError(
+            "SOMA_PROXY_MAX_TOOL_ROUNDS must be an integer from 1 through 32"
+        )
+    try:
+        value = int(raw.strip())
+    except ValueError as exc:
+        raise ValueError(
+            "SOMA_PROXY_MAX_TOOL_ROUNDS must be an integer from 1 through 32"
+        ) from exc
+    if not 1 <= value <= 32:
+        raise ValueError(
+            "SOMA_PROXY_MAX_TOOL_ROUNDS must be an integer from 1 through 32"
+        )
+    return value
+
+
+PROXY_MAX_TOOL_ROUNDS = load_proxy_max_tool_rounds()
 REDIS_HOST = os.environ.get("REDIS_HOST", "127.0.0.1")
 REDIS_PORT = int(os.environ.get("REDIS_PORT", "6379"))
 MIRA_REDIS_HOST = os.environ.get("MIRA_REDIS_HOST", "")
@@ -10466,16 +10499,23 @@ async def _chat_completions_for_turn(
     turn: TurnContext,
     liveness_registered: bool,
 ):
-    max_rounds = body.pop("max_rounds", None)
-    if max_rounds is not None and (
-        isinstance(max_rounds, bool)
-        or not isinstance(max_rounds, int)
-        or not 1 <= max_rounds <= 32
+    caller_max_rounds = body.pop("max_rounds", None)
+    if caller_max_rounds is None:
+        max_rounds = PROXY_MAX_TOOL_ROUNDS
+    elif (
+        isinstance(caller_max_rounds, bool)
+        or not isinstance(caller_max_rounds, int)
+        or not 1 <= caller_max_rounds <= PROXY_MAX_TOOL_ROUNDS
     ):
         raise HTTPException(
             status_code=422,
-            detail="max_rounds must be an integer from 1 through 32",
+            detail=(
+                "max_rounds must be an integer from 1 through "
+                f"{PROXY_MAX_TOOL_ROUNDS}"
+            ),
         )
+    else:
+        max_rounds = caller_max_rounds
     one_shot_spec = _private_transaction_spec_for_profile(turn.tool_profile)
 
     # Strip model field -- let vLLM use its loaded model
@@ -10767,6 +10807,9 @@ async def _chat_completions_for_turn(
                     "tool_call_id": tc.get("id", ""),
                     "content": result,
                 })
+            if rounds >= max_rounds:
+                body.pop("tools", None)
+                body["tool_choice"] = "none"
     if is_stream:
         async def stream_and_measure():
             context_token = _request_context.set(_turn_payload(turn))
@@ -10993,7 +11036,7 @@ async def _chat_completions_for_turn(
 
                 # Update body with extended messages for next round
                 body["messages"] = messages
-                if max_rounds is not None and round_num >= max_rounds:
+                if round_num >= max_rounds:
                     resp = await _final_answer()
                     result = resp.json()
                     total_tokens += result.get("usage", {}).get("completion_tokens", 0)

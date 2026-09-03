@@ -5,8 +5,10 @@ import ast
 import asyncio
 from copy import deepcopy
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Optional
 
 
 SERVING_ROOT = Path(__file__).resolve().parent
@@ -183,7 +185,21 @@ def handler_namespace(fake_http: FakeHTTP) -> dict[str, object]:
         "_turn_headers": lambda turn: {},
         "JSONResponse": FakeJSONResponse,
         "MAX_CONTEXT_TOKENS": 262144,
+        "os": os,
+        "Optional": Optional,
     }
+    loader = [
+        node
+        for node in ast.parse(
+            SOMA_PROXY.read_text(encoding="utf-8"), filename=str(SOMA_PROXY)
+        ).body
+        if isinstance(node, ast.FunctionDef) and node.name == "load_proxy_max_tool_rounds"
+    ]
+    require(len(loader) == 1, "load_proxy_max_tool_rounds is not one exact function")
+    loader_module = ast.Module(body=loader, type_ignores=[])
+    ast.fix_missing_locations(loader_module)
+    exec(compile(loader_module, str(SOMA_PROXY), "exec"), namespace)
+    namespace["PROXY_MAX_TOOL_ROUNDS"] = namespace["load_proxy_max_tool_rounds"]()
     node = source_function(SOMA_PROXY, "_chat_completions_for_turn")
     module = ast.Module(body=[node], type_ignores=[])
     ast.fix_missing_locations(module)
