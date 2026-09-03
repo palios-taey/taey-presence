@@ -122,6 +122,27 @@ if str(ROOT / "serving") not in sys.path:
     sys.path.insert(0, str(ROOT / "serving"))
 
 from serving import soma_proxy
+from serving.outbound_request_codec import (
+    bind_outbound_request_bytes,
+    encode_outbound_request_bytes,
+)
+
+
+def outbound_request_body(call) -> dict:
+    kwargs = call.kwargs
+    if "json" in kwargs:
+        raise AssertionError(
+            "upstream post reconstructed json= instead of exact content bytes"
+        )
+    content = kwargs.get("content")
+    if not isinstance(content, (bytes, bytearray)):
+        raise AssertionError("upstream post did not send exact content bytes")
+    outbound = bytes(content)
+    parsed = json.loads(outbound)
+    bind_outbound_request_bytes(parsed, outbound)
+    if outbound != encode_outbound_request_bytes(parsed):
+        raise AssertionError("upstream content bytes drifted from the soma_proxy codec")
+    return parsed
 
 
 class BoundedToolRoundTests(unittest.TestCase):
@@ -204,8 +225,8 @@ class BoundedToolRoundTests(unittest.TestCase):
 
         self.assertEqual(http.post.await_count, 3)
         self.assertEqual(execute.await_count, 2)
-        first_body = http.post.await_args_list[0].kwargs["json"]
-        final_body = http.post.await_args_list[2].kwargs["json"]
+        first_body = outbound_request_body(http.post.await_args_list[0])
+        final_body = outbound_request_body(http.post.await_args_list[2])
         self.assertNotIn("max_rounds", first_body)
         self.assertIn("tools", first_body)
         self.assertNotIn("tools", final_body)
@@ -314,7 +335,7 @@ class BoundedToolRoundTests(unittest.TestCase):
                         )
                     )
                 self.assertEqual(http.post.await_count, 1)
-                sent_body = http.post.await_args.kwargs["json"]
+                sent_body = outbound_request_body(http.post.await_args)
                 self.assertNotIn("max_rounds", sent_body)
                 self.assertEqual(json.loads(response.body), final_payload)
 
