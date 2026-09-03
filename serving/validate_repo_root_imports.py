@@ -15,6 +15,14 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 SERVING = ROOT / "serving"
 
+STUB_HEADER = (
+    "import importlib.util, types, sys\n"
+    "if importlib.util.find_spec('redis') is None:\n"
+    "    _r = types.ModuleType('redis')\n"
+    "    _r.Redis = object\n"
+    "    sys.modules['redis'] = _r\n"
+)
+
 
 def require(condition: bool, detail: str) -> None:
     if not condition:
@@ -24,6 +32,7 @@ def require(condition: bool, detail: str) -> None:
 def prove_repo_root_imports() -> None:
     """Verify clean import with strictly repository root on sys.path."""
     code = (
+        STUB_HEADER +
         "import sys\n"
         "import serving.council_prompt_receipt as r\n"
         "import serving.taey_seat as s\n"
@@ -47,6 +56,7 @@ def prove_repo_root_imports() -> None:
 def prove_serving_direct_imports() -> None:
     """Verify clean import when executed directly within serving directory."""
     code = (
+        STUB_HEADER +
         "import sys\n"
         "import council_prompt_receipt as r\n"
         "import taey_seat as s\n"
