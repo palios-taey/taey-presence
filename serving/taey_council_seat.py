@@ -491,18 +491,32 @@ def _validated_contribution(
             f"{lineage['prompt_revision']}"
         )
     status = contribution["status"]
-    if not isinstance(status, str) or not status.strip():
+    if (
+        not isinstance(status, str)
+        or not status.strip()
+        or len(status) > prompt_producer.CONTRIBUTION_STATUS_MAX_CHARS
+    ):
         raise executive.SeatFailure(
-            f"{RESPONSE_CONTRACT} status must be a non-empty string"
+            f"{RESPONSE_CONTRACT} status must be a non-empty string no longer than "
+            f"{prompt_producer.CONTRIBUTION_STATUS_MAX_CHARS} characters"
         )
     for field_name in CONTRIBUTION_LIST_FIELDS:
         values = contribution[field_name]
-        if not isinstance(values, list) or any(
-            not isinstance(value, str) or not value.strip() for value in values
+        if (
+            not isinstance(values, list)
+            or len(values) > prompt_producer.CONTRIBUTION_LIST_MAX_ITEMS
+            or any(
+                not isinstance(value, str)
+                or not value.strip()
+                or len(value) > prompt_producer.CONTRIBUTION_ITEM_MAX_CHARS
+                for value in values
+            )
         ):
             raise executive.SeatFailure(
                 f"{RESPONSE_CONTRACT} {field_name} must be an array "
-                "of non-empty strings"
+                f"of at most {prompt_producer.CONTRIBUTION_LIST_MAX_ITEMS} non-empty "
+                f"strings no longer than "
+                f"{prompt_producer.CONTRIBUTION_ITEM_MAX_CHARS} characters"
             )
     unregistered_evidence = sorted(
         set(contribution["evidence_refs"]) - set(lineage["evidence_registry"])
@@ -513,9 +527,16 @@ def _validated_contribution(
             f"{unregistered_evidence}"
         )
     recommendation = contribution["recommendation"]
-    if not isinstance(recommendation, str) or not recommendation.strip():
+    if (
+        not isinstance(recommendation, str)
+        or not recommendation.strip()
+        or len(recommendation)
+        > prompt_producer.CONTRIBUTION_RECOMMENDATION_MAX_CHARS
+    ):
         raise executive.SeatFailure(
-            f"{RESPONSE_CONTRACT} recommendation must be a non-empty string"
+            f"{RESPONSE_CONTRACT} recommendation must be a non-empty string no "
+            f"longer than "
+            f"{prompt_producer.CONTRIBUTION_RECOMMENDATION_MAX_CHARS} characters"
         )
     confidence = contribution["confidence"]
     if (
@@ -783,6 +804,8 @@ def _run_dcm_turn(
             messages=messages,
             response_format=contribution_format,
             max_rounds=prompt_producer.COUNCIL_MAX_TOOL_ROUNDS,
+            max_tokens=prompt_producer.COUNCIL_MAX_COMPLETION_TOKENS,
+            tool_profile=prompt_producer.COUNCIL_TOOL_PROFILE,
             outbound_request_bytes=outbound_request_bytes,
         )
         invoked["result"] = result
@@ -972,6 +995,7 @@ def _run_turn(
         messages,
         contribution_format,
         max_rounds=prompt_producer.COUNCIL_MAX_TOOL_ROUNDS,
+        max_tokens=prompt_producer.COUNCIL_MAX_COMPLETION_TOKENS,
     )
     outbound_request_bytes = prompt_producer.encode_outbound_request_bytes(
         model_request
@@ -1043,6 +1067,8 @@ def _run_turn(
             messages=messages,
             response_format=contribution_format,
             max_rounds=prompt_producer.COUNCIL_MAX_TOOL_ROUNDS,
+            max_tokens=prompt_producer.COUNCIL_MAX_COMPLETION_TOKENS,
+            tool_profile=prompt_producer.COUNCIL_TOOL_PROFILE,
         )
         inference_state = "completed_invalid"
         liveness.assert_healthy()

@@ -27,6 +27,8 @@ jobs:
         run: python3 serving/validate_greenhouse_ats_ui_profile.py
       - name: Prove council prompt/model-request receipt producer
         run: python3 serving/validate_council_prompt_receipt_producer.py
+      - name: Prove council inference budgets and mutation sensitivity
+        run: python3 serving/validate_council_budget_enforcement.py --prove-mutation-red
       - name: Prove outbound model-request bytes bind the receipt
         run: python3 serving/validate_outbound_request_receipt_bytes.py
       - name: Prove production-shaped repo-root and direct imports

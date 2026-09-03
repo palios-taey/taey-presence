@@ -144,6 +144,7 @@ def main() -> int:
         ],
         "chat_template_kwargs": {"enable_thinking": False},
         "max_rounds": producer.COUNCIL_MAX_TOOL_ROUNDS,
+        "max_tokens": producer.COUNCIL_MAX_COMPLETION_TOKENS,
         "response_format": producer.response_format(
             seat,
             lineage["prompt_revision"],
@@ -256,6 +257,73 @@ def prove_proxy_client_ask_binds_outbound_bytes() -> None:
         "chat_template_kwargs": {"enable_thinking": False},
     }
     mismatched_bytes = encode_outbound_request_bytes(mismatched_request)
+
+    def proxy_response(tool_profile: str):
+        response = mock.MagicMock()
+        response.read.return_value = json.dumps({
+            "choices": [{
+                "message": {"role": "assistant", "content": "ok"},
+                "finish_reason": "stop",
+            }],
+        }).encode("utf-8")
+        response.headers = {
+            "X-Taey-Turn-Id": "turn-1",
+            "X-Taey-Event-Id": "evt-1",
+            "X-Taey-Correlation-Id": "corr-1",
+            "X-Taey-Tool-Profile": tool_profile,
+        }
+        response.__enter__.return_value = response
+        return response
+
+    bounded_request = client.model_request_body(
+        messages,
+        max_rounds=producer.COUNCIL_MAX_TOOL_ROUNDS,
+        max_tokens=producer.COUNCIL_MAX_COMPLETION_TOKENS,
+    )
+    bounded_bytes = encode_outbound_request_bytes(bounded_request)
+    with mock.patch(
+        "urllib.request.urlopen",
+        return_value=proxy_response(producer.COUNCIL_TOOL_PROFILE),
+    ) as urlopen:
+        client.ask(
+            prompt="user query",
+            event_id="evt-1",
+            correlation_id="corr-1",
+            messages=messages,
+            max_rounds=producer.COUNCIL_MAX_TOOL_ROUNDS,
+            max_tokens=producer.COUNCIL_MAX_COMPLETION_TOKENS,
+            tool_profile=producer.COUNCIL_TOOL_PROFILE,
+            outbound_request_bytes=bounded_bytes,
+        )
+        sent = urlopen.call_args.args[0]
+        headers = {key.lower(): value for key, value in sent.header_items()}
+        require(
+            headers.get("x-taey-tool-profile") == producer.COUNCIL_TOOL_PROFILE,
+            "ProxyClient did not send the receipted council tool profile",
+        )
+
+    with mock.patch(
+        "urllib.request.urlopen",
+        return_value=proxy_response("full"),
+    ):
+        try:
+            client.ask(
+                prompt="user query",
+                event_id="evt-1",
+                correlation_id="corr-1",
+                messages=messages,
+                max_rounds=producer.COUNCIL_MAX_TOOL_ROUNDS,
+                max_tokens=producer.COUNCIL_MAX_COMPLETION_TOKENS,
+                tool_profile=producer.COUNCIL_TOOL_PROFILE,
+                outbound_request_bytes=bounded_bytes,
+            )
+        except taey_seat.SeatFailure as exc:
+            require(
+                "tool-profile mismatch" in str(exc),
+                f"unexpected tool-profile failure: {exc}",
+            )
+        else:
+            raise RuntimeError("ProxyClient accepted a mismatched tool-profile echo")
 
     with (
         mock.patch(

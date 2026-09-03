@@ -90,6 +90,26 @@ def main() -> int:
         == producer.canonical_sha256(static_receipt["prompt_contract"]),
         "static prompt contract digest is not canonical",
     )
+    renderer = static_receipt["prompt_contract"]["request_renderer"]
+    require(
+        renderer
+        == {
+            "contract": "openai-chat-completions-request/v1",
+            "message_order": ["system", "user"],
+            "chat_template_kwargs": {"enable_thinking": False},
+            "tool_profile": producer.COUNCIL_TOOL_PROFILE,
+            "max_rounds": producer.COUNCIL_MAX_TOOL_ROUNDS,
+            "max_tool_calls": producer.COUNCIL_MAX_TOOL_CALLS,
+            "max_search_results": producer.COUNCIL_MAX_SEARCH_RESULTS,
+            "max_tool_result_chars": producer.COUNCIL_MAX_TOOL_RESULT_CHARS,
+            "max_tool_result_total_chars": (
+                producer.COUNCIL_MAX_TOOL_RESULT_TOTAL_CHARS
+            ),
+            "max_completion_tokens": producer.COUNCIL_MAX_COMPLETION_TOKENS,
+            "attachments": {"state": "none", "items": []},
+        },
+        "static prompt contract does not bind the complete council budget",
+    )
 
     with tempfile.TemporaryDirectory() as manifest_temporary:
         manifest_root = Path(manifest_temporary)
@@ -165,6 +185,7 @@ def main() -> int:
         ],
         "chat_template_kwargs": {"enable_thinking": False},
         "max_rounds": producer.COUNCIL_MAX_TOOL_ROUNDS,
+        "max_tokens": producer.COUNCIL_MAX_COMPLETION_TOKENS,
         "response_format": response_format,
     }
     outbound_request_bytes = producer.encode_outbound_request_bytes(request)
@@ -209,6 +230,10 @@ def main() -> int:
     require(
         receipt["attachments"] == {"state": "none", "items": []},
         "no-attachment state is not explicit",
+    )
+    require(
+        receipt["tool_profile"] == producer.COUNCIL_TOOL_PROFILE,
+        "model request receipt does not bind the council tool profile",
     )
 
     with tempfile.TemporaryDirectory() as temporary:
@@ -321,6 +346,7 @@ def main() -> int:
             runtime_messages,
             runtime_format,
             max_rounds=producer.COUNCIL_MAX_TOOL_ROUNDS,
+            max_tokens=producer.COUNCIL_MAX_COMPLETION_TOKENS,
         )
         runtime_receipt = producer.model_request_receipt(
             manifest=runtime_manifest,

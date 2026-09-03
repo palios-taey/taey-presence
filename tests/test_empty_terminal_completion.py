@@ -67,6 +67,8 @@ class MissingTerminalAnswerTests(unittest.TestCase):
             seat_id="taey-main",
             event_id="event-empty",
             correlation_id="correlation-empty",
+            tool_profile=soma_proxy._FULL_TOOL_PROFILE,
+            proxy_namespace="taey",
             process_generation="generation",
             started_at=1.0,
         )

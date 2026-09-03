@@ -97,6 +97,7 @@ production status, which is exactly a new artifact commit.
     "serving/TAEY_LINKEDIN_JOBS_RESTORE_SYSTEM.md",
     "serving/TAEY_LINKEDIN_JOBS_SYSTEM.md",
     "serving/TAEY_OPERATING_PROMPT.md",
+    "serving/council_prompt_receipt.py",
     "serving/gates_manifest.json",
     "serving/soma_proxy.py",
     "serving/ui_drive.py"
@@ -186,6 +187,7 @@ production status, which is exactly a new artifact commit.
     "serving/seat_liveness.py",
     "serving/taey_council_seat.py",
     "serving/taey_seat.py",
+    "serving/validate_council_budget_enforcement.py",
     "serving/validate_council_prompt_receipt_producer.py",
     "serving/validate_outbound_request_receipt_bytes.py",
     "serving/validate_repo_root_imports.py",

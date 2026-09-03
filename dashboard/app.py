@@ -367,7 +367,9 @@ async def _synthesize_native_council(
         "Synthesize the decision-relevant result. Explicitly label missing or "
         "failed seats, material dissent, and unresolved uncertainty. Do not "
         "expose hidden chain-of-thought or claim execution that the packet "
-        "does not evidence."
+        "does not evidence. Be concise: state the decision, strongest evidence, "
+        "material dissent or uncertainty, and the next action without restating "
+        "every seat."
     )
     messages = [{"role": "user", "content": synthesis_request}]
     round_id = str(packet["round_id"])
@@ -377,6 +379,7 @@ async def _synthesize_native_council(
         "model": MODEL or "ep3",
         "messages": messages,
         "chat_template_kwargs": {"enable_thinking": False},
+        "max_tokens": 768,
         "tools": [],
     }
     headers = {
@@ -409,13 +412,10 @@ async def _synthesize_native_council(
             f"turn={proxy_turn_id!r}"
         )
     data = response.json()
-    answer = (
-        ((data.get("choices") or [{}])[0].get("message") or {}).get(
-            "content"
-        )
-        if isinstance(data, dict)
-        else None
-    )
+    choice = (data.get("choices") or [{}])[0] if isinstance(data, dict) else {}
+    if not isinstance(choice, dict) or choice.get("finish_reason") != "stop":
+        raise RuntimeError("council synthesis did not reach a terminal stop")
+    answer = (choice.get("message") or {}).get("content")
     if not isinstance(answer, str) or not answer.strip():
         raise RuntimeError("council synthesis returned no assistant content")
     return {
