@@ -693,6 +693,8 @@ class ProxyClient:
     def model_request_body(
         messages: list[dict[str, str]],
         response_format: dict[str, Any] | None = None,
+        *,
+        max_rounds: int | None = None,
     ) -> dict[str, Any]:
         request_body: dict[str, Any] = {
             "model": MODEL,
@@ -701,6 +703,8 @@ class ProxyClient:
         }
         if response_format is not None:
             request_body["response_format"] = response_format
+        if max_rounds is not None:
+            request_body["max_rounds"] = max_rounds
         return request_body
 
     def ask(
@@ -711,8 +715,13 @@ class ProxyClient:
         correlation_id: str,
         messages: list[dict[str, str]],
         response_format: dict[str, Any] | None = None,
+        max_rounds: int | None = None,
     ) -> ProxyResult:
-        request_body = self.model_request_body(messages, response_format)
+        request_body = self.model_request_body(
+            messages,
+            response_format,
+            max_rounds=max_rounds,
+        )
         body = json.dumps(request_body).encode("utf-8")
         request = urllib.request.Request(
             PROXY_URL,
