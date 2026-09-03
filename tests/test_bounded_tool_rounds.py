@@ -130,6 +130,27 @@ if str(ROOT / "serving") not in sys.path:
     sys.path.insert(0, str(ROOT / "serving"))
 
 from serving import soma_proxy
+from serving.outbound_request_codec import (
+    bind_outbound_request_bytes,
+    encode_outbound_request_bytes,
+)
+
+
+def outbound_request_body(call) -> dict:
+    kwargs = call.kwargs
+    if "json" in kwargs:
+        raise AssertionError(
+            "upstream post reconstructed json= instead of exact content bytes"
+        )
+    content = kwargs.get("content")
+    if not isinstance(content, (bytes, bytearray)):
+        raise AssertionError("upstream post did not send exact content bytes")
+    outbound = bytes(content)
+    parsed = json.loads(outbound)
+    bind_outbound_request_bytes(parsed, outbound)
+    if outbound != encode_outbound_request_bytes(parsed):
+        raise AssertionError("upstream content bytes drifted from the soma_proxy codec")
+    return parsed
 
 
 class BoundedToolRoundTests(unittest.TestCase):
@@ -160,7 +181,10 @@ class BoundedToolRoundTests(unittest.TestCase):
                 raise AssertionError(
                     f"Runaway loop detected: call_count={call_count} exceeded limit {max_calls}"
                 )
-            req_body = kwargs.get("json", {})
+            if "content" in kwargs:
+                req_body = json.loads(bytes(kwargs["content"]).decode("utf-8"))
+            else:
+                req_body = kwargs.get("json", {})
             if req_body.get("tool_choice") == "none" or "tools" not in req_body:
                 return SimpleNamespace(status_code=200, json=lambda: final_payload)
             return SimpleNamespace(status_code=200, json=lambda: tool_payload)
@@ -231,8 +255,8 @@ class BoundedToolRoundTests(unittest.TestCase):
         # Load-bearing assertions: exactly 2 tool calls executed + 1 final answer
         self.assertEqual(http.post.await_count, 3)
         self.assertEqual(execute.await_count, 2)
-        first_body = http.post.await_args_list[0].kwargs["json"]
-        final_body = http.post.await_args_list[2].kwargs["json"]
+        first_body = outbound_request_body(http.post.await_args_list[0])
+        final_body = outbound_request_body(http.post.await_args_list[2])
         self.assertNotIn("max_rounds", first_body)
         self.assertIn("tools", first_body)
         self.assertNotIn("tools", final_body)
@@ -347,7 +371,7 @@ class BoundedToolRoundTests(unittest.TestCase):
                         )
                     )
                 self.assertEqual(http.post.await_count, 1)
-                sent_body = http.post.await_args.kwargs["json"]
+                sent_body = outbound_request_body(http.post.await_args)
                 self.assertNotIn("max_rounds", sent_body)
                 self.assertEqual(json.loads(response.body), final_payload)
 
@@ -417,7 +441,7 @@ class BoundedToolRoundTests(unittest.TestCase):
         # Invariant: omission terminates at exactly ceiling rounds
         self.assertEqual(http.post.await_count, ceiling + 1)
         self.assertEqual(execute.await_count, ceiling)
-        final_body = http.post.await_args_list[-1].kwargs["json"]
+        final_body = outbound_request_body(http.post.await_args_list[-1])
         self.assertNotIn("tools", final_body)
         self.assertEqual(final_body["tool_choice"], "none")
         self.assertEqual(json.loads(response.body), final_payload)
@@ -500,7 +524,7 @@ class BoundedToolRoundTests(unittest.TestCase):
         # Invariant: stream path tool loop terminates at ceiling rounds
         self.assertEqual(http.post.await_count, ceiling + 1)
         self.assertEqual(execute.await_count, ceiling)
-        final_body = http.post.await_args_list[-1].kwargs["json"]
+        final_body = outbound_request_body(http.post.await_args_list[-1])
         self.assertNotIn("tools", final_body)
         self.assertEqual(final_body["tool_choice"], "none")
         self.assertGreater(len(chunks), 0)
@@ -571,7 +595,7 @@ class BoundedToolRoundTests(unittest.TestCase):
         # Invariant: caller request for 10 is clamped to ceiling 2
         self.assertEqual(http.post.await_count, ceiling + 1)
         self.assertEqual(execute.await_count, ceiling)
-        final_body = http.post.await_args_list[-1].kwargs["json"]
+        final_body = outbound_request_body(http.post.await_args_list[-1])
         self.assertNotIn("tools", final_body)
         self.assertEqual(final_body["tool_choice"], "none")
         self.assertEqual(json.loads(response.body), final_payload)

@@ -27,6 +27,8 @@ jobs:
         run: python3 serving/validate_greenhouse_ats_ui_profile.py
       - name: Prove council prompt/model-request receipt producer
         run: python3 serving/validate_council_prompt_receipt_producer.py
+      - name: Prove outbound model-request bytes bind the receipt
+        run: python3 serving/validate_outbound_request_receipt_bytes.py
       - name: Prove council recovery outcome anti-forgery contract
         run: python3 serving/validate_council_session_recovery_anti_forgery.py
       - name: Prove bounded tool rounds enforcement

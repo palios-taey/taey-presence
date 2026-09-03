@@ -27,6 +27,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
+from outbound_request_codec import (
+    bind_outbound_request_bytes,
+    encode_outbound_request_bytes,
+)
 from revenue_ui_contract import (
     SEMANTIC_OUTWARD,
     canonical_json_bytes,
@@ -9426,9 +9430,9 @@ async def _probe_vllm_generation() -> dict:
     }
     try:
         resp = await asyncio.wait_for(
-            _http.post(
-                "/v1/chat/completions",
-                json=body,
+            _post_vllm_chat_completions(
+                body,
+                headers={"Content-Type": "application/json"},
                 timeout=VLLM_HEALTH_PROBE_TIMEOUT_SECS,
             ),
             timeout=VLLM_HEALTH_PROBE_TIMEOUT_SECS,
@@ -10134,6 +10138,23 @@ def _upstream_headers(turn: TurnContext) -> dict[str, str]:
     }
 
 
+def encode_vllm_outbound_request_bytes(body: dict) -> bytes:
+    """Exact UTF-8 JSON bytes soma_proxy POSTs to vLLM chat completions."""
+    if not isinstance(body, dict):
+        raise ValueError("vLLM outbound request body must be an object")
+    outbound = encode_outbound_request_bytes(body)
+    return bind_outbound_request_bytes(json.loads(outbound), outbound)
+
+
+async def _post_vllm_chat_completions(body: dict, *, headers: dict, **kwargs):
+    return await _http.post(
+        "/v1/chat/completions",
+        content=encode_vllm_outbound_request_bytes(body),
+        headers=headers,
+        **kwargs,
+    )
+
+
 def _text_receipt(value: object) -> dict[str, object]:
     """Describe completion text without persisting the text itself."""
     import hashlib
@@ -10671,8 +10692,10 @@ async def _chat_completions_for_turn(
             # One stale socket should not fail a turn; the retry gets a fresh connection.
             for _attempt in (1, 2):
                 try:
-                    resp = await _http.post("/v1/chat/completions", json=probe,
-                                            headers=_upstream_headers(turn))
+                    resp = await _post_vllm_chat_completions(
+                        probe,
+                        headers=_upstream_headers(turn),
+                    )
                     break
                 except httpx.RemoteProtocolError:
                     if _attempt == 2:
@@ -10836,7 +10859,7 @@ async def _chat_completions_for_turn(
                     return
                 async with _http.stream(
                     "POST", "/v1/chat/completions",
-                    json=body,
+                    content=encode_vllm_outbound_request_bytes(body),
                     headers=_upstream_headers(turn),
                 ) as resp:
                     async for chunk in resp.aiter_bytes():
@@ -10907,16 +10930,14 @@ async def _chat_completions_for_turn(
                 final_body["tool_choice"] = "none"
                 if held_response_format is not None:
                     final_body["response_format"] = held_response_format
-                return await _http.post(
-                    "/v1/chat/completions",
-                    json=final_body,
+                return await _post_vllm_chat_completions(
+                    final_body,
                     headers=_upstream_headers(turn),
                 )
 
             while True:
-                resp = await _http.post(
-                    "/v1/chat/completions",
-                    json=body,
+                resp = await _post_vllm_chat_completions(
+                    body,
                     headers=_upstream_headers(turn),
                 )
                 result = resp.json()

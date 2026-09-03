@@ -9,12 +9,18 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from outbound_request_codec import (
+    bind_outbound_request_bytes,
+    encode_outbound_request_bytes,
+    outbound_request_sha256,
+)
+
 
 MANIFEST_CONTRACT = "taey-local-council-seats/v1"
 DCM_REQUEST_CONTRACT = "taey-native-dcm-request/v2"
 PROMPT_CONTRACT = "taey-council-prompt-contract/v2"
 MODEL_REQUEST_RECEIPT_CONTRACT = (
-    "taey-council-model-request-producer-receipt/v1"
+    "taey-council-model-request-producer-receipt/v2"
 )
 RESPONSE_CONTRACT = "taey-council-contribution/v1"
 ROLE_CONTRACT_REVISION = 1
@@ -72,13 +78,7 @@ class CouncilManifest:
 
 
 def canonical_json(value: Any) -> str:
-    return json.dumps(
-        value,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-        allow_nan=False,
-    )
+    return encode_outbound_request_bytes(value).decode("utf-8")
 
 
 def canonical_sha256(value: Any) -> str:
@@ -363,6 +363,7 @@ def model_request_receipt(
     seat: SeatConfig,
     lineage: dict[str, Any],
     model_request: dict[str, Any],
+    outbound_request_bytes: bytes,
     claims: list[Any],
 ) -> dict[str, Any]:
     if lineage.get("request_contract") != DCM_REQUEST_CONTRACT:
@@ -411,6 +412,11 @@ def model_request_receipt(
     )
     if model_request.get("response_format") != expected_response_format:
         raise ValueError("model request response_format differs from the rendered schema")
+    outbound = bind_outbound_request_bytes(model_request, outbound_request_bytes)
+    object_digest = canonical_sha256(model_request)
+    byte_digest = outbound_request_sha256(outbound)
+    if object_digest != byte_digest:
+        raise ValueError("canonical model-request digest drifted from outbound bytes")
     evidence = [
         {
             "position": index,
@@ -443,6 +449,31 @@ def model_request_receipt(
         "attachments_sha256": canonical_sha256(attachment_state),
         "response_format_sha256": canonical_sha256(expected_response_format),
         "model_request": model_request,
-        "model_request_sha256": canonical_sha256(model_request),
+        "model_request_sha256": object_digest,
+        "outbound_request_sha256": byte_digest,
     }
     return {**body, "receipt_sha256": canonical_sha256(body)}
+
+
+def verify_model_request_receipt_outbound(
+    receipt: dict[str, Any],
+    outbound_request_bytes: bytes,
+) -> bytes:
+    if not isinstance(receipt, dict):
+        raise ValueError("model request receipt must be an object")
+    if receipt.get("contract") != MODEL_REQUEST_RECEIPT_CONTRACT:
+        raise ValueError("model request receipt contract is unsupported")
+    outbound = bind_outbound_request_bytes(
+        receipt.get("model_request"),
+        outbound_request_bytes,
+    )
+    if receipt.get("outbound_request_sha256") != outbound_request_sha256(outbound):
+        raise ValueError("receipt does not bind these outbound request bytes")
+    if receipt.get("model_request_sha256") != canonical_sha256(receipt["model_request"]):
+        raise ValueError("receipt model-request digest does not match the request object")
+    if receipt.get("model_request_sha256") != receipt.get("outbound_request_sha256"):
+        raise ValueError("receipt canonical digest drifted from outbound bytes")
+    unsigned = {key: value for key, value in receipt.items() if key != "receipt_sha256"}
+    if receipt.get("receipt_sha256") != canonical_sha256(unsigned):
+        raise ValueError("receipt digest does not verify")
+    return outbound

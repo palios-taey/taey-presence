@@ -8,6 +8,11 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+from outbound_request_codec import (
+    bind_outbound_request_bytes,
+    encode_outbound_request_bytes,
+)
+
 
 SERVING_ROOT = Path(__file__).resolve().parent
 SOMA_PROXY = SERVING_ROOT / "soma_proxy.py"
@@ -18,15 +23,25 @@ def require(condition: bool, message: str) -> None:
         raise AssertionError(message)
 
 
-def source_function(path: Path, name: str) -> ast.AsyncFunctionDef:
+def source_function(
+    path: Path, name: str
+) -> ast.FunctionDef | ast.AsyncFunctionDef:
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     matches = [
         node
         for node in tree.body
-        if isinstance(node, ast.AsyncFunctionDef) and node.name == name
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name == name
     ]
-    require(len(matches) == 1, f"{name} is not one exact async function")
+    require(len(matches) == 1, f"{name} is not one exact function")
     return matches[0]
+
+
+def exec_source_function(path: Path, name: str, namespace: dict[str, object]) -> None:
+    node = source_function(path, name)
+    module = ast.Module(body=[node], type_ignores=[])
+    ast.fix_missing_locations(module)
+    exec(compile(module, str(path), "exec"), namespace)
 
 
 def extract_constant(path: Path, name: str) -> object:
@@ -80,10 +95,32 @@ class FakeHTTP:
         self.payloads = list(payloads)
         self.requests: list[dict] = []
 
-    async def post(self, path: str, *, json: dict, headers: dict) -> FakeResponse:
+    async def post(
+        self,
+        path: str,
+        *,
+        content: bytes,
+        headers: dict,
+        **kwargs,
+    ) -> FakeResponse:
         require(path == "/v1/chat/completions", "unexpected upstream path")
+        require(
+            "json" not in kwargs,
+            "upstream post reconstructed json= instead of exact content bytes",
+        )
+        require(
+            isinstance(content, (bytes, bytearray)),
+            "upstream post did not send exact content bytes",
+        )
+        outbound = bytes(content)
+        parsed = json.loads(outbound)
+        bind_outbound_request_bytes(parsed, outbound)
+        require(
+            outbound == encode_outbound_request_bytes(parsed),
+            "upstream content bytes drifted from the soma_proxy codec",
+        )
         require(bool(headers.get("X-Request-Id")), "upstream lineage header missing")
-        self.requests.append(deepcopy(json))
+        self.requests.append(deepcopy(parsed))
         require(bool(self.payloads), "unexpected extra upstream request")
         return FakeResponse(self.payloads.pop(0))
 
@@ -213,11 +250,20 @@ def handler_namespace(fake_http: FakeHTTP) -> dict[str, object]:
         "JSONResponse": FakeJSONResponse,
         "MAX_CONTEXT_TOKENS": 262144,
         "DEFAULT_MAX_TOOL_ROUNDS": extract_constant(SOMA_PROXY, "DEFAULT_MAX_TOOL_ROUNDS"),
+        "encode_outbound_request_bytes": encode_outbound_request_bytes,
+        "bind_outbound_request_bytes": bind_outbound_request_bytes,
     }
-    node = source_function(SOMA_PROXY, "_chat_completions_for_turn")
-    module = ast.Module(body=[node], type_ignores=[])
-    ast.fix_missing_locations(module)
-    exec(compile(module, str(SOMA_PROXY), "exec"), namespace)
+    exec_source_function(SOMA_PROXY, "encode_vllm_outbound_request_bytes", namespace)
+    exec_source_function(SOMA_PROXY, "_post_vllm_chat_completions", namespace)
+    exec_source_function(SOMA_PROXY, "_chat_completions_for_turn", namespace)
+    require(
+        callable(namespace.get("encode_vllm_outbound_request_bytes")),
+        "soma_proxy outbound encoder was not loaded",
+    )
+    require(
+        callable(namespace.get("_post_vllm_chat_completions")),
+        "soma_proxy outbound post helper was not loaded",
+    )
     return namespace
 
 
