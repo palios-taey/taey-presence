@@ -12,13 +12,8 @@ name: knowledge-index
 
 on:
   pull_request:
-    paths:
-      - 'serving/**'
-      - '.github/workflows/knowledge-index.yml'
   push:
     branches: [main]
-    paths:
-      - 'serving/**'
 
 jobs:
   index-contract:

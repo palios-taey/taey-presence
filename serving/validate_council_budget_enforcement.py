@@ -29,7 +29,6 @@ STRUCTURED_OUTPUTS_DECLARATION = (
 STRUCTURED_OUTPUTS_PREFLIGHT = (
     "'${ROOT}/serving/vllm_serve.sh' --validate-structured-outputs-config"
 )
-INDEX_WORKFLOW_SERVING_TRIGGER = "      - 'serving/**'"
 
 
 if importlib.util.find_spec("redis") is None:
@@ -238,15 +237,23 @@ def validate_index_workflow_trigger(workflow: str | None = None) -> None:
         workflow = (
             REPO_ROOT / ".github/workflows/knowledge-index.yml"
         ).read_text(encoding="utf-8")
-    pull_request_block, separator, push_block = workflow.partition("\n  push:")
+    _, on_separator, after_on = workflow.partition("\non:\n")
+    trigger_block, jobs_separator, _ = after_on.partition("\njobs:\n")
+    require(
+        on_separator and jobs_separator,
+        "knowledge-index workflow has no bounded trigger block",
+    )
+    pull_request_block, separator, push_block = trigger_block.partition("\n  push:")
     require(separator, "knowledge-index workflow has no push trigger")
     require(
-        INDEX_WORKFLOW_SERVING_TRIGGER in pull_request_block,
-        "knowledge-index pull_request trigger does not cover serving artifact sources",
+        re.search(r"(?m)^  pull_request:\s*$", pull_request_block) is not None
+        and re.search(r"(?m)^    paths:\s*$", pull_request_block) is None,
+        "knowledge-index pull_request trigger must run without path filtering",
     )
     require(
-        INDEX_WORKFLOW_SERVING_TRIGGER in push_block,
-        "knowledge-index main-push trigger does not cover serving artifact sources",
+        re.search(r"(?m)^    branches: \[main\]\s*$", push_block) is not None
+        and re.search(r"(?m)^    paths:\s*$", push_block) is None,
+        "knowledge-index main-push trigger must run without path filtering",
     )
 
 
@@ -1092,24 +1099,24 @@ def prove_mutation_red() -> list[str]:
         REPO_ROOT / ".github/workflows/knowledge-index.yml"
     ).read_text(encoding="utf-8")
     _expect_red(
-        "index-workflow-pr-serving-trigger",
+        "index-workflow-pr-unfiltered",
         lambda: validate_index_workflow_trigger(
             workflow.replace(
-                INDEX_WORKFLOW_SERVING_TRIGGER,
-                "      - 'serving/knowledge_index/**'",
+                "  pull_request:\n",
+                "  pull_request:\n    paths:\n      - 'serving/**'\n",
                 1,
             )
         ),
         caught,
     )
-    before_push, trigger, after_push = workflow.rpartition(
-        INDEX_WORKFLOW_SERVING_TRIGGER
-    )
-    require(trigger, "knowledge-index workflow has no serving trigger to mutate")
     _expect_red(
-        "index-workflow-push-serving-trigger",
+        "index-workflow-main-push-unfiltered",
         lambda: validate_index_workflow_trigger(
-            before_push + "      - 'serving/knowledge_index/**'" + after_push
+            workflow.replace(
+                "    branches: [main]\n",
+                "    branches: [main]\n    paths:\n      - 'serving/**'\n",
+                1,
+            )
         ),
         caught,
     )
