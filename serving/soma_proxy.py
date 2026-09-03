@@ -91,11 +91,13 @@ VLLM_HEALTH_CACHE_SECS = max(
 #   - p50 (median): 3.0 rounds
 #   - p90: 32.0 rounds, p95: 41.0 rounds, p99: 48.0 rounds, max: 89 rounds
 #   - Count > 16 rounds: 118 / 812 turns (14.53%)
-#     (82 UI chat observation loops, 26 file exploration loops, 10 legacy unbounded loops)
 # Reproducible command:
 #   journalctl --user -u taey-soma-proxy-mira.service -u taey-worker-proxy.service --no-pager | grep -E "(\d+)\s+tool rounds"
-# Generic ceiling defaults to 16 rounds. Strict startup validation requires 1 <= SOMA_PROXY_MAX_TOOL_ROUNDS <= 32.
-# Callers may lower this bound (e.g. council seats require max_rounds=2), but cannot raise it above the ceiling.
+# Setting the generic ceiling to 16 rounds is a conservative operator-selected safety tradeoff motivated
+# by observed 28-round / 900s failure modes. In the sampled window, this forces final-answer mode for the
+# upper 14.53% of turns; it remains configurable via SOMA_PROXY_MAX_TOOL_ROUNDS (strict 1..32 startup validation)
+# subject to controlled production observation. Callers may lower this bound (e.g. council seats require
+# max_rounds=2), but cannot raise it above the ceiling.
 def _resolve_default_max_tool_rounds(raw: Optional[str] = None) -> int:
     if raw is None:
         raw = os.environ.get("SOMA_PROXY_MAX_TOOL_ROUNDS", "16")
