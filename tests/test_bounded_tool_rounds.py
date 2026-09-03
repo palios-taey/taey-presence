@@ -17,29 +17,83 @@ if importlib.util.find_spec("fastapi") is None:
             self.detail = detail
             super().__init__(f"{status_code}: {detail}")
 
+    class _StubApp:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def on_event(self, *args, **kwargs):
+            return lambda fn: fn
+
+        def get(self, *args, **kwargs):
+            return lambda fn: fn
+
+        def post(self, *args, **kwargs):
+            return lambda fn: fn
+
+        def middleware(self, *args, **kwargs):
+            return lambda fn: fn
+
+        def add_middleware(self, *args, **kwargs):
+            pass
+
+    class _StubRequest:
+        def __init__(self, *args, **kwargs):
+            pass
+
     fastapi_stub.HTTPException = HTTPException
-    fastapi_stub.FastAPI = object
-    fastapi_stub.Request = object
+    fastapi_stub.FastAPI = _StubApp
+    fastapi_stub.Request = _StubRequest
+
     fastapi_responses = ModuleType("fastapi.responses")
-    fastapi_responses.StreamingResponse = object
-    fastapi_responses.JSONResponse = object
+
+    class _StubResponse:
+        def __init__(self, content=None, *args, **kwargs):
+            self.content = content
+            self.body = content if isinstance(content, (bytes, str)) else json.dumps(content) if content is not None else ""
+            self.status_code = kwargs.get("status_code", 200)
+
+    fastapi_responses.StreamingResponse = _StubResponse
+    fastapi_responses.JSONResponse = _StubResponse
+
     sys.modules["fastapi"] = fastapi_stub
     sys.modules["fastapi.responses"] = fastapi_responses
 else:
     from fastapi import HTTPException
 
 if importlib.util.find_spec("httpx") is None:
-    sys.modules["httpx"] = ModuleType("httpx")
+    httpx_stub = ModuleType("httpx")
+
+    class _StubAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+    httpx_stub.AsyncClient = _StubAsyncClient
+    httpx_stub.Response = object
+    sys.modules["httpx"] = httpx_stub
 
 if importlib.util.find_spec("redis") is None:
     redis_stub = ModuleType("redis")
-    redis_stub.Redis = object
+
+    class _StubRedis:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        @classmethod
+        def from_url(cls, *args, **kwargs):
+            return cls()
+
+    redis_stub.Redis = _StubRedis
     sys.modules["redis"] = redis_stub
 
 if importlib.util.find_spec("starlette") is None or importlib.util.find_spec("starlette.background") is None:
     starlette_stub = ModuleType("starlette")
     starlette_bg = ModuleType("starlette.background")
-    starlette_bg.BackgroundTask = object
+
+    class _StubBackgroundTask:
+        def __init__(self, *args, **kwargs):
+            pass
+
+    starlette_bg.BackgroundTask = _StubBackgroundTask
     sys.modules["starlette"] = starlette_stub
     sys.modules["starlette.background"] = starlette_bg
 
