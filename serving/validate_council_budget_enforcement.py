@@ -8,6 +8,7 @@ import copy
 import hashlib
 import importlib.util
 import json
+import re
 import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -131,6 +132,10 @@ READ_TOOLS = {
     "retrieve_document",
     "search_isma",
 }
+NUMERIC_COMPLETION_BUDGET = re.compile(
+    r"\b\d[\d_,]*-token completion budget\b",
+    re.IGNORECASE,
+)
 
 
 def require(condition: bool, detail: str) -> None:
@@ -174,6 +179,16 @@ def validate_contract_values() -> None:
         "council search schema is not bound to one through three results",
     )
     manifest = producer.load_manifest(ROOT / "council_seats.json")
+    for seat in manifest.seats:
+        model_prompt = producer.system_message(seat)["content"]
+        require(
+            "runtime-issued completion budget" in model_prompt,
+            f"{seat.seat_id} lost the runtime-issued completion-budget instruction",
+        )
+        require(
+            NUMERIC_COMPLETION_BUDGET.search(model_prompt) is None,
+            f"{seat.seat_id} model prompt duplicates a numeric completion budget",
+        )
     properties = producer.response_format(
         manifest.seats[0], 1, ["fleet_message:budget-gate"]
     )["json_schema"]["schema"]["properties"]
@@ -772,6 +787,26 @@ def prove_mutation_red() -> list[str]:
         _expect_red("cumulative-byte-limit", validate_council_chat_path, caught)
     with mock.patch.object(producer, "COUNCIL_MAX_COMPLETION_TOKENS", 1_501):
         _expect_red("seat-completion-limit", validate_council_chat_path, caught)
+    original_system_message = producer.system_message
+
+    def numeric_budget_prompt(seat):
+        message = original_system_message(seat)
+        message["content"] = message["content"].replace(
+            "runtime-issued completion budget",
+            "512-token completion budget",
+        )
+        return message
+
+    with mock.patch.object(
+        producer,
+        "system_message",
+        side_effect=numeric_budget_prompt,
+    ):
+        _expect_red(
+            "prompt-numeric-completion-budget",
+            validate_contract_values,
+            caught,
+        )
     with mock.patch.object(
         council_runtime,
         "_validated_contribution",
