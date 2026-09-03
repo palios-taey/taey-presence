@@ -1331,6 +1331,47 @@ class NativeCouncilTransport:
             contribution = contributions[0]["structured_content"]
             ok = True
             error = None
+            inference_state = "completed"
+        elif (
+            wave.get("session_status") == "failed"
+            and wave.get("status") == "closed"
+            and wave.get("close_outcome") == "session_failed"
+            and receipt.get("terminal_outcome") == "session_failed"
+            and slot.get("state") in {"pending", "claimed"}
+            and (
+                (
+                    slot.get("state") == "pending"
+                    and receipt.get("inference_performed") is False
+                    and receipt.get("inference_state") == "not_started"
+                )
+                or (
+                    slot.get("state") == "claimed"
+                    and receipt.get("inference_performed") is None
+                    and receipt.get("inference_state") == "side_effect_uncertain"
+                )
+            )
+            and slot.get("contrib_id") is None
+            and slot.get("outcome_record") is None
+            and wave.get("session_failure") is not None
+            and receipt.get("session_failure_sha256")
+            == (wave.get("session_failure") or {}).get("terminal_failure_sha256")
+            and receipt.get("session_failure_sha256")
+            == wave.get("session_failure_sha256")
+            and receipt.get("failure_stage") == "session_failed"
+            and receipt.get("failure_detail_sha256")
+            == (wave.get("session_failure") or {}).get("failure_detail_sha256")
+            and receipt.get("contrib_id") is None
+            and receipt.get("contribution_receipt_sha256") is None
+        ):
+            graph_receipt_sha256 = wave["session_failure_sha256"]
+            contribution = None
+            ok = False
+            error = f"DCM session failed in graph with {receipt.get('failure_stage')}"
+            inference_state = (
+                "not_started"
+                if slot.get("state") == "pending"
+                else "side_effect_uncertain"
+            )
         else:
             outcome_record = slot.get("outcome_record")
             if (
@@ -1356,6 +1397,11 @@ class NativeCouncilTransport:
                 f"DCM request ended as {receipt.get('terminal_outcome')} at "
                 f"{receipt.get('failure_stage')}"
             )
+            inference_state = (
+                "failed"
+                if outcome_record.get("inference_performed") is True
+                else "not_started"
+            )
         expected_acknowledgement = prompt_producer.canonical_sha256(
             {
                 "delivery_id": request["delivery_id"],
@@ -1380,13 +1426,7 @@ class NativeCouncilTransport:
                 if ok
                 else f"dcm_{receipt['terminal_outcome']}"
             ),
-            "inference_state": (
-                "completed"
-                if ok
-                else "failed"
-                if receipt["inference_performed"]
-                else "not_started"
-            ),
+            "inference_state": inference_state,
             "dcm_transport_receipt": receipt,
         }
 

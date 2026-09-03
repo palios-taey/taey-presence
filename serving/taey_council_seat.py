@@ -681,9 +681,25 @@ def _run_dcm_turn(
                     f"{receipt['terminal_outcome']}"
                 ),
                 kind="dcm_graph_terminal_failure",
-                skipped_inference=not receipt["inference_performed"],
+                skipped_inference=(
+                    True
+                    if (
+                        receipt.get("terminal_outcome") == "session_failed"
+                        and receipt.get("inference_state") == "not_started"
+                    )
+                    or receipt.get("inference_performed") is False
+                    else False
+                ),
                 inference_state=(
-                    "failed" if receipt["inference_performed"] else "not_started"
+                    receipt.get("inference_state")
+                    if receipt.get("terminal_outcome") == "session_failed"
+                    and receipt.get("inference_state")
+                    in {"not_started", "side_effect_uncertain"}
+                    else "completed"
+                    if receipt.get("terminal_outcome") == "contributed"
+                    else "failed"
+                    if receipt.get("inference_performed") is True
+                    else "not_started"
                 ),
                 dcm_transport_receipt=receipt,
                 context_visible=False,
@@ -1380,9 +1396,25 @@ class CouncilReliableInbox(executive.ReliableInbox):
                     recovered_by_process_generation=PROCESS_GENERATION,
                     kind="dcm_dead_generation_terminal",
                     dcm_transport_receipt=receipt,
-                    skipped_inference=not receipt["inference_performed"],
+                    skipped_inference=(
+                        True
+                        if (
+                            receipt.get("terminal_outcome") == "session_failed"
+                            and receipt.get("inference_state") == "not_started"
+                        )
+                        or receipt.get("inference_performed") is False
+                        else False
+                    ),
                     inference_state=(
-                        "failed" if receipt["inference_performed"] else "not_started"
+                        receipt.get("inference_state")
+                        if receipt.get("terminal_outcome") == "session_failed"
+                        and receipt.get("inference_state")
+                        in {"not_started", "side_effect_uncertain"}
+                        else "completed"
+                        if receipt.get("terminal_outcome") == "contributed"
+                        else "failed"
+                        if receipt.get("inference_performed") is True
+                        else "not_started"
                     ),
                     error=(
                         f"graph recovery closed request as "
