@@ -125,7 +125,7 @@ OUTPUT_EXPECTED = {
     "evidence_chars": 175,
     "recommendation_chars": 192,
     "prompt_revision": 2_147_483_647,
-    "canonical_response_bytes": 1_350,
+    "structured_response_bytes": 1_350,
     "terminal_token_allowance": 1,
 }
 READ_TOOLS = {
@@ -172,7 +172,9 @@ def validate_contract_values() -> None:
         "evidence_chars": producer.CONTRIBUTION_EVIDENCE_MAX_CHARS,
         "recommendation_chars": producer.CONTRIBUTION_RECOMMENDATION_MAX_CHARS,
         "prompt_revision": producer.CONTRIBUTION_MAX_PROMPT_REVISION,
-        "canonical_response_bytes": producer.COUNCIL_MAX_CANONICAL_RESPONSE_BYTES,
+        "structured_response_bytes": (
+            producer.COUNCIL_MAX_STRUCTURED_RESPONSE_BYTES
+        ),
         "terminal_token_allowance": (
             producer.COUNCIL_COMPLETION_TERMINAL_TOKEN_ALLOWANCE
         ),
@@ -263,13 +265,15 @@ def validate_contract_values() -> None:
         "recommendation": "W" * producer.CONTRIBUTION_RECOMMENDATION_MAX_CHARS,
         "confidence": 0.25,
     }
-    maximal_bytes = producer.encode_outbound_request_bytes(maximal_contribution)
+    maximal_structured_bytes = json.dumps(maximal_contribution).encode("utf-8")
     require(
-        len(maximal_bytes) <= producer.COUNCIL_MAX_CANONICAL_RESPONSE_BYTES
-        and producer.COUNCIL_MAX_CANONICAL_RESPONSE_BYTES
+        len(maximal_structured_bytes)
+        <= producer.COUNCIL_MAX_STRUCTURED_RESPONSE_BYTES
+        and producer.COUNCIL_MAX_STRUCTURED_RESPONSE_BYTES
         + producer.COUNCIL_COMPLETION_TERMINAL_TOKEN_ALLOWANCE
         < producer.COUNCIL_MAX_COMPLETION_TOKENS,
-        f"canonical response envelope is not bounded: {len(maximal_bytes)} bytes",
+        "structured response envelope is not bounded: "
+        f"{len(maximal_structured_bytes)} bytes",
     )
     launcher = (ROOT / "vllm_serve.sh").read_text(encoding="utf-8")
     require(
