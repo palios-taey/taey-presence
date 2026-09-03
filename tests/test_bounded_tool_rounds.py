@@ -318,6 +318,161 @@ class BoundedToolRoundTests(unittest.TestCase):
                 self.assertNotIn("max_rounds", sent_body)
                 self.assertEqual(json.loads(response.body), final_payload)
 
+    def test_omitted_max_rounds_terminates_at_default_proxy_ceiling(self):
+        tool_payload = {
+            "choices": [{
+                "finish_reason": "tool_calls",
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [{
+                        "id": "call-1",
+                        "function": {
+                            "name": "search_isma",
+                            "arguments": '{"query":"omitted"}',
+                        },
+                    }],
+                },
+            }],
+            "usage": {"completion_tokens": 1},
+        }
+        final_payload = {
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {"role": "assistant", "content": '{"status":"ceiling_reached"}'},
+            }],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 2},
+        }
+        # Test with ceiling = 3: 3 tool rounds + 1 forced final answer
+        ceiling = 3
+        responses = [SimpleNamespace(status_code=200, json=lambda: tool_payload)] * ceiling + [
+            SimpleNamespace(status_code=200, json=lambda: final_payload)
+        ]
+        http = mock.AsyncMock()
+        http.post.side_effect = responses
+        turn = self._make_turn()
+        body = {
+            "model": "ep3",
+            "messages": [{"role": "user", "content": "omitted max_rounds"}],
+            "tools": [{
+                "type": "function",
+                "function": {"name": "search_isma"},
+            }],
+        }
+        # max_rounds is omitted from body
+
+        with mock.patch.object(
+            soma_proxy,
+            "DEFAULT_MAX_TOOL_ROUNDS",
+            ceiling,
+        ), mock.patch.object(
+            soma_proxy,
+            "inject_preamble",
+            side_effect=lambda value: value,
+        ), mock.patch.object(
+            soma_proxy,
+            "_http",
+            http,
+        ), mock.patch.object(
+            soma_proxy,
+            "execute_tool_call_async",
+            new=mock.AsyncMock(return_value="evidence"),
+        ) as execute:
+            response = asyncio.run(
+                soma_proxy._chat_completions_for_turn(
+                    body,
+                    turn,
+                    liveness_registered=False,
+                )
+            )
+
+        self.assertEqual(http.post.await_count, ceiling + 1)
+        self.assertEqual(execute.await_count, ceiling)
+        final_body = http.post.await_args_list[-1].kwargs["json"]
+        self.assertNotIn("tools", final_body)
+        self.assertEqual(final_body["tool_choice"], "none")
+        self.assertEqual(json.loads(response.body), final_payload)
+
+    def test_caller_cannot_raise_max_rounds_above_proxy_ceiling(self):
+        tool_payload = {
+            "choices": [{
+                "finish_reason": "tool_calls",
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [{
+                        "id": "call-1",
+                        "function": {
+                            "name": "search_isma",
+                            "arguments": '{"query":"bypass"}',
+                        },
+                    }],
+                },
+            }],
+            "usage": {"completion_tokens": 1},
+        }
+        final_payload = {
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {"role": "assistant", "content": '{"status":"clamped"}'},
+            }],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 2},
+        }
+        # Proxy ceiling is 2; caller requests 10 -> effective is clamped to 2
+        ceiling = 2
+        responses = [SimpleNamespace(status_code=200, json=lambda: tool_payload)] * ceiling + [
+            SimpleNamespace(status_code=200, json=lambda: final_payload)
+        ]
+        http = mock.AsyncMock()
+        http.post.side_effect = responses
+        turn = self._make_turn()
+        body = {
+            "model": "ep3",
+            "messages": [{"role": "user", "content": "caller tries higher bound"}],
+            "tools": [{
+                "type": "function",
+                "function": {"name": "search_isma"},
+            }],
+            "max_rounds": 10,
+        }
+
+        with mock.patch.object(
+            soma_proxy,
+            "DEFAULT_MAX_TOOL_ROUNDS",
+            ceiling,
+        ), mock.patch.object(
+            soma_proxy,
+            "inject_preamble",
+            side_effect=lambda value: value,
+        ), mock.patch.object(
+            soma_proxy,
+            "_http",
+            http,
+        ), mock.patch.object(
+            soma_proxy,
+            "execute_tool_call_async",
+            new=mock.AsyncMock(return_value="evidence"),
+        ) as execute:
+            response = asyncio.run(
+                soma_proxy._chat_completions_for_turn(
+                    body,
+                    turn,
+                    liveness_registered=False,
+                )
+            )
+
+        self.assertEqual(http.post.await_count, ceiling + 1)
+        self.assertEqual(execute.await_count, ceiling)
+        final_body = http.post.await_args_list[-1].kwargs["json"]
+        self.assertNotIn("tools", final_body)
+        self.assertEqual(final_body["tool_choice"], "none")
+        self.assertEqual(json.loads(response.body), final_payload)
+
+    def test_default_ceiling_constant_value_and_headroom(self):
+        self.assertEqual(soma_proxy.DEFAULT_MAX_TOOL_ROUNDS, 16)
+        self.assertGreater(soma_proxy.DEFAULT_MAX_TOOL_ROUNDS, 2)  # Higher than council=2
+        self.assertLess(soma_proxy.DEFAULT_MAX_TOOL_ROUNDS, 28)    # Lower than 28-round hang
+
 
 if __name__ == "__main__":
     unittest.main()
