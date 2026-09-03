@@ -42,7 +42,12 @@ if [ "${1:-}" = "--validate-structured-outputs-config" ]; then
     --network none \
     --entrypoint /opt/venv/bin/python \
     "${VLLM_IMAGE}" \
-    -c 'import json, sys; from vllm.config import StructuredOutputsConfig; config = StructuredOutputsConfig(**json.loads(sys.argv[1])); assert config.backend == "xgrammar" and config.disable_any_whitespace is True; print(json.dumps({"backend": config.backend, "disable_any_whitespace": config.disable_any_whitespace}, sort_keys=True))' \
+    -c 'import json, sys
+from vllm.config import StructuredOutputsConfig
+config = StructuredOutputsConfig(**json.loads(sys.argv[1]))
+if config.backend != "xgrammar" or config.disable_any_whitespace is not True:
+    raise SystemExit("structured-output config must use backend=xgrammar with disable_any_whitespace=true")
+print(json.dumps({"backend": config.backend, "disable_any_whitespace": config.disable_any_whitespace}, sort_keys=True))' \
     "${STRUCTURED_OUTPUTS_CONFIG}"
   trap - EXIT INT TERM
   exit 0

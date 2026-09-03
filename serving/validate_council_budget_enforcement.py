@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import ast
 import asyncio
 import copy
 import hashlib
@@ -30,6 +29,7 @@ STRUCTURED_OUTPUTS_DECLARATION = (
 STRUCTURED_OUTPUTS_PREFLIGHT = (
     "'${ROOT}/serving/vllm_serve.sh' --validate-structured-outputs-config"
 )
+INDEX_WORKFLOW_SERVING_TRIGGER = "      - 'serving/**'"
 
 
 if importlib.util.find_spec("redis") is None:
@@ -193,8 +193,9 @@ def validate_launcher_contract(launcher: str, deployer: str) -> None:
     require(
         "--validate-structured-outputs-config" in launcher
         and "from vllm.config import StructuredOutputsConfig" in launcher
-        and 'config.backend == "xgrammar"' in launcher
-        and "config.disable_any_whitespace is True" in launcher
+        and 'if config.backend != "xgrammar"' in launcher
+        and "config.disable_any_whitespace is not True" in launcher
+        and "raise SystemExit(" in launcher
         and '--structured-outputs-config "${STRUCTURED_OUTPUTS_CONFIG}"' in launcher,
         "vLLM launcher does not parse and enforce its effective structured-output semantics",
     )
@@ -206,8 +207,8 @@ def validate_launcher_contract(launcher: str, deployer: str) -> None:
     )
 
 
-def validate_structured_output_callers() -> None:
-    callers: set[str] = set()
+def validate_repo_local_structured_output_sources() -> None:
+    sources_with_literal: set[str] = set()
     for source in REPO_ROOT.rglob("*.py"):
         relative = source.relative_to(REPO_ROOT)
         if (
@@ -216,17 +217,36 @@ def validate_structured_output_callers() -> None:
             or ".git" in relative.parts
         ):
             continue
-        tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(relative))
-        if any(
-            isinstance(node, ast.Call)
-            and any(keyword.arg == "response_format" for keyword in node.keywords)
-            for node in ast.walk(tree)
-        ):
-            callers.add(str(relative))
+        if "response_format" in source.read_text(encoding="utf-8"):
+            sources_with_literal.add(str(relative))
     require(
-        callers == {"serving/taey_council_seat.py"},
-        "non-council production response_format callers reached the xgrammar-pinned endpoint: "
-        f"{sorted(callers)}",
+        sources_with_literal
+        == {
+            "serving/council_prompt_receipt.py",
+            "serving/soma_proxy.py",
+            "serving/taey_council_seat.py",
+            "serving/taey_seat.py",
+        },
+        "taey-presence repo-local committed production Python sources containing the "
+        "literal response_format drifted from the receipt, council, request-builder, "
+        f"and proxy paths: {sorted(sources_with_literal)}",
+    )
+
+
+def validate_index_workflow_trigger(workflow: str | None = None) -> None:
+    if workflow is None:
+        workflow = (
+            REPO_ROOT / ".github/workflows/knowledge-index.yml"
+        ).read_text(encoding="utf-8")
+    pull_request_block, separator, push_block = workflow.partition("\n  push:")
+    require(separator, "knowledge-index workflow has no push trigger")
+    require(
+        INDEX_WORKFLOW_SERVING_TRIGGER in pull_request_block,
+        "knowledge-index pull_request trigger does not cover serving artifact sources",
+    )
+    require(
+        INDEX_WORKFLOW_SERVING_TRIGGER in push_block,
+        "knowledge-index main-push trigger does not cover serving artifact sources",
     )
 
 
@@ -346,7 +366,8 @@ def validate_contract_values() -> None:
     launcher = (ROOT / "vllm_serve.sh").read_text(encoding="utf-8")
     deployer = (ROOT / "deploy_thor.sh").read_text(encoding="utf-8")
     validate_launcher_contract(launcher, deployer)
-    validate_structured_output_callers()
+    validate_repo_local_structured_output_sources()
+    validate_index_workflow_trigger()
     require(
         "ghcr.io/nvidia-ai-iot/vllm@sha256:"
         "b587dd56b4cb076209ad5156a626ac75f5a976d0e8e7d1e6a9fccd56d1bd65e8"
@@ -1064,6 +1085,31 @@ def prove_mutation_red() -> list[str]:
         lambda: validate_launcher_contract(
             launcher,
             deployer.replace(STRUCTURED_OUTPUTS_PREFLIGHT, "missing-runtime-gate"),
+        ),
+        caught,
+    )
+    workflow = (
+        REPO_ROOT / ".github/workflows/knowledge-index.yml"
+    ).read_text(encoding="utf-8")
+    _expect_red(
+        "index-workflow-pr-serving-trigger",
+        lambda: validate_index_workflow_trigger(
+            workflow.replace(
+                INDEX_WORKFLOW_SERVING_TRIGGER,
+                "      - 'serving/knowledge_index/**'",
+                1,
+            )
+        ),
+        caught,
+    )
+    before_push, trigger, after_push = workflow.rpartition(
+        INDEX_WORKFLOW_SERVING_TRIGGER
+    )
+    require(trigger, "knowledge-index workflow has no serving trigger to mutate")
+    _expect_red(
+        "index-workflow-push-serving-trigger",
+        lambda: validate_index_workflow_trigger(
+            before_push + "      - 'serving/knowledge_index/**'" + after_push
         ),
         caught,
     )

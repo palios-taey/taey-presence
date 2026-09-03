@@ -13,18 +13,12 @@ name: knowledge-index
 on:
   pull_request:
     paths:
-      - 'serving/knowledge_index/**'
-      - 'serving/manifests/**'
-      - 'serving/receipts/**'
-      - 'serving/validate_presence.sh'
+      - 'serving/**'
       - '.github/workflows/knowledge-index.yml'
   push:
     branches: [main]
     paths:
-      - 'serving/knowledge_index/**'
-      - 'serving/manifests/**'
-      - 'serving/receipts/**'
-      - 'serving/validate_presence.sh'
+      - 'serving/**'
 
 jobs:
   index-contract:
