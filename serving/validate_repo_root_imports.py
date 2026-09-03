@@ -4,12 +4,15 @@
 This gate proves that modules under serving/ and dashboard/ can be cleanly imported
 when only the repository root is on PYTHONPATH (matching production systemd service execution
 such as taey-dashboard.service), as well as when executed directly from the serving/ directory.
+It also proves that package-context selection is deterministic (no broad try/except swallowing)
+and isolated from shadow modules on sys.path.
 """
 from __future__ import annotations
 
 import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -36,9 +39,11 @@ def prove_repo_root_imports() -> None:
         "import sys\n"
         "import serving.council_prompt_receipt as r\n"
         "import serving.taey_seat as s\n"
+        "import serving.soma_proxy as sp\n"
         "from dashboard import native_council\n"
         "assert r.bind_outbound_request_bytes is not None\n"
-        "print('PASS: repo-root imports successful')\n"
+        "assert sp.DEFAULT_MAX_TOOL_ROUNDS is not None\n"
+        "print('PASS: repo-root package imports successful')\n"
     )
     res = subprocess.run(
         [sys.executable, "-c", code],
@@ -60,7 +65,9 @@ def prove_serving_direct_imports() -> None:
         "import sys\n"
         "import council_prompt_receipt as r\n"
         "import taey_seat as s\n"
+        "import soma_proxy as sp\n"
         "assert r.bind_outbound_request_bytes is not None\n"
+        "assert sp.DEFAULT_MAX_TOOL_ROUNDS is not None\n"
         "print('PASS: serving-direct imports successful')\n"
     )
     res = subprocess.run(
@@ -74,6 +81,59 @@ def prove_serving_direct_imports() -> None:
         res.returncode == 0,
         f"Serving-direct import failed:\nSTDOUT:\n{res.stdout}\nSTDERR:\n{res.stderr}",
     )
+
+
+def prove_shadow_module_isolation_in_package_context() -> None:
+    """Prove package-context relative imports do not bind shadow modules on sys.path."""
+    with tempfile.TemporaryDirectory() as td:
+        shadow_codec = Path(td) / "outbound_request_codec.py"
+        shadow_codec.write_text("IS_SHADOW = True\nraise RuntimeError('SHADOW_CODEC_EXECUTED')\n")
+
+        code = (
+            STUB_HEADER +
+            "import serving.council_prompt_receipt as r\n"
+            "assert not hasattr(r, 'IS_SHADOW')\n"
+            "print('PASS: shadow module isolated')\n"
+        )
+        res = subprocess.run(
+            [sys.executable, "-c", code],
+            cwd=str(ROOT),
+            env={"PYTHONPATH": f"{td}:{str(ROOT)}", "PATH": os.environ.get("PATH", "")},
+            capture_output=True,
+            text=True,
+        )
+        require(
+            res.returncode == 0 and "SHADOW_CODEC_EXECUTED" not in res.stderr,
+            f"Package-context import bound shadow module on sys.path:\n{res.stderr}",
+        )
+
+
+def prove_transitive_import_error_not_masked() -> None:
+    """Prove transitive import errors in submodules propagate faithfully without broad try/except masking."""
+    with tempfile.TemporaryDirectory() as td:
+        pkg = Path(td) / "testpkg"
+        pkg.mkdir()
+        (pkg / "__init__.py").write_text("")
+        (pkg / "submod.py").write_text("raise ImportError('CANNOT_IMPORT_INNER_CANARY')\n")
+        (pkg / "consumer.py").write_text(
+            "if __package__:\n"
+            "    from .submod import *\n"
+            "else:\n"
+            "    from submod import *\n"
+        )
+
+        code = "import testpkg.consumer"
+        res = subprocess.run(
+            [sys.executable, "-c", code],
+            cwd=td,
+            env={"PYTHONPATH": td, "PATH": os.environ.get("PATH", "")},
+            capture_output=True,
+            text=True,
+        )
+        require(
+            res.returncode != 0 and "CANNOT_IMPORT_INNER_CANARY" in res.stderr,
+            f"Transitive ImportError was masked:\n{res.stderr}",
+        )
 
 
 def prove_unnamespaced_import_fails_red_without_serving_path() -> None:
@@ -95,8 +155,10 @@ def prove_unnamespaced_import_fails_red_without_serving_path() -> None:
 def main() -> int:
     prove_repo_root_imports()
     prove_serving_direct_imports()
+    prove_shadow_module_isolation_in_package_context()
+    prove_transitive_import_error_not_masked()
     prove_unnamespaced_import_fails_red_without_serving_path()
-    print("PASS: production-shaped repo-root and direct imports verified")
+    print("PASS: production-shaped repo-root and direct imports verified (deterministic package-context)")
     return 0
 
 
