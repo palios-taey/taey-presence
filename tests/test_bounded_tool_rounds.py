@@ -581,6 +581,34 @@ class BoundedToolRoundTests(unittest.TestCase):
         self.assertGreater(soma_proxy.DEFAULT_MAX_TOOL_ROUNDS, 2)  # Higher than council=2
         self.assertLess(soma_proxy.DEFAULT_MAX_TOOL_ROUNDS, 28)    # Lower than 28-round hang
 
+    def test_default_max_tool_rounds_env_validation(self):
+        # Valid cases
+        self.assertEqual(soma_proxy._resolve_default_max_tool_rounds(None), 16)
+        self.assertEqual(soma_proxy._resolve_default_max_tool_rounds("1"), 1)
+        self.assertEqual(soma_proxy._resolve_default_max_tool_rounds("16"), 16)
+        self.assertEqual(soma_proxy._resolve_default_max_tool_rounds("32"), 32)
+
+        # Malformed / non-int strings
+        for malformed in ("invalid", "1.5", "", " ", "True", "False", "None"):
+            with self.subTest(malformed=malformed):
+                with self.assertRaises(ValueError) as ctx:
+                    soma_proxy._resolve_default_max_tool_rounds(malformed)
+                self.assertIn("must be an integer from 1 through 32", str(ctx.exception))
+
+        # Low values (< 1)
+        for low_val in ("0", "-1", "-10", "-100"):
+            with self.subTest(low_val=low_val):
+                with self.assertRaises(ValueError) as ctx:
+                    soma_proxy._resolve_default_max_tool_rounds(low_val)
+                self.assertIn("must be an integer from 1 through 32", str(ctx.exception))
+
+        # High values (> 32)
+        for high_val in ("33", "34", "100", "1000"):
+            with self.subTest(high_val=high_val):
+                with self.assertRaises(ValueError) as ctx:
+                    soma_proxy._resolve_default_max_tool_rounds(high_val)
+                self.assertIn("must be an integer from 1 through 32", str(ctx.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

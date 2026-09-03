@@ -31,18 +31,27 @@ def source_function(path: Path, name: str) -> ast.AsyncFunctionDef:
 
 def extract_constant(path: Path, name: str) -> object:
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    for node in tree.body:
+    for idx, node in enumerate(tree.body):
         if isinstance(node, ast.Assign):
             for target in node.targets:
                 if isinstance(target, ast.Name) and target.id == name:
+                    helpers = [n for n in tree.body[:idx] if isinstance(n, ast.FunctionDef)]
                     ns = {}
                     exec(
                         compile(
-                            ast.Module(body=[node], type_ignores=[]),
+                            ast.Module(body=[*helpers, node], type_ignores=[]),
                             str(path),
                             "exec",
                         ),
-                        {"os": __import__("os"), "max": max, "min": min, "int": int},
+                        {
+                            "os": __import__("os"),
+                            "max": max,
+                            "min": min,
+                            "int": int,
+                            "Optional": __import__("typing").Optional,
+                            "TypeError": TypeError,
+                            "ValueError": ValueError,
+                        },
                         ns,
                     )
                     return ns[name]
