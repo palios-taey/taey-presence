@@ -290,7 +290,7 @@ def exercise_council_chat(
     original_result = tool_result or ("evidence-" + ("🌍" * 2_000))
     tool_payload = {
         "choices": [{
-            "finish_reason": "tool_calls",
+            "finish_reason": "stop",
             "message": {
                 "role": "assistant",
                 "content": None,

@@ -11149,9 +11149,8 @@ async def _chat_completions_for_turn(
                 total_tokens += usage.get("completion_tokens", 0)
 
                 choice = result.get("choices", [{}])[0]
-                message = choice.get("message", {})
-                finish_reason = choice.get("finish_reason", "")
-                tool_calls = message.get("tool_calls", [])
+                message = choice.get("message", {}) or {}
+                tool_calls = message.get("tool_calls") or []
 
                 if one_shot_spec is not None and (
                     len(tool_calls) != 1
@@ -11166,10 +11165,7 @@ async def _chat_completions_for_turn(
                         },
                     )
 
-                if not tool_calls or (
-                    one_shot_spec is None
-                    and finish_reason != "tool_calls"
-                ):
+                if not tool_calls:
                     # No tool calls -- final response. If a schema was held aside for the tool
                     # rounds, the answer the caller contracted for has not been produced yet.
                     if held_response_format is not None:
