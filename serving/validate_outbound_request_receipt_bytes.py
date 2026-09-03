@@ -8,8 +8,17 @@ body cannot keep a receipt valid.
 from __future__ import annotations
 
 import ast
+import importlib.util
 import json
+import sys
 from pathlib import Path
+from types import ModuleType
+from unittest import mock
+
+if "redis" not in sys.modules and importlib.util.find_spec("redis") is None:
+    redis_stub = ModuleType("redis")
+    redis_stub.Redis = mock.MagicMock
+    sys.modules["redis"] = redis_stub
 
 import council_prompt_receipt as producer
 from outbound_request_codec import (
