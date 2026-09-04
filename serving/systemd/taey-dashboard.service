@@ -11,12 +11,11 @@ Environment=PYTHONUNBUFFERED=1
 EnvironmentFile=@TAEY_ROOT@/.env
 Environment=REDIS_HOST=127.0.0.1
 Environment=REDIS_PORT=6379
-# Wave window sized from measurement, not hope: on 2026-08-11 a 7-seat wave took
-# 11-21 min sharing the MAIN serve; with seats on the worker proxy (Thor2) and the
-# bounded-contribution rule in council_prompts/shared.md, minutes — 900 s is the
-# honest ceiling until bounded waves are re-measured. The previous 180 s window
-# closed zero rounds ever: every seat delivered after the round was declared dead.
-Environment=TAEY_COUNCIL_WAVE_TIMEOUT=900
+# Wave window sized from measurement, not hope: a one-seat context-memory wave
+# completed successfully in 1808.664 s on the worker proxy on 2026-09-02, after
+# the 900 s coordinator deadline had already terminalized it. One hour preserves
+# a finite bound while allowing that measured production workload to return.
+Environment=TAEY_COUNCIL_WAVE_TIMEOUT=3600
 # Synthesis + dashboard health target the MAIN soma proxy. Unset, THOR_PROXY
 # falls back to CHAT_BASE (localhost:8000 — a dead port on this host): the
 # council's synthesis step ConnectError'd there on the FIRST round ever to
